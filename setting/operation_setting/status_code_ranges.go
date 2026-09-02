@@ -34,7 +34,8 @@ var alwaysSkipRetryStatusCodes = map[int]struct{}{
 }
 
 var alwaysSkipRetryCodes = map[types.ErrorCode]struct{}{
-	types.ErrorCodeBadResponseBody: {},
+	types.ErrorCodeBadResponseBody:             {},
+	types.ErrorCodeSessionBlockedByCyberPolicy: {},
 }
 
 func AutomaticDisableStatusCodesToString() string {
@@ -78,6 +79,11 @@ func IsAlwaysSkipRetryCode(errorCode types.ErrorCode) bool {
 }
 
 func ShouldRetryByStatusCode(code int) bool {
+	// Cloudflare 524 is opt-in for synchronous relays. Task relays continue to
+	// use IsAlwaysSkipRetryStatusCode to avoid duplicate task creation.
+	if code == 524 {
+		return shouldMatchStatusCodeRanges(AutomaticRetryStatusCodeRanges, code)
+	}
 	if IsAlwaysSkipRetryStatusCode(code) {
 		return false
 	}

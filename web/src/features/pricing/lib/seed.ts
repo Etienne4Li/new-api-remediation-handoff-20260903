@@ -17,16 +17,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 // ----------------------------------------------------------------------------
-// Deterministic seeding helpers
+// Deprecated test-only seeding helpers
 // ----------------------------------------------------------------------------
 //
-// These utilities are used to generate stable, repeatable mock metrics for
-// model details (latency, throughput, uptime, app rankings) until the
-// backend ships real values. Seeding the PRNG from the model name (and
-// optionally the group name) ensures the same model always renders the same
-// numbers, instead of jittering on every render.
+// These helpers are retained for isolated tests and legacy direct imports.
+// They must not be used to synthesize user-facing or production metrics.
+// Production performance, uptime, and usage values must come from the
+// backend; keeping this module out of the pricing barrel prevents accidental
+// use in runtime feature code.
 
-/** djb2-inspired string hash → non-negative 31-bit integer. */
+/**
+ * @deprecated Test-only compatibility helper. Do not use for production data.
+ * djb2-inspired string hash -> non-negative 31-bit integer.
+ */
 export function hashStringToSeed(input: string): number {
   let hash = 5381
   for (let i = 0; i < input.length; i++) {
@@ -35,7 +38,10 @@ export function hashStringToSeed(input: string): number {
   return Math.abs(hash | 0)
 }
 
-/** Linear-congruential generator producing pseudo-random numbers in [0, 1). */
+/**
+ * @deprecated Test-only compatibility helper. Do not use for production data.
+ * Linear-congruential generator producing pseudo-random numbers in [0, 1).
+ */
 export function seededRandom(seed: number): () => number {
   let state = (seed || 1) >>> 0
   return () => {
@@ -44,7 +50,10 @@ export function seededRandom(seed: number): () => number {
   }
 }
 
-/** Pick a number in [min, max] from a seeded PRNG. */
+/**
+ * @deprecated Test-only compatibility helper. Do not use for production data.
+ * Pick a number in [min, max] from a seeded PRNG.
+ */
 export function randomInRange(
   rand: () => number,
   min: number,
@@ -53,7 +62,10 @@ export function randomInRange(
   return min + rand() * (max - min)
 }
 
-/** Pick an integer in [min, max] (inclusive) from a seeded PRNG. */
+/**
+ * @deprecated Test-only compatibility helper. Do not use for production data.
+ * Pick an integer in [min, max] (inclusive) from a seeded PRNG.
+ */
 export function randomIntInRange(
   rand: () => number,
   min: number,

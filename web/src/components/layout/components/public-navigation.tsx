@@ -16,12 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Link } from '@tanstack/react-router'
+import { Link, useRouterState } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 
+import { useStatus } from '@/hooks/use-status'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
 import { cn } from '@/lib/utils'
 
 import { defaultTopNavLinks } from '../config/top-nav.config'
+import { isNavPathActive } from '../lib/url-utils'
 import type { TopNavLink } from '../types'
 
 interface PublicNavigationProps {
@@ -37,49 +40,65 @@ interface PublicNavigationProps {
 }
 
 /**
- * Public navigation component that matches Launch UI template styling
- * Used in PublicHeader for desktop navigation
+ * Neutral public navigation used by the public shell.
  */
 export function PublicNavigation({
   links: providedLinks,
   className,
 }: PublicNavigationProps = {}) {
+  const { t } = useTranslation()
   // Use the same logic as AppHeader: prioritize dynamic links from backend
   const dynamicLinks = useTopNavLinks()
+  const { status: statusSnapshot } = useStatus()
   const defaultLinks = providedLinks || defaultTopNavLinks
-  const links = dynamicLinks.length > 0 ? dynamicLinks : defaultLinks
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  })
+  const links =
+    dynamicLinks.length > 0 || statusSnapshot !== null
+      ? dynamicLinks
+      : defaultLinks
 
   return (
-    <nav className={cn('hidden items-center gap-1 md:flex', className)}>
-      {links.map((link, index) => {
+    <nav className={cn('hidden items-center gap-0.5 md:flex', className)}>
+      {links.map((link) => {
+        const isActive =
+          link.isActive ??
+          (!link.external && isNavPathActive(pathname, link.href))
+
         // Handle external links
         if (link.external) {
           return (
             <a
-              key={index}
+              key={`${link.title}-${link.href}`}
               href={link.href}
               target='_blank'
               rel='noopener noreferrer'
+              aria-current={isActive ? 'page' : undefined}
               className={cn(
-                'text-muted-foreground hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground inline-flex h-9 w-max items-center justify-center rounded-md bg-transparent px-4 py-2 text-sm font-medium transition-colors focus:outline-none',
+                'text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground focus-visible:ring-foreground/20 inline-flex h-8 w-max items-center justify-center rounded-none bg-transparent px-2.5 py-0 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none',
+                isActive &&
+                  'bg-foreground/[0.065] text-foreground font-semibold',
                 link.disabled && 'pointer-events-none opacity-50'
               )}
             >
-              {link.title}
+              {t(link.title)}
             </a>
           )
         }
         // Handle internal links
         return (
           <Link
-            key={index}
+            key={`${link.title}-${link.href}`}
             to={link.href}
+            aria-current={isActive ? 'page' : undefined}
             className={cn(
-              'text-muted-foreground hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground inline-flex h-9 w-max items-center justify-center rounded-md bg-transparent px-4 py-2 text-sm font-medium transition-colors focus:outline-none',
+              'text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground focus-visible:ring-foreground/20 inline-flex h-8 w-max items-center justify-center rounded-none bg-transparent px-2.5 py-0 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none',
+              isActive && 'bg-foreground/[0.065] text-foreground font-semibold',
               link.disabled && 'pointer-events-none opacity-50'
             )}
           >
-            {link.title}
+            {t(link.title)}
           </Link>
         )
       })}

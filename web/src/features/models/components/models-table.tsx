@@ -181,10 +181,12 @@ export function ModelsTable() {
     {
       label: `${t('All Vendors')}${vendorCounts?.all ? ` (${vendorCounts.all})` : ''}`,
       value: 'all',
+      translateLabel: false,
     },
     ...vendorOptions.map((option) => ({
       label: `${option.label}${vendorCounts?.[option.value] ? ` (${vendorCounts[option.value]})` : ''}`,
       value: option.value,
+      translateLabel: false,
     })),
   ]
 

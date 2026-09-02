@@ -1,10 +1,221 @@
 package oaichat
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"regexp"
+	"strings"
+
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 )
+
+var (
+	geminiMarkdownImagePattern = regexp.MustCompile(`(?i)!\[[^\]]*\]\((data:image/[^;()\s]+;base64,[^)\s]+)\)`)
+	geminiDataImagePattern     = regexp.MustCompile(`(?i)data:image/[^;,\s]+;base64,[A-Za-z0-9+/=_-]+`)
+)
+
+const maxGeminiInlineImageBytes = 20 << 20
+
+type openAIImageOutput struct {
+	Type      string          `json:"type,omitempty"`
+	ImageURL  json.RawMessage `json:"image_url,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	B64JSON   string          `json:"b64_json,omitempty"`
+	MimeType  string          `json:"mime_type,omitempty"`
+	MimeType2 string          `json:"mimeType,omitempty"`
+}
+
+type openAIImageURL struct {
+	URL       string `json:"url,omitempty"`
+	MimeType  string `json:"mime_type,omitempty"`
+	MimeType2 string `json:"mimeType,omitempty"`
+}
+
+func parseGeminiImageDataURL(value string) (*dto.GeminiInlineData, bool) {
+	value = strings.TrimSpace(value)
+	lowerValue := strings.ToLower(value)
+	if !strings.HasPrefix(lowerValue, "data:image/") {
+		return nil, false
+	}
+	comma := strings.IndexByte(value, ',')
+	if comma < 0 || !strings.HasSuffix(lowerValue[:comma], ";base64") || comma == len(value)-1 {
+		return nil, false
+	}
+	header := lowerValue[len("data:"):comma]
+	semicolon := strings.IndexByte(header, ';')
+	if semicolon <= 0 {
+		return nil, false
+	}
+	mimeType := header[:semicolon]
+	if !isSupportedGeminiImageMimeType(mimeType) {
+		return nil, false
+	}
+	imageData := value[comma+1:]
+	if !isValidGeminiImageBase64(imageData) {
+		return nil, false
+	}
+	return &dto.GeminiInlineData{MimeType: mimeType, Data: imageData}, true
+}
+
+func isSupportedGeminiImageMimeType(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/png", "image/jpeg", "image/webp", "image/gif", "image/avif":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidGeminiImageBase64(value string) bool {
+	decodedLength := base64.StdEncoding.DecodedLen(len(value))
+	if decodedLength == 0 || decodedLength > maxGeminiInlineImageBytes {
+		return false
+	}
+	decoded := make([]byte, decodedLength)
+	n, err := base64.StdEncoding.Strict().Decode(decoded, []byte(value))
+	return err == nil && n > 0 && n <= maxGeminiInlineImageBytes
+}
+
+func appendGeminiImageReference(parts *[]dto.GeminiPart, value string, mimeType string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if inlineData, ok := parseGeminiImageDataURL(value); ok {
+		*parts = append(*parts, dto.GeminiPart{InlineData: inlineData})
+		return true
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		*parts = append(*parts, dto.GeminiPart{FileData: &dto.GeminiFileData{
+			MimeType: mimeType,
+			FileUri:  value,
+		}})
+		return true
+	}
+	if isSupportedGeminiImageMimeType(mimeType) && isValidGeminiImageBase64(value) {
+		*parts = append(*parts, dto.GeminiPart{InlineData: &dto.GeminiInlineData{
+			MimeType: strings.ToLower(strings.TrimSpace(mimeType)),
+			Data:     value,
+		}})
+		return true
+	}
+	return false
+}
+
+func appendGeminiTextAndImages(parts *[]dto.GeminiPart, text string) {
+	if text == "" {
+		return
+	}
+	matches := geminiMarkdownImagePattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		rawMatches := geminiDataImagePattern.FindAllStringIndex(text, -1)
+		if len(rawMatches) == 0 {
+			*parts = append(*parts, dto.GeminiPart{Text: text})
+			return
+		}
+		cursor := 0
+		for _, match := range rawMatches {
+			if prefix := text[cursor:match[0]]; prefix != "" {
+				*parts = append(*parts, dto.GeminiPart{Text: prefix})
+			}
+			if !appendGeminiImageReference(parts, text[match[0]:match[1]], "") {
+				*parts = append(*parts, dto.GeminiPart{Text: text[match[0]:match[1]]})
+			}
+			cursor = match[1]
+		}
+		if suffix := text[cursor:]; suffix != "" {
+			*parts = append(*parts, dto.GeminiPart{Text: suffix})
+		}
+		return
+	}
+
+	cursor := 0
+	for _, match := range matches {
+		if prefix := text[cursor:match[0]]; prefix != "" {
+			*parts = append(*parts, dto.GeminiPart{Text: prefix})
+		}
+		imageValue := text[match[2]:match[3]]
+		if !appendGeminiImageReference(parts, imageValue, "") {
+			*parts = append(*parts, dto.GeminiPart{Text: text[match[0]:match[1]]})
+		}
+		cursor = match[1]
+	}
+	if suffix := text[cursor:]; suffix != "" {
+		*parts = append(*parts, dto.GeminiPart{Text: suffix})
+	}
+}
+
+func appendOpenAIImageOutput(parts *[]dto.GeminiPart, output openAIImageOutput) {
+	mimeType := output.MimeType
+	if mimeType == "" {
+		mimeType = output.MimeType2
+	}
+	if output.B64JSON != "" {
+		appendGeminiImageReference(parts, output.B64JSON, mimeTypeOrDefault(mimeType, "image/png"))
+		return
+	}
+	if output.URL != "" {
+		appendGeminiImageReference(parts, output.URL, mimeType)
+		return
+	}
+	if len(output.ImageURL) == 0 {
+		return
+	}
+	var imageURL string
+	if kitutil.Unmarshal(output.ImageURL, &imageURL) == nil && imageURL != "" {
+		appendGeminiImageReference(parts, imageURL, mimeType)
+		return
+	}
+	var imageObject openAIImageURL
+	if kitutil.Unmarshal(output.ImageURL, &imageObject) != nil {
+		return
+	}
+	if imageObject.MimeType == "" {
+		imageObject.MimeType = imageObject.MimeType2
+	}
+	appendGeminiImageReference(parts, imageObject.URL, mimeTypeOrDefault(mimeType, imageObject.MimeType))
+}
+
+func appendOpenAIImages(parts *[]dto.GeminiPart, raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	var outputs []openAIImageOutput
+	if kitutil.Unmarshal(raw, &outputs) == nil {
+		for _, output := range outputs {
+			appendOpenAIImageOutput(parts, output)
+		}
+		return
+	}
+	var output openAIImageOutput
+	if kitutil.Unmarshal(raw, &output) == nil {
+		appendOpenAIImageOutput(parts, output)
+	}
+}
+
+func mimeTypeOrDefault(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func appendOpenAIMessageContent(parts *[]dto.GeminiPart, message dto.Message) {
+	for _, content := range message.ParseContent() {
+		switch content.Type {
+		case dto.ContentTypeText:
+			appendGeminiTextAndImages(parts, content.Text)
+		case dto.ContentTypeImageURL:
+			if image := content.GetImageMedia(); image != nil {
+				appendGeminiImageReference(parts, image.Url, image.MimeType)
+			}
+		}
+	}
+
+	appendOpenAIImages(parts, message.Images)
+}
 
 // ResponseOpenAI2Gemini 将 OpenAI 响应转换为 Gemini 格式
 func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta.Meta) *dto.GeminiChatResponse {
@@ -54,13 +265,7 @@ func ResponseOpenAI2Gemini(openAIResponse *dto.OpenAITextResponse, info convmeta
 			Parts: make([]dto.GeminiPart, 0),
 		}
 
-		textContent := choice.Message.StringContent()
-		if textContent != "" {
-			part := dto.GeminiPart{
-				Text: textContent,
-			}
-			content.Parts = append(content.Parts, part)
-		}
+		appendOpenAIMessageContent(&content.Parts, choice.Message)
 
 		toolCalls := choice.Message.ParseToolCalls()
 		for _, toolCall := range toolCalls {
@@ -184,13 +389,10 @@ func StreamResponseOpenAI2Gemini(openAIResponse *dto.ChatCompletionsStreamRespon
 				content.Parts = append(content.Parts, part)
 			}
 		} else {
-			// 处理文本内容
+			// 流式文本可能在任意字节边界拆分，不能逐块解析 data URL。
 			textContent := choice.Delta.GetContentString()
 			if textContent != "" {
-				part := dto.GeminiPart{
-					Text: textContent,
-				}
-				content.Parts = append(content.Parts, part)
+				content.Parts = append(content.Parts, dto.GeminiPart{Text: textContent})
 			}
 		}
 

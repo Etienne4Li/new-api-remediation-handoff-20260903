@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"regexp"
@@ -15,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
 )
@@ -33,6 +36,7 @@ const (
 var (
 	channelAffinityCacheOnce sync.Once
 	channelAffinityCache     *cachex.HybridCache[int]
+	channelAffinityMutation  sync.Mutex
 
 	channelAffinityUsageCacheStatsOnce  sync.Once
 	channelAffinityUsageCacheStatsCache *cachex.HybridCache[ChannelAffinityUsageCacheCounters]
@@ -642,6 +646,17 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 }
 
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
+	return clearCurrentChannelAffinityCache(c, 0, false)
+}
+
+func ClearCurrentChannelAffinityCacheIfMatches(c *gin.Context, expectedChannelID int) bool {
+	if expectedChannelID <= 0 {
+		return false
+	}
+	return clearCurrentChannelAffinityCache(c, expectedChannelID, true)
+}
+
+func clearCurrentChannelAffinityCache(c *gin.Context, expectedChannelID int, requireMatch bool) bool {
 	if c == nil {
 		return false
 	}
@@ -651,12 +666,59 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	}
 
 	cache := getChannelAffinityCache()
+	c.Set(ginKeyChannelAffinitySkipRetry, false)
+	if requireMatch && common.RedisEnabled && common.RDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		deleted := false
+		err := common.RDB.Watch(ctx, func(tx *redis.Tx) error {
+			channelID, err := tx.Get(ctx, cacheKey).Int()
+			if errors.Is(err, redis.Nil) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if channelID != expectedChannelID {
+				return nil
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Unlink(ctx, cacheKey)
+				return nil
+			})
+			if err == nil {
+				deleted = true
+			}
+			return err
+		}, cacheKey)
+		if errors.Is(err, redis.TxFailedErr) {
+			return false
+		}
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity cache compare-delete current failed: err=%v", err))
+			return false
+		}
+		return deleted
+	}
+
+	channelAffinityMutation.Lock()
+	defer channelAffinityMutation.Unlock()
+	if requireMatch {
+		channelID, found, err := cache.Get(cacheKey)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel affinity cache get current failed: err=%v", err))
+			return false
+		}
+		if !found || channelID != expectedChannelID {
+			return false
+		}
+	}
 	deleted, err := cache.DeleteMany([]string{cacheKey})
 	if err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache delete current failed: err=%v", err))
 		return false
 	}
-	c.Set(ginKeyChannelAffinitySkipRetry, false)
 	for _, ok := range deleted {
 		if ok {
 			return true
@@ -734,6 +796,10 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
+	if !common.RedisEnabled || common.RDB == nil {
+		channelAffinityMutation.Lock()
+		defer channelAffinityMutation.Unlock()
+	}
 	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
 	}

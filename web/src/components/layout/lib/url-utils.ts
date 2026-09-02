@@ -49,6 +49,28 @@ export function normalizeHref(href: string): string {
 }
 
 /**
+ * Match a top-level URL against the current pathname.
+ * Root is exact; all other internal paths include their nested routes.
+ */
+export function isNavPathActive(pathname: string, href: string): boolean {
+  if (
+    !pathname ||
+    !href ||
+    href.startsWith('http://') ||
+    href.startsWith('https://')
+  ) {
+    return false
+  }
+
+  const path = normalizeHref(href.split('#')[0]) || '/'
+  const current = normalizeHref(pathname.split('#')[0]) || '/'
+
+  return path === '/'
+    ? current === '/'
+    : current === path || current.startsWith(`${path}/`)
+}
+
+/**
  * Check if a navigation item is active
  * @param href - Current URL
  * @param item - Navigation item

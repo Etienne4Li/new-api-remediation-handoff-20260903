@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -43,6 +44,23 @@ func TestRelayInfoGetFinalRequestRelayFormatFallsBackToRelayFormat(t *testing.T)
 func TestRelayInfoGetFinalRequestRelayFormatNilReceiver(t *testing.T) {
 	var info *RelayInfo
 	require.Equal(t, types.RelayFormat(""), info.GetFinalRequestRelayFormat())
+}
+
+func TestInitChannelMetaClearsRuntimeHeaderOverridesBetweenAttempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &RelayInfo{
+		RuntimeHeadersOverride:    map[string]interface{}{"x-first-channel": "stale"},
+		UseRuntimeHeadersOverride: true,
+		ParamOverrideAudit:        []string{"stale first-channel override"},
+	}
+
+	info.InitChannelMeta(c)
+
+	assert.Nil(t, info.RuntimeHeadersOverride)
+	assert.False(t, info.UseRuntimeHeadersOverride)
+	assert.Nil(t, info.ParamOverrideAudit)
 }
 
 func TestRelayInfoMetaTypedNilReceiver(t *testing.T) {

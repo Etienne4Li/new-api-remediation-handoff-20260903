@@ -591,6 +591,7 @@ func generateDefaultSidebarConfig(userRole int) string {
 	defaultConfig["personal"] = map[string]interface{}{
 		"enabled":  true,
 		"topup":    true,
+		"ticket":   true,
 		"personal": true,
 	}
 

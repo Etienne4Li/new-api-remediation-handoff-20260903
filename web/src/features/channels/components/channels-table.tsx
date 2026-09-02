@@ -386,6 +386,7 @@ export function ChannelsTable() {
         label: 'All Types',
         value: 'all',
         count: totalTypes,
+        translateLabel: false,
       },
       ...typeIds.map((item) => {
         const iconName = getChannelTypeIcon(item.type)
@@ -400,10 +401,11 @@ export function ChannelsTable() {
   }, [t, typeCounts, typeFilter])
 
   const groupFilterOptions = [
-    { label: t('All Groups'), value: 'all' },
+    { label: t('All Groups'), value: 'all', translateLabel: false },
     ...groupOptions.map((option) => ({
       ...option,
       label: sensitiveVisible ? option.label : '••••',
+      translateLabel: false,
     })),
   ]
 

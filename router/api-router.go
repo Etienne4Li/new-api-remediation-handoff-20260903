@@ -251,11 +251,27 @@ func SetApiRouter(router *gin.Engine) {
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{
+			balanceUsageRoute := usageRoute.Group("/balance")
+			balanceUsageRoute.Use(middleware.TokenAuthReadOnly())
+			{
+				balanceUsageRoute.GET("/", controller.GetAccountBalance)
+			}
+
 			tokenUsageRoute := usageRoute.Group("/token")
 			tokenUsageRoute.Use(middleware.TokenAuthReadOnly())
 			{
 				tokenUsageRoute.GET("/", controller.GetTokenUsage)
 			}
+		}
+
+		ticketRoute := apiRouter.Group("/ticket")
+		ticketRoute.Use(middleware.UserAuth())
+		{
+			ticketRoute.GET("/", controller.ListSupportTickets)
+			ticketRoute.GET("/:id", controller.GetSupportTicket)
+			ticketRoute.POST("/", middleware.UserCriticalRateLimit("ticket-create"), controller.CreateSupportTicket)
+			ticketRoute.POST("/:id/messages", middleware.UserCriticalRateLimit("ticket-reply"), controller.AddSupportTicketMessage)
+			ticketRoute.PATCH("/:id/status", middleware.UserCriticalRateLimit("ticket-status"), controller.UpdateSupportTicketStatus)
 		}
 
 		redemptionRoute := apiRouter.Group("/redemption")

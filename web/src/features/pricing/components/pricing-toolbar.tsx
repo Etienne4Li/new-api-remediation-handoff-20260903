@@ -55,6 +55,7 @@ import {
 } from '../constants'
 import type { PricingModel, PricingVendor, TokenUnit } from '../types'
 import { PricingSidebar } from './pricing-sidebar'
+import { SearchBar } from './search-bar'
 
 type SegmentOption = {
   value: string
@@ -66,6 +67,9 @@ type SegmentOption = {
 export interface PricingToolbarProps {
   filteredCount: number
   totalCount?: number
+  searchValue: string
+  onSearchChange: (value: string) => void
+  onClearSearch: () => void
   sortBy: string
   onSortChange: (value: string) => void
   tokenUnit: TokenUnit
@@ -104,7 +108,7 @@ function SegmentedControl(props: {
     <div
       role='group'
       aria-label={props.ariaLabel}
-      className='bg-muted/60 inline-flex h-8 items-center rounded-lg border p-0.5'
+      className='bg-muted/60 inline-flex h-8 items-center rounded-none border p-0.5'
     >
       {props.options.map((option) => {
         const Icon = option.icon
@@ -116,10 +120,10 @@ function SegmentedControl(props: {
             onClick={() => props.onChange(option.value)}
             aria-pressed={isActive}
             className={cn(
-              'inline-flex h-full items-center justify-center rounded-md text-xs font-medium transition-all',
+              'inline-flex h-full items-center justify-center rounded-none text-xs font-medium transition-all',
               Icon && !option.label ? 'w-7' : 'gap-1.5 px-3',
               isActive
-                ? 'bg-primary text-primary-foreground shadow-sm'
+                ? 'bg-primary text-primary-foreground'
                 : 'text-muted-foreground hover:text-foreground'
             )}
           >
@@ -134,7 +138,7 @@ function SegmentedControl(props: {
 
         return (
           <Tooltip key={option.value}>
-            <TooltipTrigger render={button}></TooltipTrigger>
+            <TooltipTrigger render={button} />
             <TooltipContent side='bottom' className='text-xs'>
               {option.tooltip}
             </TooltipContent>
@@ -166,9 +170,12 @@ export function PricingToolbar(props: PricingToolbarProps) {
   )
 
   return (
-    <div className='rounded-xl border p-3'>
-      <div className='flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between'>
-        <div className='flex items-center gap-2'>
+    <section
+      aria-label={t('Pricing')}
+      className='min-h-[66px] rounded-none border p-3 sm:p-3'
+    >
+      <div className='flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between'>
+        <div className='flex min-w-0 items-center gap-3'>
           <Button
             type='button'
             variant='outline'
@@ -185,7 +192,10 @@ export function PricingToolbar(props: PricingToolbarProps) {
             )}
           </Button>
 
-          <div className='text-muted-foreground flex items-baseline gap-1 text-sm'>
+          <div
+            aria-live='polite'
+            className='text-muted-foreground flex shrink-0 items-baseline gap-1 text-sm'
+          >
             <span className='text-foreground font-semibold tabular-nums'>
               {props.filteredCount.toLocaleString()}
             </span>
@@ -195,10 +205,26 @@ export function PricingToolbar(props: PricingToolbarProps) {
                 / {props.totalCount.toLocaleString()}
               </span>
             )}
+            {props.hasActiveFilters && (
+              <Badge
+                variant='secondary'
+                className='ml-1 hidden h-5 px-1.5 text-[10px] sm:inline-flex'
+              >
+                {t('Filters active')}
+              </Badge>
+            )}
           </div>
+
+          <SearchBar
+            value={props.searchValue}
+            onChange={props.onSearchChange}
+            onClear={props.onClearSearch}
+            placeholder={t('Search models')}
+            className='min-w-0 flex-1 sm:w-64 sm:flex-none'
+          />
         </div>
 
-        <div className='flex flex-wrap items-center gap-2'>
+        <div className='flex flex-wrap items-center gap-2 xl:justify-end'>
           <div className='hidden items-center gap-2 sm:flex'>
             <SegmentedControl
               options={[
@@ -227,7 +253,7 @@ export function PricingToolbar(props: PricingToolbarProps) {
                   type='button'
                   variant='outline'
                   size='sm'
-                  className='h-8 gap-1.5 px-3 text-xs'
+                  className='h-8 gap-1.5 rounded-none px-3 text-xs'
                 />
               }
             >
@@ -308,6 +334,6 @@ export function PricingToolbar(props: PricingToolbarProps) {
           </div>
         </SheetContent>
       </Sheet>
-    </div>
+    </section>
   )
 }

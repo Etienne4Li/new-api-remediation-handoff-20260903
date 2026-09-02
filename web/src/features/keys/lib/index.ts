@@ -27,3 +27,5 @@ export {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from './api-key-form'
+
+export { withApiKeyPrefix } from './key-format'

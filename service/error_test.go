@@ -122,6 +122,20 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
+func TestRelayErrorHandlerPreservesSessionPolicyErrorCode(t *testing.T) {
+	body := `{"error":{"message":"session blocked","type":"permission_error","code":"session_blocked_by_cyber_policy"}}`
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.NotNil(t, newAPIError)
+	require.Equal(t, types.ErrorCodeSessionBlockedByCyberPolicy, newAPIError.GetErrorCode())
+	require.Equal(t, http.StatusForbidden, newAPIError.StatusCode)
+}
+
 func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
 	withDebugEnabled(t, true)
 

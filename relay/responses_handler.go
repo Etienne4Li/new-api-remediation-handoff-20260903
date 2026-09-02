@@ -82,7 +82,34 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		jsonData, err := storage.Bytes()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		jsonData, normalization, err := relaycommon.NormalizeResponsesInputItemIDs(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		relaycommon.RecordResponsesInputItemIDNormalization(c, normalization)
+		if normalization.Count() > 0 {
+			logger.LogInfo(c, fmt.Sprintf(
+				"normalized Responses input item IDs: reasoning=%d, message=%d, function_call=%d, custom_tool_call=%d, function_call_output=%d, custom_tool_call_output=%d",
+				normalization.Reasoning,
+				normalization.Message,
+				normalization.FunctionCall,
+				normalization.CustomToolCall,
+				normalization.FunctionCallOutput,
+				normalization.CustomToolOutput,
+			))
+			body, closer, bodyErr := relaycommon.NewOutboundJSONBody(jsonData)
+			if bodyErr != nil {
+				return types.NewError(bodyErr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer closer.Close()
+			requestBody = body
+		} else {
+			requestBody = common.NewReplayableBodyReader(storage)
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
@@ -106,6 +133,23 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+		}
+
+		jsonData, normalization, err := relaycommon.NormalizeResponsesInputItemIDs(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		relaycommon.RecordResponsesInputItemIDNormalization(c, normalization)
+		if normalization.Count() > 0 {
+			logger.LogInfo(c, fmt.Sprintf(
+				"normalized Responses input item IDs: reasoning=%d, message=%d, function_call=%d, custom_tool_call=%d, function_call_output=%d, custom_tool_call_output=%d",
+				normalization.Reasoning,
+				normalization.Message,
+				normalization.FunctionCall,
+				normalization.CustomToolCall,
+				normalization.FunctionCallOutput,
+				normalization.CustomToolOutput,
+			))
 		}
 
 		logger.LogDebug(c, "requestBody: %s", jsonData)

@@ -16,12 +16,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+
+import { cn } from '@/lib/utils'
+
+type TurnstileWidgetSize = 'compact' | 'flexible'
+
+const TURNSTILE_FLEXIBLE_MIN_WIDTH = 300
 
 declare global {
   interface Window {
     turnstile?: {
-      render: (element: HTMLElement, options: Record<string, unknown>) => void
+      render: (element: HTMLElement, options: Record<string, unknown>) => string
+      remove: (widgetId: string) => void
     }
   }
 }
@@ -40,16 +47,58 @@ export function Turnstile({
   className,
 }: TurnstileProps) {
   const ref = useRef<HTMLDivElement | null>(null)
+  const widgetSizeRef = useRef<TurnstileWidgetSize | null>(null)
+  const onVerifyRef = useRef(onVerify)
+  const onExpireRef = useRef(onExpire)
+  const [widgetSize, setWidgetSize] = useState<TurnstileWidgetSize | null>(null)
 
   useEffect(() => {
+    onVerifyRef.current = onVerify
+    onExpireRef.current = onExpire
+  }, [onExpire, onVerify])
+
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) return
+
+    const updateWidgetSize = (width: number) => {
+      if (width <= 0) return
+
+      const nextSize =
+        width < TURNSTILE_FLEXIBLE_MIN_WIDTH ? 'compact' : 'flexible'
+      if (widgetSizeRef.current === nextSize) return
+
+      if (widgetSizeRef.current) onExpireRef.current?.()
+      widgetSizeRef.current = nextSize
+      setWidgetSize(nextSize)
+    }
+
+    updateWidgetSize(element.getBoundingClientRect().width)
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width
+      if (width !== undefined) updateWidgetSize(width)
+    })
+    observer.observe(element)
+
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!widgetSize) return
+
+    let widgetId: string | null = null
+    let cancelled = false
+
     const render = () => {
-      if (!ref.current || !window.turnstile) return
+      if (cancelled || !ref.current || !window.turnstile) return
       try {
-        window.turnstile.render(ref.current, {
+        widgetId = window.turnstile.render(ref.current, {
           sitekey: siteKey,
-          callback: (token: string) => onVerify(token),
-          'error-callback': () => onExpire?.(),
-          'expired-callback': () => onExpire?.(),
+          size: widgetSize,
+          callback: (token: string) => onVerifyRef.current(token),
+          'error-callback': () => onExpireRef.current?.(),
+          'expired-callback': () => onExpireRef.current?.(),
         })
       } catch {
         /* empty */
@@ -58,19 +107,36 @@ export function Turnstile({
 
     if (window.turnstile) {
       render()
-      return
+      return () => {
+        cancelled = true
+        if (widgetId) window.turnstile?.remove(widgetId)
+      }
     }
-    const scriptId = 'cf-turnstile'
-    if (document.getElementById(scriptId)) return
-    const s = document.createElement('script')
-    s.id = scriptId
-    s.src =
-      'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
-    s.async = true
-    s.defer = true
-    s.onload = () => render()
-    document.head.appendChild(s)
-  }, [siteKey, onVerify, onExpire])
 
-  return <div ref={ref} className={className} />
+    const scriptId = 'cf-turnstile'
+    let script = document.querySelector<HTMLScriptElement>(`script#${scriptId}`)
+    if (!script) {
+      script = document.createElement('script')
+      script.id = scriptId
+      script.src =
+        'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+      script.async = true
+      script.defer = true
+      document.head.appendChild(script)
+    }
+    script.addEventListener('load', render, { once: true })
+
+    return () => {
+      cancelled = true
+      script.removeEventListener('load', render)
+      if (widgetId) window.turnstile?.remove(widgetId)
+    }
+  }, [siteKey, widgetSize])
+
+  return (
+    <div
+      ref={ref}
+      className={cn('flex w-full min-w-0 max-w-full justify-center', className)}
+    />
+  )
 }

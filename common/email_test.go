@@ -561,3 +561,37 @@ func TestSendEmailExplicitStartTLSRejectsUntrustedCertificateByDefault(t *testin
 	require.Error(t, err)
 	require.Contains(t, fmt.Sprint(err), "certificate")
 }
+
+func TestNewSMTPClientTimesOutWhenServerDoesNotSendGreeting(t *testing.T) {
+	withSMTPSettings(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	previousTimeout := smtpSendTimeout
+	smtpSendTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { smtpSendTimeout = previousTimeout })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	SMTPServer = "127.0.0.1"
+	SMTPPort = listener.Addr().(*net.TCPAddr).Port
+	SMTPSSLEnabled = false
+	SMTPStartTLSEnabled = false
+
+	_, err = newSMTPClient(listener.Addr().String())
+	require.Error(t, err)
+
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("SMTP client did not attempt a connection")
+	}
+}

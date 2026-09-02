@@ -28,18 +28,13 @@ import { useDebounce } from '@/hooks'
 import { cn } from '@/lib/utils'
 
 import { DataTableFacetedFilter } from './faceted-filter'
+import type { DataTableFilterOption } from './filter-types'
 import { DataTableViewOptions } from './view-options'
 
 type FilterDef = {
   columnId: string
   title: string
-  options: {
-    label: string
-    value: string
-    icon?: React.ComponentType<{ className?: string }>
-    iconNode?: React.ReactNode
-    count?: number
-  }[]
+  options: DataTableFilterOption[]
   singleSelect?: boolean
 }
 

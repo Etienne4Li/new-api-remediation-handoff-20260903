@@ -37,6 +37,28 @@ type OpenAITextResponseChoice struct {
 	FinishReason string `json:"finish_reason"`
 }
 
+// UnmarshalJSON captures the response-only images extension without changing
+// the shared Message request contract or its promoted helper methods.
+func (c *OpenAITextResponseChoice) UnmarshalJSON(data []byte) error {
+	type responseMessage struct {
+		Message
+		Images json.RawMessage `json:"images"`
+	}
+	var decoded struct {
+		Message      responseMessage `json:"message"`
+		Index        int             `json:"index"`
+		FinishReason string          `json:"finish_reason"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	c.Message = decoded.Message.Message
+	c.Message.Images = decoded.Message.Images
+	c.Index = decoded.Index
+	c.FinishReason = decoded.FinishReason
+	return nil
+}
+
 type OpenAITextResponse struct {
 	Id      string                     `json:"id"`
 	Model   string                     `json:"model"`
@@ -384,7 +406,13 @@ const (
 
 // ResponsesStreamResponse 用于处理 /v1/responses 流式响应
 type ResponsesStreamResponse struct {
-	Type     string                   `json:"type"`
+	Type string `json:"type"`
+	// Responses error events may carry an error object or code/message/param
+	// directly at the event level, rather than nesting it under response.
+	Code     any                      `json:"code,omitempty"`
+	Message  string                   `json:"message,omitempty"`
+	Param    string                   `json:"param,omitempty"`
+	Error    any                      `json:"error,omitempty"`
 	Response *OpenAIResponsesResponse `json:"response,omitempty"`
 	Delta    string                   `json:"delta,omitempty"`
 	Item     *ResponsesOutput         `json:"item,omitempty"`
@@ -395,6 +423,32 @@ type ResponsesStreamResponse struct {
 	SummaryIndex *int                           `json:"summary_index,omitempty"`
 	ItemID       string                         `json:"item_id,omitempty"`
 	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
+}
+
+// GetOpenAIError normalizes terminal Responses error events from both the
+// official protocol and compatible providers.
+func (r *ResponsesStreamResponse) GetOpenAIError() *types.OpenAIError {
+	if r == nil {
+		return nil
+	}
+	if r.Response != nil {
+		if openAIError := r.Response.GetOpenAIError(); openAIError != nil {
+			return openAIError
+		}
+	}
+	if openAIError := GetOpenAIError(r.Error); openAIError != nil &&
+		(openAIError.Message != "" || openAIError.Code != nil || openAIError.Type != "") {
+		return openAIError
+	}
+	if r.Message == "" && r.Code == nil && r.Param == "" {
+		return nil
+	}
+	return &types.OpenAIError{
+		Message: r.Message,
+		Type:    "upstream_error",
+		Param:   r.Param,
+		Code:    r.Code,
+	}
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构

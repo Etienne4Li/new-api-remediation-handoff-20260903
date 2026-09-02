@@ -77,6 +77,13 @@ export const THEME_PRESETS = [
     name: 'Lavender Dream',
     swatches: ['oklch(0.5709 0.1808 306.89)', 'oklch(0.811 0.0589 201.14)'],
   },
+  {
+    // Enterprise Gold mirrors the reference site's restrained enterprise
+    // palette: near-black chrome paired with a muted gold action accent.
+    value: 'enterprise-gold',
+    name: 'Enterprise Gold',
+    swatches: ['oklch(0.2318 0.0097 276.64)', 'oklch(0.7931 0.0899 86.36)'],
+  },
 ] as const
 
 export type ThemePreset = (typeof THEME_PRESETS)[number]['value']
@@ -88,9 +95,10 @@ export type ContentLayout = 'full' | 'centered'
  * Font axis for the theme.
  *
  * - `default` — resolve at runtime from the active preset
- *   (see `PRESET_DEFAULT_FONT`). The shipped `default` and `anthropic`
- *   presets resolve to serif; other named color presets fall back to
- *   sans unless they list a different choice. Mirrors how
+ *   (see `PRESET_DEFAULT_FONT`). The shipped `anthropic` preset resolves to
+ *   serif; the neutral and enterprise-gold presets use sans by default.
+ *   Other named color presets also fall back to sans unless they list a
+ *   different choice. Mirrors how
  *   `radius: 'default'` defers to a per-preset hint.
  * - `sans` — humanist sans (Public Sans), the project's UI fallback.
  * - `serif` — editorial serif (Lora + CJK fallbacks), the project's
@@ -116,9 +124,11 @@ export type ThemeCustomization = {
 }
 
 export const DEFAULT_THEME_CUSTOMIZATION: ThemeCustomization = {
+  // Keep the neutral canvas as the shipped baseline. Enterprise Gold is an
+  // explicit option, not the public site's default visual language.
   preset: 'default',
-  font: 'default',
-  radius: 'default',
+  font: 'sans',
+  radius: 'none',
   scale: 'default',
   contentLayout: 'full',
 }
@@ -168,10 +178,10 @@ export const THEME_COOKIE_KEYS = {
  *
  * Co-located with the preset registry so a preset's signature typography
  * is declared in one place. Presets not listed here fall back to the
- * `resolveThemeFont` default of `sans`. The shipped `default` preset
- * opts into serif so the editorial Lora voice is the out-of-the-box
- * experience; vivid color presets stay on the humanist sans so their
- * accents read clearly without competing with the body type.
+ * `resolveThemeFont` default of `sans`. The Anthropic preset opts into serif
+ * for its editorial voice; neutral and vivid color presets stay on the
+ * humanist sans so their accents read clearly without competing with the body
+ * type.
  */
 export const PRESET_DEFAULT_FONT: Partial<
   Record<ThemePreset, ResolvedThemeFont>

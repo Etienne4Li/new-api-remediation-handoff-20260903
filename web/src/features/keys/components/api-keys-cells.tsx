@@ -37,6 +37,7 @@ import { copyToClipboard } from '@/lib/copy-to-clipboard'
 import { formatQuota } from '@/lib/format'
 
 import type { ApiKey } from '../types'
+import { withApiKeyPrefix } from '../lib/key-format'
 import { useApiKeys } from './api-keys-provider'
 
 export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
@@ -53,7 +54,7 @@ export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
   const isLoading = !!loadingKeys[apiKey.id]
   const resolvedFullKey = resolvedKeys[apiKey.id]
   const isCopied = copiedKeyId === apiKey.id
-  const maskedKey = `sk-${apiKey.key}`
+  const maskedKey = withApiKeyPrefix(apiKey.key)
 
   const handlePopoverOpen = useCallback(
     (open: boolean) => {

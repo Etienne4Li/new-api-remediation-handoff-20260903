@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMemo } from 'react'
-import { useTranslation } from 'react-i18next'
 
 import { useStatus } from '@/hooks/use-status'
 import { parseHeaderNavModulesFromStatus } from '@/lib/nav-modules'
@@ -26,9 +25,57 @@ import { useAuthStore } from '@/stores/auth-store'
 export type TopNavLink = {
   title: string
   href: string
+  isActive?: boolean
   disabled?: boolean
   requiresAuth?: boolean
   external?: boolean
+}
+
+export function buildTopNavLinks(
+  status: Record<string, unknown> | null,
+  isAuthed: boolean
+): TopNavLink[] {
+  const modules = parseHeaderNavModulesFromStatus(status)
+  const docsLink =
+    typeof status?.docs_link === 'string' ? status.docs_link.trim() : ''
+  const links: TopNavLink[] = []
+
+  if (modules.home !== false) {
+    links.push({ title: 'Home', href: '/' })
+  }
+
+  if (modules.console !== false) {
+    links.push({ title: 'Manage', href: '/dashboard' })
+  }
+
+  const pricing = modules.pricing
+  if (pricing.enabled) {
+    links.push({
+      title: 'Models',
+      href: '/pricing',
+      requiresAuth: pricing.requireAuth && !isAuthed,
+    })
+  }
+
+  const rankings = modules.rankings
+  if (rankings.enabled) {
+    links.push({
+      title: 'Hot Topics',
+      href: '/rankings',
+      requiresAuth: rankings.requireAuth && !isAuthed,
+    })
+  }
+
+  // Do not expose a guaranteed 404 when docs are enabled without a URL.
+  if (modules.docs !== false && docsLink) {
+    links.push({ title: 'Docs', href: docsLink, external: true })
+  }
+
+  if (modules.about !== false) {
+    links.push({ title: 'About', href: '/about' })
+  }
+
+  return links
 }
 
 /**
@@ -44,61 +91,15 @@ export type TopNavLink = {
  * }
  */
 export function useTopNavLinks(): TopNavLink[] {
-  const { t } = useTranslation()
-  const { status } = useStatus()
+  const { status, error } = useStatus()
   const { auth } = useAuthStore()
+  const links = useMemo(
+    () =>
+      buildTopNavLinks(status as Record<string, unknown> | null, !!auth?.user),
+    [auth?.user, status]
+  )
 
-  // Parse HeaderNavModules
-  const modules = useMemo(() => {
-    return parseHeaderNavModulesFromStatus(
-      status as Record<string, unknown> | null
-    )
-  }, [status])
-
-  // Documentation link (may be external)
-  const docsLink: string | undefined = status?.docs_link as string | undefined
-
-  const isAuthed = !!auth?.user
-
-  const links: TopNavLink[] = []
-
-  // Home
-  if (modules?.home !== false) {
-    links.push({ title: t('Home'), href: '/' })
-  }
-
-  // Console -> /dashboard (new console path)
-  if (modules?.console !== false) {
-    links.push({ title: t('Console'), href: '/dashboard' })
-  }
-
-  // Pricing
-  const pricing = modules?.pricing
-  if (pricing && typeof pricing === 'object' && pricing.enabled) {
-    const requiresAuth = pricing.requireAuth && !isAuthed
-    links.push({ title: t('Model Square'), href: '/pricing', requiresAuth })
-  }
-
-  // Rankings
-  const rankings = modules?.rankings
-  if (rankings && typeof rankings === 'object' && rankings.enabled) {
-    const requiresAuth = rankings.requireAuth && !isAuthed
-    links.push({ title: t('Rankings'), href: '/rankings', requiresAuth })
-  }
-
-  // Docs (supports external links)
-  if (modules?.docs !== false) {
-    if (docsLink) {
-      links.push({ title: t('Docs'), href: docsLink, external: true })
-    } else {
-      links.push({ title: t('Docs'), href: '/docs' })
-    }
-  }
-
-  // About
-  if (modules?.about !== false) {
-    links.push({ title: t('About'), href: '/about' })
-  }
-
-  return links
+  // Let each header use its provided static links when there is neither a
+  // live status response nor cached status to build from.
+  return error && !status ? [] : links
 }

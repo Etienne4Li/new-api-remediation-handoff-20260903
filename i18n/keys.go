@@ -74,6 +74,17 @@ const (
 	MsgRedemptionExpireTimeInvalid = "redemption.expire_time_invalid"
 )
 
+// Support ticket related messages
+const (
+	MsgTicketTitleLength     = "ticket.title_length"
+	MsgTicketMessageLength   = "ticket.message_length"
+	MsgTicketCategoryInvalid = "ticket.category_invalid"
+	MsgTicketPriorityInvalid = "ticket.priority_invalid"
+	MsgTicketStatusInvalid   = "ticket.status_invalid"
+	MsgTicketNotFound        = "ticket.not_found"
+	MsgTicketClosed          = "ticket.closed"
+)
+
 // User related messages
 const (
 	MsgUserPasswordLoginDisabled     = "user.password_login_disabled"

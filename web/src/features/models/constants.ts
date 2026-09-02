@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+import type { TFunction } from 'i18next'
 
 import type { NameRule, ModelStatus, SyncSource } from './types'
 
@@ -72,9 +72,9 @@ export function getNameRuleConfig(
 
 export function getModelStatusOptions(t: TFunction) {
   return [
-    { label: t('All Status'), value: 'all' },
-    { label: t('Enabled'), value: 'enabled' },
-    { label: t('Disabled'), value: 'disabled' },
+    { label: t('All Status'), labelKey: 'All Status', value: 'all' },
+    { label: t('Enabled'), labelKey: 'Enabled', value: 'enabled' },
+    { label: t('Disabled'), labelKey: 'Disabled', value: 'disabled' },
   ] as const
 }
 
@@ -93,9 +93,13 @@ export function getModelStatusConfig(
 
 export function getSyncStatusOptions(t: TFunction) {
   return [
-    { label: t('All Sync Status'), value: 'all' },
-    { label: t('Official Sync'), value: 'yes' },
-    { label: t('No Sync'), value: 'no' },
+    {
+      label: t('All Sync Status'),
+      labelKey: 'All Sync Status',
+      value: 'all',
+    },
+    { label: t('Official Sync'), labelKey: 'Official Sync', value: 'yes' },
+    { label: t('No Sync'), labelKey: 'No Sync', value: 'no' },
   ] as const
 }
 
@@ -105,13 +109,21 @@ export function getSyncStatusOptions(t: TFunction) {
 
 export function getDeploymentStatusOptions(t: TFunction) {
   return [
-    { label: t('All Status'), value: 'all' },
-    { label: t('Running'), value: 'running' },
-    { label: t('Completed'), value: 'completed' },
-    { label: t('Failed'), value: 'failed' },
-    { label: t('Deployment requested'), value: 'deployment requested' },
-    { label: t('Termination requested'), value: 'termination requested' },
-    { label: t('Destroyed'), value: 'destroyed' },
+    { label: t('All Status'), labelKey: 'All Status', value: 'all' },
+    { label: t('Running'), labelKey: 'Running', value: 'running' },
+    { label: t('Completed'), labelKey: 'Completed', value: 'completed' },
+    { label: t('Failed'), labelKey: 'Failed', value: 'failed' },
+    {
+      label: t('Deployment requested'),
+      labelKey: 'Deployment requested',
+      value: 'deployment requested',
+    },
+    {
+      label: t('Termination requested'),
+      labelKey: 'Termination requested',
+      value: 'termination requested',
+    },
+    { label: t('Destroyed'), labelKey: 'Destroyed', value: 'destroyed' },
   ] as const
 }
 

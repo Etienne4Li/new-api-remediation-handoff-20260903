@@ -96,7 +96,7 @@ export function SecureVerificationDialog({
         </>
       }
       description={description}
-      contentClassName='top-[8vh] max-w-[calc(100%-1.5rem)] translate-y-0 overflow-hidden border-none shadow-xl sm:top-1/2 sm:max-w-md sm:translate-y-[-50%] sm:rounded-xl'
+      contentClassName='top-[8vh] max-w-[calc(100%-1.5rem)] translate-y-0 overflow-hidden border-none shadow-lg sm:top-1/2 sm:max-w-md sm:translate-y-[-50%] sm:rounded-lg'
       headerClassName='border-b pb-4 text-left'
       titleClassName='flex items-center gap-2 text-lg font-semibold'
       descriptionClassName='text-left'
@@ -127,7 +127,7 @@ export function SecureVerificationDialog({
     >
       {availableTabs.length === 0 ? (
         <div className='grid place-items-center gap-4 text-center'>
-          <div className='bg-muted flex h-16 w-16 items-center justify-center rounded-2xl'>
+          <div className='bg-muted flex h-16 w-16 items-center justify-center rounded-lg'>
             <ShieldCheck className='text-muted-foreground h-8 w-8' />
           </div>
           <p className='text-muted-foreground text-sm'>

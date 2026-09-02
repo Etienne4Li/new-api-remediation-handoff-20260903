@@ -30,6 +30,12 @@ import { toast } from 'sonner'
 
 import { getStatus } from '@/lib/api'
 import { installBuildMetadata } from '@/lib/build-metadata'
+import {
+  DEFAULT_DOCUMENT_TITLE,
+  DEFAULT_LOGO,
+  resolveSystemLogo,
+  resolveSystemName,
+} from '@/lib/constants'
 import { applyFaviconToDom } from '@/lib/dom-utils'
 import '@/lib/dayjs'
 import { initializeFrontendCache } from '@/lib/frontend-cache'
@@ -117,12 +123,15 @@ if (!rootElement) {
 ;(function initSystemBranding() {
   try {
     if (typeof window === 'undefined' || typeof document === 'undefined') return
+    document.title = DEFAULT_DOCUMENT_TITLE
+    applyFaviconToDom(DEFAULT_LOGO)
     const apply = (name: string) => {
-      document.title = name
+      const displayName = resolveSystemName(name)
+      document.title = displayName
       const metaTitle = document.querySelector(
         'meta[name="title"]'
       ) as HTMLMetaElement | null
-      if (metaTitle) metaTitle.setAttribute('content', name)
+      if (metaTitle) metaTitle.setAttribute('content', displayName)
     }
     // Cache-first
     try {
@@ -130,7 +139,7 @@ if (!rootElement) {
       if (saved) {
         const s = JSON.parse(saved)
         if (s?.system_name) apply(s.system_name)
-        if (s?.logo) applyFaviconToDom(s.logo)
+        if (s?.logo) applyFaviconToDom(resolveSystemLogo(s.logo))
       }
     } catch {
       /* empty */
@@ -146,7 +155,7 @@ if (!rootElement) {
             /* empty */
           }
         }
-        if (s?.logo) applyFaviconToDom(s.logo as string)
+        applyFaviconToDom(resolveSystemLogo(s?.logo as string | undefined))
       })
       .catch(() => {
         /* empty */

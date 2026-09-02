@@ -24,7 +24,14 @@ import { type TopNavLink } from '../types'
  * In practice, navigation links are dynamically fetched from backend.
  * Priority: Backend dynamic links > Provided navLinks > defaultTopNavLinks
  *
- * This is intentionally empty to encourage backend configuration.
- * If you need fallback links, add them here.
+ * Keep a small, brand-neutral fallback so the public shell remains usable
+ * when `/api/status` is unavailable during startup or a backend outage.
  */
-export const defaultTopNavLinks: TopNavLink[] = []
+export const defaultTopNavLinks: TopNavLink[] = [
+  { title: 'Home', href: '/' },
+  { title: 'Manage', href: '/dashboard' },
+  { title: 'Models', href: '/pricing' },
+  { title: 'Hot', href: '/rankings' },
+  { title: 'Docs', href: '/docs' },
+  { title: 'About', href: '/about' },
+]

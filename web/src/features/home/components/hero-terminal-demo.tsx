@@ -16,533 +16,319 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useEffect, useRef, type ReactNode } from 'react'
+import {
+  Braces,
+  Check,
+  CircleDot,
+  MessageSquareText,
+  Radio,
+  Sparkles,
+  Workflow,
+  type LucideIcon,
+} from 'lucide-react'
+import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 
-type AccentTone = 'emerald' | 'amber' | 'blue' | 'violet'
+type RouteTone = 'emerald' | 'amber' | 'blue' | 'violet'
 
-interface ApiDemoConfig {
+interface GatewayRoute {
   id: string
   label: string
-  method: 'POST' | 'GET'
   endpoint: string
-  headers: string[]
-  request: string[]
-  response: string[]
-  responseHighlights: string[]
-  tokens: number
-  latency: number
-  accent: AccentTone
+  icon: LucideIcon
+  tone: RouteTone
+  request: readonly string[]
+  response: readonly string[]
 }
 
-const ACCENT_CLASSES: Record<
-  AccentTone,
+const ROUTES: readonly GatewayRoute[] = [
   {
-    activeText: string
-    activeBorder: string
-    badge: string
-  }
-> = {
-  emerald: {
-    activeText: 'text-emerald-600 dark:text-emerald-400',
-    activeBorder: 'border-emerald-500 dark:border-emerald-400',
-    badge:
-      'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-400/10 dark:text-emerald-400',
-  },
-  amber: {
-    activeText: 'text-amber-600 dark:text-amber-400',
-    activeBorder: 'border-amber-500 dark:border-amber-400',
-    badge:
-      'bg-amber-500/10 text-amber-600 dark:bg-amber-400/10 dark:text-amber-400',
-  },
-  blue: {
-    activeText: 'text-blue-600 dark:text-blue-400',
-    activeBorder: 'border-blue-500 dark:border-blue-400',
-    badge:
-      'bg-blue-500/10 text-blue-600 dark:bg-blue-400/10 dark:text-blue-400',
-  },
-  violet: {
-    activeText: 'text-violet-600 dark:text-violet-400',
-    activeBorder: 'border-violet-500 dark:border-violet-400',
-    badge:
-      'bg-violet-500/10 text-violet-600 dark:bg-violet-400/10 dark:text-violet-400',
-  },
-}
-
-const API_DEMOS: ApiDemoConfig[] = [
-  {
-    id: 'gpt-chat',
-    label: 'Chat',
-    method: 'POST',
+    id: 'openai-chat',
+    label: 'OpenAI',
     endpoint: '/v1/chat/completions',
-    headers: ['"Authorization: Bearer sk-••••"'],
+    icon: MessageSquareText,
+    tone: 'emerald',
     request: [
-      '"model": "your-model",',
-      '"messages": [',
-      '  { "role": "user", "content": "..." }',
-      ']',
+      'POST /v1/chat/completions',
+      'Authorization: Bearer sk-****',
+      '{ "model": "your-model",',
+      '  "messages": [{ "role": "user", "content": "..." }],',
+      '  "stream": true }',
     ],
-    response: [
-      '{',
-      '  "choices": [{ "message": { "content": <text> } }],',
-      '  "usage": { "total_tokens": <tokens> }',
-      '}',
-    ],
-    responseHighlights: ['<text>', '<tokens>'],
-    tokens: 27,
-    latency: 142,
-    accent: 'emerald',
+    response: ['HTTP 200', 'content-type: text/event-stream'],
   },
   {
     id: 'responses',
     label: 'Responses',
-    method: 'POST',
     endpoint: '/v1/responses',
-    headers: ['"Authorization: Bearer sk-••••"'],
-    request: ['"model": "your-model",', '"input": "..."'],
-    response: [
-      '{',
-      '  "output": [{ "type": "output_text", "text": <text> }],',
-      '  "usage": { "total_tokens": <tokens> }',
-      '}',
+    icon: Workflow,
+    tone: 'amber',
+    request: [
+      'POST /v1/responses',
+      'Authorization: Bearer sk-****',
+      '{ "model": "your-model",',
+      '  "input": "...",',
+      '  "stream": true }',
     ],
-    responseHighlights: ['<text>', '<tokens>'],
-    tokens: 31,
-    latency: 168,
-    accent: 'amber',
+    response: ['HTTP 200', 'event: response.output_text.delta'],
   },
   {
     id: 'claude',
     label: 'Claude',
-    method: 'POST',
     endpoint: '/v1/messages',
-    headers: ['"x-api-key: sk-••••"', '"anthropic-version: 2023-06-01"'],
+    icon: Braces,
+    tone: 'blue',
     request: [
-      '"model": "your-model",',
-      '"max_tokens": 1024,',
-      '"messages": [',
-      '  { "role": "user", "content": "..." }',
-      ']',
+      'POST /v1/messages',
+      'x-api-key: sk-****',
+      'anthropic-version: 2023-06-01',
+      '{ "model": "your-model",',
+      '  "messages": [{ "role": "user", "content": "..." }] }',
     ],
-    response: [
-      '{',
-      '  "content": [{ "type": "text", "text": <text> }],',
-      '  "usage": { "input_tokens": <in>, "output_tokens": <out> }',
-      '}',
-    ],
-    responseHighlights: ['<text>', '<in>', '<out>'],
-    tokens: 29,
-    latency: 156,
-    accent: 'blue',
+    response: ['HTTP 200', 'content-type: application/json'],
   },
   {
     id: 'gemini',
     label: 'Gemini',
-    method: 'POST',
-    endpoint: '/v1beta/models/{model}:generateContent',
-    headers: ['"x-goog-api-key: sk-••••"'],
+    endpoint: '/v1beta/models',
+    icon: Sparkles,
+    tone: 'violet',
     request: [
-      '"contents": [',
-      '  { "role": "user",',
-      '    "parts": [{ "text": "..." }] }',
-      ']',
+      'POST /v1beta/models/{model}:generateContent',
+      'x-goog-api-key: sk-****',
+      '{ "contents": [{',
+      '  "role": "user",',
+      '  "parts": [{ "text": "..." }] }] }',
     ],
-    response: [
-      '{',
-      '  "candidates": [{ "content": { "parts": [{ "text": <text> }] } }],',
-      '  "usageMetadata": { "totalTokenCount": <tokens> }',
-      '}',
-    ],
-    responseHighlights: ['<text>', '<tokens>'],
-    tokens: 25,
-    latency: 93,
-    accent: 'violet',
+    response: ['HTTP 200', 'content-type: application/json'],
   },
 ]
 
-const CYCLE_INTERVAL = 4500
-const TRANSITION_MS = 220
+const TONE_CLASSES: Record<
+  RouteTone,
+  { icon: string; selected: string; dot: string }
+> = {
+  emerald: {
+    icon: 'text-emerald-600 dark:text-emerald-400',
+    selected: 'border-emerald-500/40 bg-emerald-500/8',
+    dot: 'bg-emerald-500',
+  },
+  amber: {
+    icon: 'text-amber-600 dark:text-amber-400',
+    selected: 'border-amber-500/40 bg-amber-500/8',
+    dot: 'bg-amber-500',
+  },
+  blue: {
+    icon: 'text-blue-600 dark:text-blue-400',
+    selected: 'border-blue-500/40 bg-blue-500/8',
+    dot: 'bg-blue-500',
+  },
+  violet: {
+    icon: 'text-violet-600 dark:text-violet-400',
+    selected: 'border-violet-500/40 bg-violet-500/8',
+    dot: 'bg-violet-500',
+  },
+}
 
 interface HeroTerminalDemoProps {
   className?: string
+  statusLoading?: boolean
+  statusReady?: boolean
+  systemName?: string
+  version?: string | null
+}
+
+function getGatewayStatusLabel(
+  t: (key: string) => string,
+  statusLoading?: boolean,
+  statusReady?: boolean
+) {
+  if (statusLoading) return t('Loading...')
+  if (statusReady) return t('Online')
+  return t('Ready')
+}
+
+function getRequestLineClass(index: number) {
+  if (index === 0) return 'text-emerald-700 dark:text-emerald-300'
+  if (index === 1) return 'text-blue-700 dark:text-blue-300'
+  return 'text-foreground/65'
+}
+
+function getVersionLabel(version: string) {
+  return version.startsWith('v') ? version : `v${version}`
 }
 
 export function HeroTerminalDemo(props: HeroTerminalDemoProps) {
-  const [activeIndex, setActiveIndex] = useState(0)
-  const [transitioning, setTransitioning] = useState(false)
-  const intervalRef = useRef<ReturnType<typeof setInterval>>(undefined)
-  const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
-
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
-    if (mq.matches) return
-
-    intervalRef.current = setInterval(() => {
-      setTransitioning(true)
-      timeoutRef.current = setTimeout(() => {
-        setActiveIndex((prev) => (prev + 1) % API_DEMOS.length)
-        setTransitioning(false)
-      }, TRANSITION_MS)
-    }, CYCLE_INTERVAL)
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    }
-  }, [])
-
-  const handleSelect = (index: number) => {
-    if (index === activeIndex) return
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    setTransitioning(true)
-    timeoutRef.current = setTimeout(() => {
-      setActiveIndex(index)
-      setTransitioning(false)
-    }, TRANSITION_MS)
-  }
-
-  const demo = API_DEMOS[activeIndex]
-  const accent = ACCENT_CLASSES[demo.accent]
+  const { t } = useTranslation()
+  const [activeRouteId, setActiveRouteId] = useState(ROUTES[0].id)
+  const activeRoute =
+    ROUTES.find((route) => route.id === activeRouteId) ?? ROUTES[0]
+  const statusLabel = getGatewayStatusLabel(
+    t,
+    props.statusLoading,
+    props.statusReady
+  )
 
   return (
-    <div className={cn('mx-auto w-full max-w-2xl', props.className)}>
-      <div
-        className={cn(
-          'overflow-hidden rounded-2xl border backdrop-blur-sm',
-          'border-border/60 bg-white/95 shadow-[0_20px_50px_-25px_rgba(15,23,42,0.18)]',
-          'dark:border-white/[0.06] dark:bg-[#0b0f17]/95 dark:shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)]'
-        )}
-      >
-        {/* Tab strip */}
-        <div
-          className={cn(
-            'flex items-center gap-1 border-b px-2 sm:gap-1.5 sm:px-3',
-            'border-border/50 dark:border-white/[0.05]'
-          )}
+    <section
+      aria-label={t('API Requests')}
+      data-slot='gateway-console'
+      className={cn(
+        'bg-card border-border/80 min-w-0 overflow-hidden rounded-lg border shadow-lg shadow-black/5',
+        'dark:border-white/10 dark:bg-[#0d1110] dark:shadow-black/30',
+        props.className
+      )}
+    >
+      <header className='border-border/70 bg-muted/35 flex h-10 min-w-0 items-center gap-2 border-b px-3 dark:border-white/10 dark:bg-white/[0.03]'>
+        <CircleDot className='size-3.5 shrink-0 text-emerald-500' />
+        <span className='min-w-0 truncate text-xs font-semibold'>
+          {props.systemName || t('API Access')}
+        </span>
+        <span className='text-muted-foreground hidden text-[10px] sm:inline'>
+          /
+        </span>
+        <span className='text-muted-foreground hidden text-[10px] sm:inline'>
+          {t('Routing & Overrides')}
+        </span>
+        <div className='ml-auto flex shrink-0 items-center gap-2'>
+          {props.version ? (
+            <code className='text-muted-foreground hidden text-[10px] sm:block'>
+              {getVersionLabel(props.version)}
+            </code>
+          ) : null}
+          <span className='border-border/70 bg-background/80 flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium dark:border-white/10 dark:bg-white/[0.04]'>
+            <span
+              className={cn(
+                'size-1.5 rounded-full',
+                props.statusLoading ? 'bg-amber-500' : 'bg-emerald-500'
+              )}
+            />
+            {statusLabel}
+          </span>
+        </div>
+      </header>
+
+      <div className='grid min-w-0 md:grid-cols-[188px_minmax(0,1fr)]'>
+        <nav
+          aria-label={t('compatible API routes')}
+          className='border-border/70 grid min-w-0 grid-cols-4 gap-1 border-b p-2 md:block md:border-r md:border-b-0 md:p-3 dark:border-white/10'
         >
-          {API_DEMOS.map((item, index) => {
-            const tone = ACCENT_CLASSES[item.accent]
-            const isActive = index === activeIndex
+          <div className='text-muted-foreground mb-2 hidden items-center justify-between px-1 text-[10px] font-semibold uppercase md:flex'>
+            <span>{t('Routes')}</span>
+            <span>{ROUTES.length}</span>
+          </div>
+          {ROUTES.map((route) => {
+            const Icon = route.icon
+            const routeTone = TONE_CLASSES[route.tone]
+            const selected = activeRoute.id === route.id
+
             return (
               <button
-                key={item.id}
-                onClick={() => handleSelect(index)}
+                key={route.id}
+                type='button'
+                aria-pressed={selected}
+                onClick={() => setActiveRouteId(route.id)}
                 className={cn(
-                  'relative -mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-2.5 text-[11px] font-medium tracking-wide transition-colors sm:px-3 sm:text-xs',
-                  isActive
-                    ? `${tone.activeBorder} ${tone.activeText}`
-                    : 'text-foreground/40 hover:text-foreground/70 border-transparent'
+                  'hover:bg-muted/60 flex h-9 min-w-0 items-center gap-2 rounded-md border border-transparent px-2 text-left transition-colors md:mb-1 md:h-12 md:w-full',
+                  selected && routeTone.selected
                 )}
               >
-                {item.label}
+                <Icon
+                  aria-hidden='true'
+                  className={cn(
+                    'hidden size-3.5 shrink-0 sm:block',
+                    routeTone.icon
+                  )}
+                />
+                <span className='min-w-0'>
+                  <span className='block truncate text-[11px] font-semibold md:text-xs'>
+                    {route.label}
+                  </span>
+                  <code className='text-muted-foreground hidden truncate text-[9px] md:block'>
+                    {route.endpoint}
+                  </code>
+                </span>
+                <span
+                  aria-hidden='true'
+                  className={cn(
+                    'ml-auto hidden size-1.5 shrink-0 rounded-full md:block',
+                    routeTone.dot
+                  )}
+                />
               </button>
             )
           })}
-          <div className='ml-auto flex items-center gap-2 pr-2 sm:pr-3'>
-            <span className='inline-block size-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.45)]' />
-            <span className='text-foreground/40 font-mono text-[10px] tracking-wider uppercase'>
-              200 ok
+        </nav>
+
+        <div className='min-w-0'>
+          <div className='border-border/70 flex h-10 min-w-0 items-center gap-2 border-b px-3 dark:border-white/10'>
+            <span className='rounded-md bg-blue-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-blue-700 dark:text-blue-300'>
+              POST
+            </span>
+            <code className='min-w-0 truncate text-[10px] sm:text-xs'>
+              {activeRoute.endpoint}
+            </code>
+            <span className='text-muted-foreground ml-auto flex shrink-0 items-center gap-1 text-[9px]'>
+              <Radio aria-hidden='true' className='size-3' />
+              SSE
             </span>
           </div>
-        </div>
 
-        {/* Endpoint row */}
-        <div
-          className={cn(
-            'flex items-center gap-2.5 border-b px-5 py-3',
-            'border-border/40 dark:border-white/[0.04]'
-          )}
-        >
-          <span
-            className={cn(
-              'rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider',
-              accent.badge
-            )}
-          >
-            {demo.method}
-          </span>
-          <code
-            className={cn(
-              'text-foreground/75 truncate font-mono text-[12.5px] transition-opacity duration-200',
-              transitioning ? 'opacity-0' : 'opacity-100'
-            )}
-          >
-            {demo.endpoint}
-          </code>
-        </div>
+          <div className='grid h-[112px] min-w-0 grid-rows-[1fr_40px] font-mono sm:h-[190px] sm:grid-rows-[1fr_48px] lg:h-[240px]'>
+            <div className='min-w-0 overflow-hidden px-3 py-2.5 sm:px-4 sm:py-3'>
+              <div className='text-muted-foreground mb-1.5 flex items-center justify-between font-sans text-[9px] font-semibold uppercase'>
+                <span>{t('Request')}</span>
+                <span>JSON</span>
+              </div>
+              <div className='space-y-0.5 text-[9px] leading-4 sm:text-[11px] sm:leading-5'>
+                {activeRoute.request.map((line, index) => (
+                  <div
+                    key={`${activeRoute.id}-${line}`}
+                    className={cn(
+                      'max-w-full truncate',
+                      getRequestLineClass(index)
+                    )}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </div>
 
-        {/* Body — fixed rows so neither block shifts when switching demos */}
-        <div className='grid h-[400px] grid-rows-[235px_minmax(0,1fr)] font-mono text-[12.5px] leading-[1.55]'>
-          {/* Request */}
-          <RequestBlock demo={demo} transitioning={transitioning} />
-
-          {/* Response */}
-          <ResponseBlock demo={demo} transitioning={transitioning} />
-        </div>
-
-        {/* Footer metrics */}
-        <div
-          className={cn(
-            'flex items-center justify-between border-t px-5 py-2.5',
-            'border-border/40 bg-muted/30 dark:border-white/[0.05] dark:bg-white/[0.02]'
-          )}
-        >
-          <div className='text-foreground/40 flex items-center gap-3 text-[10px] tabular-nums'>
-            <span className='flex items-center gap-1'>
-              <span className='font-mono'>{demo.latency}</span>
-              <span className='tracking-wider uppercase'>ms</span>
-            </span>
-            <span className='bg-foreground/15 size-1 rounded-full' />
-            <span className='flex items-center gap-1'>
-              <span className='font-mono'>{demo.tokens}</span>
-              <span className='tracking-wider uppercase'>tokens</span>
-            </span>
-            <span className='bg-foreground/15 size-1 rounded-full' />
-            <span className='flex items-center gap-1'>
-              <span className='tracking-wider uppercase'>cost</span>
-              <span className='font-mono'>
-                ${(demo.tokens * 0.00003).toFixed(5)}
+            <div className='border-border/70 bg-muted/25 flex min-w-0 items-center gap-2 overflow-hidden border-t px-3 dark:border-white/10 dark:bg-white/[0.02]'>
+              <span className='text-muted-foreground font-sans text-[9px] font-semibold uppercase'>
+                {t('Response')}
               </span>
-            </span>
+              <span className='flex shrink-0 items-center gap-1 font-sans text-[9px] font-semibold text-emerald-600 dark:text-emerald-400'>
+                <Check aria-hidden='true' className='size-3' />
+                {activeRoute.response[0]}
+              </span>
+              <code className='text-muted-foreground min-w-0 truncate text-[9px]'>
+                {activeRoute.response[1]}
+              </code>
+            </div>
           </div>
-          <span className='text-foreground/30 font-mono text-[10px] tracking-wider uppercase'>
-            stream · sse
-          </span>
         </div>
       </div>
-    </div>
-  )
-}
 
-function RequestBlock(props: { demo: ApiDemoConfig; transitioning: boolean }) {
-  const { demo, transitioning } = props
-
-  return (
-    <div className='relative px-5 py-4'>
-      <SectionLabel>Request</SectionLabel>
-      <div
-        className={cn(
-          'mt-2 transition-opacity duration-200',
-          transitioning ? 'opacity-0' : 'opacity-100'
-        )}
-      >
-        <CodeLine>
-          <Command>curl</Command> <Flag>-X</Flag> <Flag>POST</Flag>{' '}
-          <StringText>&quot;{demo.endpoint}&quot;</StringText>{' '}
-          <Muted>{'\\'}</Muted>
-        </CodeLine>
-        {demo.headers.map((header) => (
-          <CodeLine key={header} indent={2}>
-            <Flag>-H</Flag> <StringText>{header}</StringText>{' '}
-            <Muted>{'\\'}</Muted>
-          </CodeLine>
+      <footer className='border-border/70 bg-muted/20 grid grid-cols-3 border-t dark:border-white/10 dark:bg-white/[0.02]'>
+        {[t('Authentication'), t('Streaming'), t('Billing')].map((label) => (
+          <div
+            key={label}
+            className='border-border/60 flex min-w-0 items-center justify-center gap-1.5 border-r px-1 py-2 last:border-r-0 sm:py-2.5 dark:border-white/10'
+          >
+            <Check
+              aria-hidden='true'
+              className='size-3 shrink-0 text-emerald-500'
+            />
+            <span className='truncate text-[9px] font-medium sm:text-[10px]'>
+              {label}
+            </span>
+          </div>
         ))}
-        <CodeLine indent={2}>
-          <Flag>-d</Flag> <StringText>&apos;{'{'}</StringText>
-        </CodeLine>
-        {demo.request.map((line, i) => (
-          <CodeLine key={i} indent={4}>
-            {renderJsonLine(line)}
-          </CodeLine>
-        ))}
-        <CodeLine indent={2}>
-          <StringText>{'}'}&apos;</StringText>
-        </CodeLine>
-      </div>
-    </div>
-  )
-}
-
-function ResponseBlock(props: { demo: ApiDemoConfig; transitioning: boolean }) {
-  const { demo, transitioning } = props
-
-  return (
-    <div
-      className={cn(
-        'relative border-t px-5 py-4',
-        'border-border/40 bg-muted/20 dark:border-white/[0.05] dark:bg-white/[0.015]'
-      )}
-    >
-      <SectionLabel>Response</SectionLabel>
-      <div
-        className={cn(
-          'mt-2 transition-opacity duration-200',
-          transitioning ? 'opacity-0' : 'opacity-100'
-        )}
-      >
-        {demo.response.map((line, i) => (
-          <CodeLine key={i}>{renderResponseLine(line, demo)}</CodeLine>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function SectionLabel(props: { children: ReactNode }) {
-  return (
-    <span className='text-foreground/30 font-sans text-[10px] font-semibold tracking-[0.18em] uppercase'>
-      {props.children}
-    </span>
-  )
-}
-
-const STRING_RE = /"[^"]*"/g
-const PLACEHOLDER_RE = /<[a-z]+>/gi
-
-function renderJsonLine(line: string): ReactNode {
-  if (!line.trim()) return <Muted> </Muted>
-  return tokenize(line)
-}
-
-function renderResponseLine(line: string, demo: ApiDemoConfig): ReactNode {
-  if (!line.trim()) return <Muted> </Muted>
-
-  const segments: ReactNode[] = []
-  let cursor = 0
-  const matches = [...line.matchAll(PLACEHOLDER_RE)]
-
-  if (matches.length === 0) return tokenize(line)
-
-  matches.forEach((match, idx) => {
-    const start = match.index ?? 0
-    if (start > cursor) {
-      segments.push(
-        <span key={`pre-${idx}`}>{tokenize(line.slice(cursor, start))}</span>
-      )
-    }
-    const placeholder = match[0]
-    if (placeholder === '<text>') {
-      segments.push(
-        <Accent key={`ph-${idx}`} accent={demo.accent}>
-          {`"${truncateResponse(demo)}"`}
-        </Accent>
-      )
-    } else if (placeholder === '<tokens>') {
-      segments.push(<NumberText key={`ph-${idx}`}>{demo.tokens}</NumberText>)
-    } else if (placeholder === '<in>') {
-      segments.push(
-        <NumberText key={`ph-${idx}`}>
-          {Math.floor(demo.tokens * 0.4)}
-        </NumberText>
-      )
-    } else if (placeholder === '<out>') {
-      segments.push(
-        <NumberText key={`ph-${idx}`}>
-          {Math.ceil(demo.tokens * 0.6)}
-        </NumberText>
-      )
-    } else {
-      segments.push(<Muted key={`ph-${idx}`}>{placeholder}</Muted>)
-    }
-    cursor = start + placeholder.length
-  })
-
-  if (cursor < line.length) {
-    segments.push(<span key='tail'>{tokenize(line.slice(cursor))}</span>)
-  }
-
-  return segments
-}
-
-function truncateResponse(demo: ApiDemoConfig): string {
-  const map: Record<string, string> = {
-    'gpt-chat': 'Chat request routed.',
-    responses: 'Response workflow ready.',
-    claude: 'Claude message routed.',
-    gemini: 'Gemini request served.',
-  }
-  return map[demo.id] ?? '...'
-}
-
-function tokenize(input: string): ReactNode {
-  // Split string into "..." string runs and the rest, then color keys/punct.
-  const segments: ReactNode[] = []
-  let cursor = 0
-  const matches = [...input.matchAll(STRING_RE)]
-
-  matches.forEach((match, idx) => {
-    const start = match.index ?? 0
-    if (start > cursor) {
-      segments.push(
-        <Muted key={`m-${idx}`}>{input.slice(cursor, start)}</Muted>
-      )
-    }
-    const text = match[0]
-    const after = input.slice(start + text.length).trimStart()
-    const isKey = after.startsWith(':')
-    if (isKey) {
-      segments.push(<Key key={`k-${idx}`}>{text}</Key>)
-    } else {
-      segments.push(<StringText key={`s-${idx}`}>{text}</StringText>)
-    }
-    cursor = start + text.length
-  })
-
-  if (cursor < input.length) {
-    segments.push(<Muted key='tail'>{input.slice(cursor)}</Muted>)
-  }
-
-  return segments
-}
-
-function CodeLine(props: { children: ReactNode; indent?: number }) {
-  return (
-    <div className='break-words whitespace-pre-wrap'>
-      {props.indent ? (
-        <span
-          aria-hidden
-          className='inline-block'
-          style={{ width: `${props.indent}ch` }}
-        />
-      ) : null}
-      {props.children}
-    </div>
-  )
-}
-
-function Command(props: { children: ReactNode }) {
-  return (
-    <span className='font-medium text-emerald-600 dark:text-emerald-400'>
-      {props.children}
-    </span>
-  )
-}
-
-function Flag(props: { children: ReactNode }) {
-  return (
-    <span className='text-blue-600 dark:text-blue-400'>{props.children}</span>
-  )
-}
-
-function Key(props: { children: ReactNode }) {
-  return (
-    <span className='text-sky-700 dark:text-sky-300'>{props.children}</span>
-  )
-}
-
-function StringText(props: { children: ReactNode }) {
-  return (
-    <span className='text-amber-700 dark:text-amber-300'>{props.children}</span>
-  )
-}
-
-function NumberText(props: { children: ReactNode }) {
-  return (
-    <span className='font-medium text-violet-600 dark:text-violet-300'>
-      {props.children}
-    </span>
-  )
-}
-
-function Muted(props: { children: ReactNode }) {
-  return <span className='text-foreground/55'>{props.children}</span>
-}
-
-function Accent(props: { children: ReactNode; accent: AccentTone }) {
-  const tone = ACCENT_CLASSES[props.accent]
-  return (
-    <span className={cn('font-medium', tone.activeText)}>{props.children}</span>
+      </footer>
+    </section>
   )
 }

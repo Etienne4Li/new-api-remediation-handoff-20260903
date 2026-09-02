@@ -537,7 +537,16 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
 	})
+	cacheUsage := perfCacheUsageFromUpstream(ctx, originUsage, billingUsage)
 	gopool.Go(func() {
-		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
+		perfmetrics.RecordRelaySampleWithTokens(
+			relayInfo,
+			true,
+			cacheUsage.InputTokens,
+			cacheUsage.CacheReadTokens,
+			cacheUsage.CacheWriteTokens,
+			int64(summary.CompletionTokens),
+			cacheUsage.Observed,
+		)
 	})
 }

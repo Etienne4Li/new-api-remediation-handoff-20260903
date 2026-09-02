@@ -19,7 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-import { DEFAULT_SYSTEM_NAME, DEFAULT_LOGO } from '@/lib/constants'
+import {
+  DEFAULT_SYSTEM_NAME,
+  DEFAULT_LOGO,
+  resolveSystemLogo,
+  resolveSystemName,
+} from '@/lib/constants'
 
 export type CurrencyDisplayType = 'USD' | 'CNY' | 'TOKENS' | 'CUSTOM'
 
@@ -65,6 +70,42 @@ interface SystemConfigState {
   setLoading: (loading: boolean) => void
 }
 
+type PersistedSystemConfigState = Pick<
+  SystemConfigState,
+  'config' | 'loadedLogoUrl'
+>
+
+const SYSTEM_CONFIG_PERSIST_VERSION = 2
+
+export function migratePersistedSystemConfig(
+  persistedState: unknown
+): PersistedSystemConfigState {
+  const persisted =
+    persistedState && typeof persistedState === 'object'
+      ? (persistedState as Partial<PersistedSystemConfigState>)
+      : {}
+  const config = persisted.config
+  const systemName = resolveSystemName(config?.systemName)
+  const logo = resolveSystemLogo(config?.logo)
+  const loadedLogoUrl = resolveSystemLogo(persisted.loadedLogoUrl)
+
+  return {
+    config: {
+      ...config,
+      systemName,
+      logo,
+      currency: {
+        ...DEFAULT_CURRENCY_CONFIG,
+        ...config?.currency,
+      },
+    },
+    loadedLogoUrl:
+      loadedLogoUrl === DEFAULT_LOGO && logo !== DEFAULT_LOGO
+        ? logo
+        : loadedLogoUrl,
+  }
+}
+
 /**
  * System configuration store with automatic persistence
  * Manages system name, logo, footer HTML and loading states
@@ -86,7 +127,7 @@ export const useSystemConfigStore = create<SystemConfigState>()(
             ...newConfig,
             currency: {
               ...state.config.currency,
-              ...(newConfig.currency ?? {}),
+              ...newConfig.currency,
             },
           },
         })),
@@ -95,6 +136,8 @@ export const useSystemConfigStore = create<SystemConfigState>()(
     }),
     {
       name: 'system-config-storage',
+      version: SYSTEM_CONFIG_PERSIST_VERSION,
+      migrate: migratePersistedSystemConfig,
       partialize: (state) => ({
         config: state.config,
         loadedLogoUrl: state.loadedLogoUrl,
@@ -105,7 +148,7 @@ export const useSystemConfigStore = create<SystemConfigState>()(
 
 // Selector helpers for convenience
 export const getSystemName = () =>
-  useSystemConfigStore.getState().config.systemName
+  resolveSystemName(useSystemConfigStore.getState().config.systemName)
 
 export const getLogo = () => useSystemConfigStore.getState().config.logo
 

@@ -47,7 +47,7 @@ export function AffiliateRewardsCard({
   const { t } = useTranslation()
   if (loading) {
     return (
-      <Card data-card-hover='false' className='bg-muted/20 py-0'>
+      <Card data-card-hover='false' className='py-0 shadow-sm'>
         <CardContent className='grid gap-4 p-3 sm:p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,0.72fr)_minmax(320px,1.15fr)] lg:items-center'>
           <div>
             <Skeleton className='h-5 w-32' />
@@ -63,7 +63,7 @@ export function AffiliateRewardsCard({
   const hasRewards = (user?.aff_quota ?? 0) > 0
 
   return (
-    <Card data-card-hover='false' className='bg-muted/20 py-0'>
+    <Card data-card-hover='false' className='py-0 shadow-sm'>
       <CardContent className='grid gap-3 p-3 sm:gap-4 sm:p-4 lg:grid-cols-[minmax(200px,1fr)_minmax(180px,0.65fr)_minmax(280px,1fr)] lg:items-center'>
         <div className='flex min-w-0 items-center gap-2.5'>
           <IconBadge tone='chart-3'>
@@ -81,27 +81,28 @@ export function AffiliateRewardsCard({
           </div>
         </div>
 
-        <div className='grid grid-cols-3 gap-1.5 text-center'>
+        <dl className='grid grid-cols-3 gap-1.5 text-center'>
           {[
             [t('Pending'), formatQuota(user?.aff_quota ?? 0)],
             [t('Total Earned'), formatQuota(user?.aff_history_quota ?? 0)],
             [t('Invites'), String(user?.aff_count ?? 0)],
           ].map(([label, value]) => (
-            <div key={label}>
-              <div className='text-muted-foreground truncate text-[10px] font-medium tracking-wider uppercase'>
+            <div key={label} className='min-w-0'>
+              <dt className='text-muted-foreground truncate text-[10px] font-medium uppercase'>
                 {label}
-              </div>
-              <div className='mt-0.5 truncate text-sm font-semibold tabular-nums'>
+              </dt>
+              <dd className='mt-0.5 truncate text-sm font-semibold tabular-nums'>
                 {value}
-              </div>
+              </dd>
             </div>
           ))}
-        </div>
+        </dl>
 
-        <div className='flex items-center gap-2'>
+        <div className='grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]'>
           <Input
             value={affiliateLink}
             readOnly
+            aria-label={t('Copy referral link')}
             className='border-muted bg-background/70 h-9 min-w-0 flex-1 font-mono text-xs'
           />
           <CopyButton
@@ -116,7 +117,7 @@ export function AffiliateRewardsCard({
             <Button
               onClick={onTransfer}
               disabled={!complianceConfirmed}
-              className='h-9 shrink-0 px-3'
+              className='col-span-2 h-9 w-full px-3 whitespace-normal sm:col-span-1 sm:w-auto'
               size='sm'
             >
               {t('Transfer to Balance')}

@@ -1,6 +1,7 @@
 package geminichat
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -109,6 +110,49 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 	}
 	if geminiRequest.GenerationConfig.CandidateCount != nil && *geminiRequest.GenerationConfig.CandidateCount > 0 {
 		openaiRequest.N = kitutil.GetPointer(*geminiRequest.GenerationConfig.CandidateCount)
+	}
+	if len(geminiRequest.GenerationConfig.ResponseModalities) > 0 {
+		modalities := make([]string, 0, len(geminiRequest.GenerationConfig.ResponseModalities))
+		for _, modality := range geminiRequest.GenerationConfig.ResponseModalities {
+			if normalized := strings.ToLower(strings.TrimSpace(modality)); normalized != "" {
+				modalities = append(modalities, normalized)
+			}
+		}
+		if len(modalities) > 0 {
+			encoded, err := json.Marshal(modalities)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal response modalities: %w", err)
+			}
+			openaiRequest.Modalities = encoded
+		}
+	}
+	if len(geminiRequest.GenerationConfig.ImageConfig) > 0 {
+		var imageConfig map[string]any
+		if err := json.Unmarshal(geminiRequest.GenerationConfig.ImageConfig, &imageConfig); err != nil {
+			return nil, fmt.Errorf("invalid Gemini image config: %w", err)
+		}
+		openAIImageConfig := make(map[string]any)
+		if aspectRatio, ok := imageConfig["aspectRatio"]; ok {
+			openAIImageConfig["aspect_ratio"] = aspectRatio
+		} else if aspectRatio, ok := imageConfig["aspect_ratio"]; ok {
+			openAIImageConfig["aspect_ratio"] = aspectRatio
+		}
+		if imageSize, ok := imageConfig["imageSize"]; ok {
+			openAIImageConfig["image_size"] = imageSize
+		} else if imageSize, ok := imageConfig["image_size"]; ok {
+			openAIImageConfig["image_size"] = imageSize
+		}
+		if len(openAIImageConfig) > 0 {
+			extraBody, err := json.Marshal(map[string]any{
+				"google": map[string]any{
+					"image_config": openAIImageConfig,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal image config: %w", err)
+			}
+			openaiRequest.ExtraBody = extraBody
+		}
 	}
 
 	if len(geminiRequest.GetTools()) > 0 {

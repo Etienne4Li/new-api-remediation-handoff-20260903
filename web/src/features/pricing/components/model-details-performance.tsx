@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, HeartPulse, Timer } from 'lucide-react'
+import { AlertTriangle, Database, HeartPulse, Timer } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -26,17 +26,22 @@ import {
   staticDataTableClassNames as tableStyles,
 } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
-import { getPerfMetrics } from '@/features/performance-metrics/api'
+import {
+  getPerfMetrics,
+  PERF_METRICS_AUTO_REFRESH_OPTIONS,
+} from '@/features/performance-metrics/api'
 import {
   formatLatency,
   formatThroughput,
   formatUptimePct,
+  getCombinedCacheHitRate,
+  getObservedCacheHitRate,
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
 import type { PerformanceGroup } from '@/features/performance-metrics/types'
 import { cn } from '@/lib/utils'
 
-import { type UptimeDayPoint } from '../lib/mock-stats'
+import type { UptimeDayPoint } from '../lib/mock-stats'
 import type { PricingModel } from '../types'
 import { LatencyTrendChart, UptimeTrendChart } from './model-details-charts'
 import { UptimeSparkline } from './model-details-uptime-sparkline'
@@ -51,7 +56,7 @@ function StatCard(props: {
   const Icon = props.icon
   return (
     <div className='bg-background flex flex-col gap-1 rounded-lg border p-3'>
-      <span className='text-muted-foreground inline-flex items-center gap-1.5 text-[10px] font-medium tracking-wider uppercase'>
+      <span className='text-muted-foreground inline-flex items-center gap-1.5 text-[10px] font-medium uppercase'>
         <Icon className='size-3' />
         {props.label}
       </span>
@@ -78,6 +83,7 @@ type PerformanceRow = {
   avg_latency_ms: number
   success_rate: number
   avg_tps: number
+  cache_hit_rate: number
 }
 
 function toUptimePct(value: number): number {
@@ -97,7 +103,7 @@ function toLatencySeries(groups: PerformanceGroup[]) {
     }
   }
 
-  return Array.from(byTs.entries())
+  return [...byTs.entries()]
     .sort(([a], [b]) => a - b)
     .map(([ts, values]) => ({
       timestamp: new Date(ts * 1000).toISOString(),
@@ -121,7 +127,7 @@ function toUptimeSeries(groups: PerformanceGroup[]): UptimeDayPoint[] {
       byTs.set(point.ts, current)
     }
   }
-  return Array.from(byTs.entries())
+  return [...byTs.entries()]
     .sort(([a], [b]) => a - b)
     .map(([ts, value]) => {
       const uptime =
@@ -166,7 +172,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
   const metricsQuery = useQuery({
     queryKey: ['perf-metrics', props.model.model_name],
     queryFn: () => getPerfMetrics(props.model.model_name, 24),
-    staleTime: 60 * 1000,
+    ...PERF_METRICS_AUTO_REFRESH_OPTIONS,
   })
   const groups = useMemo(
     () => metricsQuery.data?.data.groups ?? [],
@@ -180,6 +186,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
         avg_latency_ms: group.avg_latency_ms,
         success_rate: group.success_rate,
         avg_tps: group.avg_tps,
+        cache_hit_rate: getObservedCacheHitRate(group),
       })),
     [groups]
   )
@@ -217,11 +224,12 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
       ? successRates.reduce((sum, value) => sum + value, 0) /
         successRates.length
       : 0
+  const cacheHitRate = getCombinedCacheHitRate(groups)
   const incidentCount = uptimeSeries.reduce((s, p) => s + p.incidents, 0)
 
   return (
     <div className='flex flex-col gap-4'>
-      <div className='grid grid-cols-1 gap-2 sm:grid-cols-3'>
+      <div className='grid grid-cols-1 gap-2 sm:grid-cols-4'>
         <StatCard
           icon={Timer}
           label='TPS'
@@ -245,6 +253,11 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
               : t('No incidents in the last 24 hours')
           }
           valueClassName={getSuccessRateTextClass(successRate)}
+        />
+        <StatCard
+          icon={Database}
+          label={t('Hit Rate')}
+          value={formatUptimePct(cacheHitRate)}
         />
       </div>
 
@@ -288,6 +301,13 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
               className: tableStyles.compactHeaderCellRight,
               cellClassName: tableStyles.compactMutedNumericCell,
               cell: (perf) => formatLatency(perf.avg_latency_ms),
+            },
+            {
+              id: 'cache-hit-rate',
+              header: t('Hit Rate'),
+              className: tableStyles.compactHeaderCellRight,
+              cellClassName: tableStyles.compactMutedNumericCell,
+              cell: (perf) => formatUptimePct(perf.cache_hit_rate),
             },
             {
               id: 'success',

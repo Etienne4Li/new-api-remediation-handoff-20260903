@@ -64,6 +64,15 @@ redemption.failed: "兌換失敗，請稍後重試"
 redemption.not_provided: "未提供兌換碼"
 redemption.expire_time_invalid: "過期時間不能早於當前時間"
 
+# 工單訊息
+ticket.title_length: "工單標題長度必須在 {{.Min}} 到 {{.Max}} 個字元之間"
+ticket.message_length: "工單內容長度必須在 1 到 {{.Max}} 個字元之間"
+ticket.category_invalid: "無效的工單分類"
+ticket.priority_invalid: "無效的工單優先級"
+ticket.status_invalid: "無效的工單狀態"
+ticket.not_found: "工單不存在"
+ticket.closed: "該工單已關閉，請重新開啟後再回覆"
+
 # User messages
 user.password_login_disabled: "管理員關閉了密碼登錄"
 user.register_disabled: "管理員關閉了新使用者註冊"

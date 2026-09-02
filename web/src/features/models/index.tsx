@@ -44,12 +44,17 @@ import {
 
 const route = getRouteApi('/_authenticated/models/$section')
 
-const SECTION_META: Record<ModelsSectionId, { titleKey: string }> = {
+const SECTION_META: Record<
+  ModelsSectionId,
+  { titleKey: string; descriptionKey: string }
+> = {
   metadata: {
     titleKey: 'Metadata',
+    descriptionKey: 'Manage catalog visibility and pricing.',
   },
   deployments: {
     titleKey: 'Deployments',
+    descriptionKey: 'Configure and deploy a new container instance.',
   },
 }
 
@@ -85,8 +90,11 @@ function ModelsContent() {
 
   return (
     <>
-      <SectionPageLayout fixedContent>
+      <SectionPageLayout fixedContent variant='editorial' density='compact'>
         <SectionPageLayout.Title>{t(meta.titleKey)}</SectionPageLayout.Title>
+        <SectionPageLayout.Description>
+          {t(meta.descriptionKey)}
+        </SectionPageLayout.Description>
         <SectionPageLayout.Actions>
           {activeSection === 'metadata' ? (
             <ModelsPrimaryButtons />

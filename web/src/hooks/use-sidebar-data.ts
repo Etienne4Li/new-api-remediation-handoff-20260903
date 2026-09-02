@@ -22,8 +22,10 @@ import {
   CreditCard,
   FileText,
   FlaskConical,
+  Gauge,
   Key,
   LayoutDashboard,
+  LifeBuoy,
   ListTodo,
   MessageSquare,
   Radio,
@@ -33,10 +35,11 @@ import {
   User,
   Users,
   Wallet,
+  WalletCards,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { type SidebarData } from '@/components/layout/types'
+import type { SidebarData } from '@/components/layout/types'
 import { ROLE } from '@/lib/roles'
 
 /**
@@ -81,6 +84,11 @@ export function useSidebarData(): SidebarData {
             icon: LayoutDashboard,
           },
           {
+            title: t('Performance'),
+            url: '/performance',
+            icon: Gauge,
+          },
+          {
             title: t('API Keys'),
             url: '/keys',
             icon: Key,
@@ -107,6 +115,16 @@ export function useSidebarData(): SidebarData {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,
+          },
+          {
+            title: t('Quota Recharge'),
+            url: '/quota-recharge',
+            icon: WalletCards,
+          },
+          {
+            title: t('Support Tickets'),
+            url: '/tickets',
+            icon: LifeBuoy,
           },
           {
             title: t('Profile'),
@@ -155,6 +173,9 @@ export function useSidebarData(): SidebarData {
             url: '/system-settings/site',
             activeUrls: ['/system-settings'],
             icon: Settings,
+            // `/api/option` and the maintenance APIs behind this workspace
+            // are guarded by RootAuth on the backend.
+            requiredRole: ROLE.SUPER_ADMIN,
           },
         ],
       },

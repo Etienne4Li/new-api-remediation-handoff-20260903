@@ -383,8 +383,17 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
 	})
+	cacheUsage := perfCacheUsageFromUpstream(ctx, usage, usage)
 	gopool.Go(func() {
-		perfmetrics.RecordRelaySample(relayInfo, true, int64(usage.CompletionTokens))
+		perfmetrics.RecordRelaySampleWithTokens(
+			relayInfo,
+			true,
+			cacheUsage.InputTokens,
+			cacheUsage.CacheReadTokens,
+			cacheUsage.CacheWriteTokens,
+			int64(usage.CompletionTokens),
+			cacheUsage.Observed,
+		)
 	})
 }
 

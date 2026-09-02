@@ -156,7 +156,10 @@ export function UserCharts(props: UserChartsProps) {
 
   return (
     <div className='space-y-3'>
-      <div className='flex items-center gap-1.5 overflow-x-auto pb-1 sm:gap-2'>
+      <div
+        className='bg-card flex items-center gap-1.5 overflow-x-auto rounded-lg border p-2 shadow-xs sm:gap-2'
+        aria-label={t('Filters')}
+      >
         <Tabs
           value={String(selectedRange)}
           onValueChange={(value) => handleRangeChange(Number(value))}
@@ -221,23 +224,23 @@ export function UserCharts(props: UserChartsProps) {
         )}
       </div>
 
-      <div className='grid gap-3'>
+      <div className='grid min-w-0 gap-3 sm:gap-4 @5xl/content:grid-cols-2'>
         {USER_CHARTS.map((chart) => {
           const spec = chartData[chart.specKey]
 
           return (
             <div
               key={chart.value}
-              className='overflow-hidden rounded-lg border'
+              className='bg-card min-w-0 overflow-hidden rounded-lg border shadow-xs'
             >
-              <div className='flex w-full items-center gap-2 border-b px-3 py-2 sm:px-5 sm:py-3'>
+              <div className='flex w-full items-center gap-2 border-b px-3 py-2.5 sm:px-4'>
                 <IconBadge tone='info' size='sm'>
                   <Users />
                 </IconBadge>
                 <div className='text-sm font-semibold'>{t(chart.labelKey)}</div>
               </div>
 
-              <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
+              <div className='h-72 p-1.5 sm:h-80 sm:p-2 @5xl/content:h-96'>
                 {isLoading ? (
                   <Skeleton className='h-full w-full' />
                 ) : (

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Lietio</title>
+  <desc id="desc">A continuous calligraphic L with three routed signal nodes.</desc>
+  <style>
+    .lietio-stroke { stroke: #172033; }
+    .lietio-cut { stroke: #fff; }
+    @media (prefers-color-scheme: dark) {
+      .lietio-stroke { stroke: #f4f7fb; }
+      .lietio-cut { stroke: #090d16; }
+    }
+  </style>
+
+  <path
+    class="lietio-stroke"
+    d="M104 34C144 12 194 24 210 60c13 30-10 58-37 48-23-9-18-40 8-58-37 19-61 54-77 92-13 31-27 56-51 72 48 10 109 8 161-15"
+    fill="none"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="17"
+  />
+  <path
+    class="lietio-cut"
+    d="M89 169c22 2 49-4 73-18"
+    fill="none"
+    stroke-linecap="round"
+    stroke-width="4"
+    opacity="0.9"
+  />
+
+  <rect x="96" y="27" width="13" height="13" rx="2" fill="#2f7df6" transform="rotate(16 102.5 33.5)" />
+  <rect x="96" y="136" width="12" height="12" rx="2" fill="#0f9f86" transform="rotate(45 102 142)" />
+  <rect x="207" y="192" width="12" height="12" rx="2" fill="#e36f52" transform="rotate(16 213 198)" />
+</svg>

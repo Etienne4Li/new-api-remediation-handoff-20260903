@@ -51,7 +51,7 @@ export function ApiInfoPanel() {
     <PanelWrapper
       title={
         <span className='flex items-center gap-2'>
-          <IconBadge tone='info' size='sm'>
+          <IconBadge tone='neutral' size='sm'>
             <Route />
           </IconBadge>
           {t('API Info')}

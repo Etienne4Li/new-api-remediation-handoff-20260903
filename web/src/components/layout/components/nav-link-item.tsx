@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Link } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 
@@ -32,6 +33,7 @@ interface NavLinkItemProps {
  * Handles routing and proper link attributes
  */
 export function NavLinkItem({ link, className }: NavLinkItemProps) {
+  const { t } = useTranslation()
   const linkClassName = cn(
     'text-muted-foreground hover:text-foreground transition-colors',
     link.disabled && 'pointer-events-none opacity-50',
@@ -47,14 +49,14 @@ export function NavLinkItem({ link, className }: NavLinkItemProps) {
         className={linkClassName}
         aria-disabled={link.disabled}
       >
-        {link.title}
+        {t(link.title)}
       </a>
     )
   }
 
   return (
     <Link to={link.href} className={linkClassName} disabled={link.disabled}>
-      {link.title}
+      {t(link.title)}
     </Link>
   )
 }
@@ -76,9 +78,9 @@ export function NavLinkList({
 }: NavLinkListProps) {
   return (
     <>
-      {links.map((link, index) => (
+      {links.map((link) => (
         <NavLinkItem
-          key={index}
+          key={`${link.title}-${link.href}`}
           link={link}
           className={cn(className, itemClassName)}
         />

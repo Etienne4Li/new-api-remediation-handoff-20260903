@@ -241,6 +241,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
+		retryParam.ExcludeChannel(channel.Id, channel.ChannelInfo.IsMultiKey)
+		service.ClearCurrentChannelAffinityCacheIfMatches(c, channel.Id)
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -332,11 +334,8 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if openaiErr == nil {
 		return false
 	}
-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
 		return false
-	}
-	if types.IsChannelError(openaiErr) {
-		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {
 		return false
@@ -344,20 +343,47 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if retryTimes <= 0 {
 		return false
 	}
-	if _, ok := c.Get("specific_channel_id"); ok {
-		return false
+	if c != nil {
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		if _, ok := c.Get("specific_channel_id"); ok {
+			return false
+		}
 	}
+
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {
 		return false
 	}
-	if code < 100 || code > 599 {
-		return true
+
+	retryable := types.IsChannelError(openaiErr)
+	if !retryable {
+		if code < 100 || code > 599 {
+			retryable = true
+		} else {
+			retryable = operation_setting.ShouldRetryByStatusCode(code)
+		}
 	}
-	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
+	if !retryable {
 		return false
 	}
-	return operation_setting.ShouldRetryByStatusCode(code)
+	if !service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return true
+	}
+
+	// An affinity hit normally stays pinned. Only failures that are clearly
+	// transient may move the same client session to another healthy channel.
+	errorCode := openaiErr.GetErrorCode()
+	if errorCode == types.ErrorCodeDoRequestFailed || errorCode == types.ErrorCodeChannelResponseTimeExceeded {
+		return true
+	}
+	if types.IsChannelError(openaiErr) {
+		return false
+	}
+	return code == http.StatusRequestTimeout ||
+		code == http.StatusTooManyRequests ||
+		(code >= http.StatusInternalServerError && code <= 599)
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
@@ -396,6 +422,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 		}
 		service.AppendChannelAffinityAdminInfo(c, adminInfo)
+		relaycommon.AppendResponsesInputItemIDNormalizationAdminInfo(c, adminInfo)
 		other["admin_info"] = adminInfo
 		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 		if startTime.IsZero() {

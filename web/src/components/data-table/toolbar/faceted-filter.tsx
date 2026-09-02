@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type Column } from '@tanstack/react-table'
+import type { Column } from '@tanstack/react-table'
 import { Check as CheckIcon, PlusCircle as PlusCircledIcon } from 'lucide-react'
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
@@ -40,16 +40,15 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 
+import {
+  resolveDataTableFilterLabel,
+  type DataTableFilterOption,
+} from './filter-types'
+
 type DataTableFacetedFilterProps<TData, TValue> = {
   column?: Column<TData, TValue>
   title?: string
-  options: {
-    label: string
-    value: string
-    icon?: React.ComponentType<{ className?: string }>
-    iconNode?: React.ReactNode
-    count?: number
-  }[]
+  options: DataTableFilterOption[]
   /** Enable single select mode (only one option can be selected at a time) */
   singleSelect?: boolean
 }
@@ -60,7 +59,15 @@ function DataTableFacetedFilterInner<TData, TValue>({
   options,
   singleSelect = false,
 }: DataTableFacetedFilterProps<TData, TValue>) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  // Filter definitions in the app use both i18n keys and labels that were
+  // already translated by the caller. Only pass known keys through i18n so
+  // translated labels do not produce missingKey warnings or get mangled.
+  const getOptionLabel = React.useCallback(
+    (option: (typeof options)[number]) =>
+      resolveDataTableFilterLabel(option, t, (key) => i18n.exists(key)),
+    [i18n, t]
+  )
   const facets = column?.getFacetedUniqueValues()
   const filterValue = column?.getFilterValue() as string[] | undefined
   const selectedValues = new Set(filterValue)
@@ -112,7 +119,7 @@ function DataTableFacetedFilterInner<TData, TValue>({
                       key={option.value}
                       className='rounded-sm px-1 font-normal'
                     >
-                      {t(option.label)}
+                      {getOptionLabel(option)}
                     </Badge>
                   ))
               )}
@@ -128,6 +135,33 @@ function DataTableFacetedFilterInner<TData, TValue>({
             <CommandGroup>
               {options.map((option) => {
                 const isSelected = selectedValues.has(option.value)
+                let optionIcon: React.ReactNode = null
+                if (option.iconNode) {
+                  optionIcon = (
+                    <span className='text-muted-foreground flex size-4 items-center justify-center'>
+                      {option.iconNode}
+                    </span>
+                  )
+                } else if (option.icon) {
+                  const Icon = option.icon
+                  optionIcon = <Icon className='text-muted-foreground size-4' />
+                }
+
+                let countNode: React.ReactNode = null
+                if (typeof option.count === 'number') {
+                  countNode = (
+                    <span className='text-muted-foreground ms-auto flex h-4 min-w-4 items-center justify-center font-mono text-xs'>
+                      {option.count}
+                    </span>
+                  )
+                } else if (facets?.get(option.value)) {
+                  countNode = (
+                    <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
+                      {facets.get(option.value)}
+                    </span>
+                  )
+                }
+
                 return (
                   <CommandItem
                     key={option.value}
@@ -143,28 +177,14 @@ function DataTableFacetedFilterInner<TData, TValue>({
                     >
                       <CheckIcon className={cn('text-background h-4 w-4')} />
                     </div>
-                    {option.iconNode ? (
-                      <span className='text-muted-foreground flex size-4 items-center justify-center'>
-                        {option.iconNode}
-                      </span>
-                    ) : option.icon ? (
-                      <option.icon className='text-muted-foreground size-4' />
-                    ) : null}
+                    {optionIcon}
                     <span
                       className='min-w-0 flex-1 truncate'
-                      title={t(option.label)}
+                      title={getOptionLabel(option)}
                     >
-                      {t(option.label)}
+                      {getOptionLabel(option)}
                     </span>
-                    {typeof option.count === 'number' ? (
-                      <span className='text-muted-foreground ms-auto flex h-4 min-w-4 items-center justify-center font-mono text-xs'>
-                        {option.count}
-                      </span>
-                    ) : facets?.get(option.value) ? (
-                      <span className='ms-auto flex h-4 w-4 items-center justify-center font-mono text-xs'>
-                        {facets.get(option.value)}
-                      </span>
-                    ) : null}
+                    {countNode}
                   </CommandItem>
                 )
               })}
@@ -209,5 +229,5 @@ function getNextSelectedValues(
     nextSelectedValues.add(optionValue)
   }
 
-  return Array.from(nextSelectedValues)
+  return [...nextSelectedValues]
 }

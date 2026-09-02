@@ -171,6 +171,38 @@ func TestOaiResponsesToChatBufferedStreamHandlerReturnsJSONFromSSE(t *testing.T)
 	require.Contains(t, got, `"finish_reason":"tool_calls"`)
 }
 
+func TestOaiResponsesToChatStreamHandlerTreatsTopLevelErrorAsTerminal(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	body := "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"upstream_overloaded\",\"message\":\"upstream overloaded\"}}\n\ndata: [DONE]\n\n"
+	c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+
+	usage, apiErr := OaiResponsesToChatStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	require.Equal(t, types.ErrorCode("upstream_overloaded"), apiErr.GetErrorCode())
+	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	require.Empty(t, recorder.Body.String())
+}
+
+func TestOaiResponsesToChatBufferedStreamHandlerTreatsTopLevelErrorAsTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"upstream_overloaded\",\"message\":\"upstream overloaded\"}}\n\ndata: [DONE]\n\n"
+	c, recorder, resp, info := newResponsesChatTestContext(t, body, false)
+
+	usage, apiErr := OaiResponsesToChatBufferedStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, apiErr)
+	require.Equal(t, types.ErrorCode("upstream_overloaded"), apiErr.GetErrorCode())
+	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	require.Empty(t, recorder.Body.String())
+}
+
 func TestOaiChatToResponsesStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
 	oldMode := gin.Mode()
 	gin.SetMode(gin.TestMode)

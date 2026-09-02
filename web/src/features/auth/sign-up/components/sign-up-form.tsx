@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import type { z } from 'zod'
@@ -97,7 +97,7 @@ export function SignUpForm({
     },
   })
 
-  const emailValue = form.watch('email')
+  const emailValue = useWatch({ control: form.control, name: 'email' })
   const emailVerificationRequired = !!status?.email_verification
   const hasUserAgreement = Boolean(status?.user_agreement_enabled)
   const hasPrivacyPolicy = Boolean(status?.privacy_policy_enabled)
@@ -125,8 +125,10 @@ export function SignUpForm({
 
   useEffect(() => {
     if (requiresLegalConsent) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- policy changes must revoke prior consent
       setAgreedToLegal(false)
     } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- keep external registration buttons ready when no consent is required
       setAgreedToLegal(true)
     }
   }, [requiresLegalConsent])
@@ -255,7 +257,12 @@ export function SignUpForm({
             <FormItem>
               <FormLabel>{t('Username')}</FormLabel>
               <FormControl>
-                <Input placeholder={t('Enter your username')} {...field} />
+                <Input
+                  placeholder={t('Enter your username')}
+                  autoComplete='username'
+                  className='h-11'
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -272,6 +279,8 @@ export function SignUpForm({
               <FormControl>
                 <PasswordInput
                   placeholder={t('Enter password (8-20 characters)')}
+                  autoComplete='new-password'
+                  className='h-11'
                   {...field}
                 />
               </FormControl>
@@ -288,7 +297,12 @@ export function SignUpForm({
             <FormItem>
               <FormLabel>{t('Confirm password')}</FormLabel>
               <FormControl>
-                <PasswordInput placeholder={t('Confirm password')} {...field} />
+                <PasswordInput
+                  placeholder={t('Confirm password')}
+                  autoComplete='new-password'
+                  className='h-11'
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -311,6 +325,8 @@ export function SignUpForm({
                     <Input
                       placeholder={t('name@example.com')}
                       type='email'
+                      autoComplete='email'
+                      className='h-11'
                       {...field}
                     />
                   </FormControl>
@@ -320,12 +336,14 @@ export function SignUpForm({
             />
 
             {/* Verification Code Field */}
-            <div className='flex items-end gap-2'>
-              <div className='flex-1'>
+            <div className='grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2'>
+              <div className='min-w-0'>
                 <Input
                   placeholder={t('Verification code')}
+                  autoComplete='one-time-code'
                   value={verificationCode}
                   onChange={(e) => setVerificationCode(e.target.value)}
+                  className='h-11'
                 />
               </div>
               <Button
@@ -339,6 +357,7 @@ export function SignUpForm({
                   !turnstileReady
                 }
                 onClick={handleSendVerificationCode}
+                className='h-11 px-3'
               >
                 {verificationCodeAction}
               </Button>
@@ -348,13 +367,12 @@ export function SignUpForm({
 
         {/* Turnstile */}
         {isTurnstileEnabled && (
-          <div className='mt-2'>
-            <Turnstile
-              key={turnstileWidgetKey}
-              siteKey={turnstileSiteKey}
-              onVerify={setTurnstileToken}
-            />
-          </div>
+          <Turnstile
+            key={turnstileWidgetKey}
+            siteKey={turnstileSiteKey}
+            onVerify={setTurnstileToken}
+            className='mt-2'
+          />
         )}
 
         <LegalConsent
@@ -367,7 +385,7 @@ export function SignUpForm({
         {/* Submit Button */}
         <Button
           type='submit'
-          className='mt-2 w-full justify-center gap-2'
+          className='mt-1 h-11 w-full justify-center gap-2'
           disabled={
             isLoading ||
             (requiresLegalConsent && !agreedToLegal) ||
@@ -450,6 +468,7 @@ export function SignUpForm({
               value={wechatCode}
               onChange={(event) => setWeChatCode(event.target.value)}
               autoComplete='one-time-code'
+              className='h-11'
             />
           </div>
         </Dialog>
