@@ -18,8 +18,10 @@ absence of a Git diff in `work/newapi-source` for an absence of changes.
 
 - Branch: `audit/remediation-handoff-20260903`
 - Base: `e468b739` (`docs: update PR template and remove PR Check workflow (#7053)`)
-- Final commit: pending handoff commit
-- Remote: `origin` (GitHub)
+- Snapshot commit: `71a0975a` (`chore: hand off newapi audit remediation`)
+- Final commit: the metadata commit containing this update; resolve with `git log -1`
+- Remote: `origin` (`Etienne4Li/new-api-remediation-handoff-20260903`, GitHub fork)
+- Source repository: `upstream` (`QuantumNous/new-api`, read-only for the current account)
 
 ## Completed
 
@@ -127,8 +129,10 @@ been explicitly approved.
 
 ## Exact Final Validation Commands
 
+From the NewAPI repository root:
+
 ```bash
-cd work/newapi-source/web
+cd web
 /Users/Etienne/.bun/bin/bun run format:check
 /Users/Etienne/.bun/bin/bun run test -- --reporter=dot
 /Users/Etienne/.bun/bin/bun run typecheck
@@ -137,15 +141,16 @@ cd work/newapi-source/web
 /Users/Etienne/.bun/bin/bun run build
 /Users/Etienne/.bun/bin/bun audit --json
 
-cd ../..
+cd ..
 go test ./common ./model ./service ./controller ./relay ./router ./middleware -count=1
 go test -race ./common ./model ./service ./controller ./relay ./router ./middleware -count=1
 go vet ./common ./model ./service ./controller ./relay ./router ./middleware
 cd relaykit && GOWORK=off go build ./...
-
-cd ../../async-image-gateway
-.venv/bin/python -m unittest -v
 ```
+
+The Python gateway is a sibling workspace at `work/async-image-gateway` in the
+original audit workspace. Run its suite from that directory with
+`.venv/bin/python -m unittest -v`; do not enable destructive MySQL tests.
 
 ## Known Risks and Pitfalls
 
@@ -166,8 +171,10 @@ cd ../../async-image-gateway
 - Do not claim a local source fix is deployed. The audit report has production
   incident and operational-remediation items that require separate approval.
 - The public remote may reject branch creation if the configured GitHub account
-  lacks write access. Preserve the local branch and report the exact rejection;
-  do not force-push or target `main`.
+  lacks write access. The current account is read-only on `QuantumNous/new-api`,
+  so the branch is pushed to the personal fork
+  `Etienne4Li/new-api-remediation-handoff-20260903` instead. Do not force-push
+  or target `main`.
 
 ## Suggested Skills for the Next Engineer
 
