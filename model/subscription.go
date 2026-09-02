@@ -567,6 +567,26 @@ func refreshSubscriptionUserGroupCache(userId int, operation string) {
 // expectedPaymentProvider guards against cross-gateway callback attacks (empty skips the check).
 // actualPaymentMethod updates the order's PaymentMethod to reflect the real payment type used (empty skips update).
 func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string) error {
+	return completeSubscriptionOrder(tradeNo, providerPayload, expectedPaymentProvider, actualPaymentMethod, nil)
+}
+
+// CompleteSubscriptionOrderWithPaidMoney is CompleteSubscriptionOrder for
+// providers whose signed notification states the collected amount (EPay). The
+// order is only completed when that amount equals the locked order's Money;
+// otherwise ErrEpayAmountMismatch is returned and the order stays pending.
+func CompleteSubscriptionOrderWithPaidMoney(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string, paidMoney string) error {
+	return completeSubscriptionOrder(tradeNo, providerPayload, expectedPaymentProvider, actualPaymentMethod, func(order *SubscriptionOrder) error {
+		if !epayPaidMoneyMatches(paidMoney, order.Money) {
+			common.SysError(fmt.Sprintf("订阅支付回调金额与订单不一致，拒绝开通 trade_no=%s order_money=%.2f callback_money=%q", order.TradeNo, order.Money, paidMoney))
+			return ErrEpayAmountMismatch
+		}
+		return nil
+	})
+}
+
+// verifyOrder, when non-nil, runs inside the transaction after the order has
+// been locked and found pending; returning an error aborts completion.
+func completeSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string, verifyOrder func(order *SubscriptionOrder) error) error {
 	if tradeNo == "" {
 		return errors.New("tradeNo is empty")
 	}
@@ -592,6 +612,11 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		}
 		if order.Status != common.TopUpStatusPending {
 			return ErrSubscriptionOrderStatusInvalid
+		}
+		if verifyOrder != nil {
+			if err := verifyOrder(&order); err != nil {
+				return err
+			}
 		}
 		plan, err := GetSubscriptionPlanById(order.PlanId)
 		if err != nil {

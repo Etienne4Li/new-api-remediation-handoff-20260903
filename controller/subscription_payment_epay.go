@@ -151,6 +151,11 @@ func SubscriptionEpayNotify(c *gin.Context) {
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
+	if err := validateEpayCallback(params, verifyInfo, operation_setting.EpayId); err != nil {
+		common.SysError(fmt.Sprintf("订阅 易支付 webhook 校验拒绝 trade_no=%s callback_pid=%s money=%q client_ip=%s reason=%q", verifyInfo.ServiceTradeNo, params["pid"], verifyInfo.Money, c.ClientIP(), err.Error()))
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
 
 	if verifyInfo.TradeStatus != epay.StatusTradeSuccess {
 		_, _ = c.Writer.Write([]byte("fail"))
@@ -160,7 +165,8 @@ func SubscriptionEpayNotify(c *gin.Context) {
 	LockOrder(verifyInfo.ServiceTradeNo)
 	defer UnlockOrder(verifyInfo.ServiceTradeNo)
 
-	if err := model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type); err != nil {
+	if err := model.CompleteSubscriptionOrderWithPaidMoney(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type, verifyInfo.Money); err != nil {
+		common.SysError(fmt.Sprintf("订阅 易支付 回调处理失败 trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), err.Error()))
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
@@ -206,10 +212,15 @@ func SubscriptionEpayReturn(c *gin.Context) {
 		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
 		return
 	}
+	if err := validateEpayCallback(params, verifyInfo, operation_setting.EpayId); err != nil {
+		common.SysError(fmt.Sprintf("订阅 易支付 return 校验拒绝 trade_no=%s callback_pid=%s money=%q client_ip=%s reason=%q", verifyInfo.ServiceTradeNo, params["pid"], verifyInfo.Money, c.ClientIP(), err.Error()))
+		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
+		return
+	}
 	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {
 		LockOrder(verifyInfo.ServiceTradeNo)
 		defer UnlockOrder(verifyInfo.ServiceTradeNo)
-		if err := model.CompleteSubscriptionOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type); err != nil {
+		if err := model.CompleteSubscriptionOrderWithPaidMoney(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, verifyInfo.Type, verifyInfo.Money); err != nil {
 			c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
 			return
 		}
