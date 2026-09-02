@@ -159,6 +159,9 @@ original audit workspace. Run its suite from that directory with
   source-only entries after excluding dependency/build directories. Treat this
   handoff branch as a reconstruction of the deployed customized source, not a
   small upstream patch.
+- Never run `rsync --delete` against a Git worktree root without excluding
+  `.git/`. During this handoff it removed the worktree's `.git` metadata file;
+  the worktree was repaired before commit and the branch was revalidated.
 - Never commit `web/node_modules`, `electron/node_modules`, `web/dist`, or
   `electron/dist`. They account for most of the snapshot's size and are ignored
   build artifacts/dependencies.
