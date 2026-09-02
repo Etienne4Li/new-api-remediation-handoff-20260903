@@ -63,6 +63,15 @@ redemption.failed: "Redemption failed, please try again later"
 redemption.not_provided: "Redemption code not provided"
 redemption.expire_time_invalid: "Expiration time cannot be earlier than current time"
 
+# Support ticket messages
+ticket.title_length: "Ticket title must be between {{.Min}} and {{.Max}} characters"
+ticket.message_length: "Ticket message must be between 1 and {{.Max}} characters"
+ticket.category_invalid: "Invalid ticket category"
+ticket.priority_invalid: "Invalid ticket priority"
+ticket.status_invalid: "Invalid ticket status"
+ticket.not_found: "Ticket not found"
+ticket.closed: "This ticket is closed. Reopen it before replying"
+
 # User messages
 user.password_login_disabled: "Password login has been disabled by administrator"
 user.register_disabled: "New user registration has been disabled by administrator"

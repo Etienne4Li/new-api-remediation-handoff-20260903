@@ -20,6 +20,12 @@ import { api } from '@/lib/api'
 
 import type { PerformanceMetricsData, PerfSummaryAllData } from './types'
 
+export const PERF_METRICS_AUTO_REFRESH_OPTIONS = {
+  staleTime: 60_000,
+  refetchInterval: 60_000,
+  refetchIntervalInBackground: true,
+} as const
+
 export async function getPerfMetricsSummary(
   hours = 24
 ): Promise<PerfSummaryAllData> {

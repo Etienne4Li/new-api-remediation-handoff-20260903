@@ -168,7 +168,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	} else {
 		convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			return claudeRequestConversionError(err)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -190,7 +190,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			}
 		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
+		logger.LogDebug(c, "requestBody_meta=%s", common.SensitiveLogBody(jsonData))
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -201,21 +201,21 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
-	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
 
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
+	info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		// reset status code 重置状态码
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
@@ -225,6 +225,20 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return newAPIError
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
+}
+
+// claudeRequestConversionError keeps ordinary malformed-request failures from
+// being retried, while allowing a channel that lacks the Claude endpoint to
+// fail over to another selected channel.  The latter is a capability miss,
+// not a client input error; retrying is safe because no upstream request has
+// been sent yet.
+func claudeRequestConversionError(err error) *types.NewAPIError {
+	return requestConversionError(err)
 }

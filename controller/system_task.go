@@ -12,11 +12,19 @@ import (
 )
 
 func CreateLogCleanupSystemTask(c *gin.Context) {
-	targetTimestamp, _ := strconv.ParseInt(c.Query("target_timestamp"), 10, 64)
-	if targetTimestamp == 0 {
+	rawTimestamp := c.Query("target_timestamp")
+	if rawTimestamp == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "target timestamp is required",
+		})
+		return
+	}
+	targetTimestamp, err := strconv.ParseInt(rawTimestamp, 10, 64)
+	if err != nil || targetTimestamp <= 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "target timestamp must be a positive integer",
 		})
 		return
 	}
@@ -66,7 +74,18 @@ func GetCurrentSystemTask(c *gin.Context) {
 }
 
 func ListSystemTasks(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.Query("limit"))
+	limit := 0
+	if rawLimit := c.Query("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "limit must be a positive integer",
+			})
+			return
+		}
+		limit = parsed
+	}
 
 	tasks, err := model.ListSystemTasks(limit)
 	if err != nil {

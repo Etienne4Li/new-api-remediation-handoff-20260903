@@ -33,7 +33,87 @@ export function formatUptimePct(pct: number): string {
   return `${pct.toFixed(2)}%`
 }
 
-export type SuccessRateLevel =
+export type CacheUsageMetrics = {
+  input_tokens?: number
+  cache_read_tokens?: number
+  cache_observed_requests?: number
+  cache_hit_rate?: number
+}
+
+export function getObservedCacheHitRate(metrics: CacheUsageMetrics): number {
+  const explicitRate = metrics.cache_hit_rate
+  if (
+    typeof explicitRate === 'number' &&
+    Number.isFinite(explicitRate) &&
+    explicitRate >= 0
+  ) {
+    return explicitRate
+  }
+
+  const inputTokens = metrics.input_tokens
+  const cacheReadTokens = metrics.cache_read_tokens
+  if (
+    typeof inputTokens === 'number' &&
+    Number.isFinite(inputTokens) &&
+    inputTokens > 0
+  ) {
+    if (
+      typeof cacheReadTokens === 'number' &&
+      Number.isFinite(cacheReadTokens) &&
+      cacheReadTokens >= 0
+    ) {
+      return (cacheReadTokens / inputTokens) * 100
+    }
+    if (
+      typeof metrics.cache_observed_requests === 'number' &&
+      Number.isFinite(metrics.cache_observed_requests) &&
+      metrics.cache_observed_requests > 0
+    ) {
+      return 0
+    }
+  }
+
+  return Number.NaN
+}
+
+export function getCombinedCacheHitRate(
+  metrics: readonly CacheUsageMetrics[]
+): number {
+  let inputTokens = 0
+  let cacheReadTokens = 0
+  const fallbackRates: number[] = []
+
+  for (const metric of metrics) {
+    const observedInputTokens = metric.input_tokens
+    const observedCacheReadTokens = metric.cache_read_tokens
+    const rate = getObservedCacheHitRate(metric)
+    const hasObservedInput =
+      typeof observedInputTokens === 'number' &&
+      Number.isFinite(observedInputTokens) &&
+      observedInputTokens > 0
+    const hasObservedCacheRead =
+      typeof observedCacheReadTokens === 'number' &&
+      Number.isFinite(observedCacheReadTokens) &&
+      observedCacheReadTokens >= 0
+    if (hasObservedInput && (hasObservedCacheRead || Number.isFinite(rate))) {
+      inputTokens += observedInputTokens
+      cacheReadTokens += hasObservedCacheRead
+        ? observedCacheReadTokens
+        : (observedInputTokens * rate) / 100
+      continue
+    }
+
+    if (Number.isFinite(rate)) fallbackRates.push(rate)
+  }
+
+  if (inputTokens > 0) return (cacheReadTokens / inputTokens) * 100
+  if (fallbackRates.length === 0) return Number.NaN
+  return (
+    fallbackRates.reduce((sum, rate) => sum + rate, 0) / fallbackRates.length
+  )
+}
+
+type SuccessRateLevel =
   | 'excellent'
   | 'good'
   | 'warning'
@@ -52,7 +132,7 @@ const SUCCESS_RATE_WARNING_MIN = 70
  * - critical: below 70%
  * - unknown: non-finite values
  */
-export function getSuccessRateLevel(rate: number): SuccessRateLevel {
+function getSuccessRateLevel(rate: number): SuccessRateLevel {
   if (!Number.isFinite(rate)) return 'unknown'
   if (rate >= SUCCESS_RATE_EXCELLENT_MIN) return 'excellent'
   if (rate >= SUCCESS_RATE_GOOD_MIN) return 'good'

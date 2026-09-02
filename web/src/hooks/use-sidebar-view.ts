@@ -32,6 +32,29 @@ import { useSidebarData } from './use-sidebar-data'
 const ROOT_VIEW_KEY = '__root'
 
 /**
+ * Apply role visibility to an already configuration-filtered sidebar tree.
+ *
+ * Keeping this as a pure helper makes the frontend role contract explicit and
+ * lets tests exercise the same filtering used by the live sidebar.
+ */
+export function filterNavGroupsByRole(
+  groups: NavGroup[],
+  userRole: number | undefined
+): NavGroup[] {
+  const role = userRole ?? ROLE.GUEST
+  const isAdmin = role >= ROLE.ADMIN
+
+  return groups
+    .filter((group) => (group.id === 'admin' ? isAdmin : true))
+    .map((group) => {
+      const items = group.items.filter(
+        (item) => item.requiredRole === undefined || role >= item.requiredRole
+      )
+      return items.length === group.items.length ? group : { ...group, items }
+    })
+}
+
+/**
  * Resolve the active sidebar view for the current location.
  *
  * - Returns the matching nested {@link SidebarView} (with its nav
@@ -51,18 +74,10 @@ export function useSidebarView(): ResolvedSidebarView {
   const rootSidebarData = useSidebarData()
   const configFilteredRoot = useSidebarConfig(rootSidebarData.navGroups)
 
-  const rootNavGroups = useMemo<NavGroup[]>(() => {
-    const role = userRole ?? ROLE.GUEST
-    const isAdmin = role >= ROLE.ADMIN
-    return configFilteredRoot
-      .filter((group) => (group.id === 'admin' ? isAdmin : true))
-      .map((group) => {
-        const items = group.items.filter(
-          (item) => item.requiredRole === undefined || role >= item.requiredRole
-        )
-        return items.length === group.items.length ? group : { ...group, items }
-      })
-  }, [configFilteredRoot, userRole])
+  const rootNavGroups = useMemo(
+    () => filterNavGroupsByRole(configFilteredRoot, userRole),
+    [configFilteredRoot, userRole]
+  )
 
   const view = resolveSidebarView(pathname)
 

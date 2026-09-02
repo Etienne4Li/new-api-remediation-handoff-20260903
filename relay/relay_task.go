@@ -2,12 +2,14 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -183,7 +185,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "model_price_error", http.StatusBadRequest)
 	}
-	info.PriceData = priceData
+	info.SetPriceDataSnapshot(priceData)
 
 	// 5. 计费估算：让适配器根据用户请求提供 OtherRatios（时长、分辨率等）
 	//    必须在 ModelPriceHelperPerCall 之后调用（它会重建 PriceData）。
@@ -213,7 +215,11 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	// 8. 构建请求体
 	requestBody, err := adaptor.BuildRequestBody(c, info)
 	if err != nil {
-		return nil, service.TaskErrorWrapper(err, "build_request_failed", http.StatusInternalServerError)
+		// Request-body construction only consumes client-controlled input. A
+		// malformed media reference, metadata value, or unsupported option is a
+		// local validation failure and must not be retried against other channels
+		// as if the provider had failed.
+		return nil, service.TaskErrorWrapperLocal(err, "build_request_failed", http.StatusBadRequest)
 	}
 
 	// 9. 发送请求
@@ -222,8 +228,12 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		return nil, service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	if resp != nil && resp.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(resp.Body)
-		return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode)
+		responseBody, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
+		service.CloseResponseBodyGracefully(resp)
+		if readErr != nil {
+			return nil, service.TaskErrorWrapper(readErr, "fail_to_fetch_task", resp.StatusCode)
+		}
+		return nil, service.TaskErrorWrapper(fmt.Errorf("upstream task response body_meta=%s", common.SensitiveLogBody(responseBody)), "fail_to_fetch_task", resp.StatusCode)
 	}
 
 	// 10. 返回 OtherRatios 给下游（header 必须在 DoResponse 写 body 之前设置）
@@ -297,6 +307,7 @@ func RelayTaskFetch(c *gin.Context, relayMode int) (taskResp *dto.TaskError) {
 	respBuilder, ok := fetchRespBuilders[relayMode]
 	if !ok {
 		taskResp = service.TaskErrorWrapperLocal(errors.New("invalid_relay_mode"), "invalid_relay_mode", http.StatusBadRequest)
+		return taskResp
 	}
 
 	respBody, taskErr := respBuilder(c)
@@ -387,8 +398,14 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
 
-	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
-	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
+	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态。
+	// Propagate the HTTP request context so a disconnected client can cancel
+	// both the OAuth exchange and the provider status request immediately.
+	requestCtx := context.Background()
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	if realtimeResp := tryRealtimeFetchWithContext(requestCtx, originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
 		respBody = realtimeResp
 		return
 	}
@@ -406,6 +423,18 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 				taskResp = service.TaskErrorWrapper(err, "convert_to_openai_video_failed", http.StatusInternalServerError)
 				return
 			}
+			// Task.Data is deliberately redacted before it is persisted or exposed.
+			// Several legacy adaptors still read that projection and copy the
+			// provider media URL into metadata.url.  Never return that URL directly:
+			// signed URLs may already be invalid after redaction, and returning one
+			// would disclose a provider credential to the API client.  Normalize the
+			// converter output at this single response boundary and make the local,
+			// authenticated proxy the only public media location.
+			openAIVideoData, err = normalizeOpenAIVideoResponse(originTask, openAIVideoData)
+			if err != nil {
+				taskResp = service.TaskErrorWrapper(err, "normalize_openai_video_failed", http.StatusInternalServerError)
+				return
+			}
 			respBody = openAIVideoData
 			return
 		}
@@ -414,9 +443,16 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	}
 
 	// 通用 TaskDto 格式
+	taskDTO := TaskModel2Dto(originTask)
+	if originTask.Status == model.TaskStatusSuccess {
+		// Keep the legacy task response useful after provider URL redaction. The
+		// direct/signed URL is private implementation state; callers can fetch
+		// the media through the authenticated local content endpoint.
+		taskDTO.ResultURL = taskcommon.BuildProxyURL(originTask.TaskID)
+	}
 	respBody, err = common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
-		Data: TaskModel2Dto(originTask),
+		Data: taskDTO,
 	})
 	if err != nil {
 		taskResp = service.TaskErrorWrapper(err, "marshal_response_failed", http.StatusInternalServerError)
@@ -424,12 +460,72 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	return
 }
 
+// normalizeOpenAIVideoResponse applies the outward-facing safety boundary to
+// an adaptor-produced OpenAI video object.  Converters are intentionally kept
+// provider-specific, but the response must have one invariant: a completed
+// task never exposes a provider URL (which may contain a bearer/signature
+// query) when the local proxy can serve the media with the caller's auth.
+//
+// Redaction is applied again here for historical task rows and for adaptors
+// that return a copy of task.Data directly (notably Sora).  The helper uses the
+// shared JSON wrapper rather than encoding/json so it follows repository-wide
+// serialization rules.
+func normalizeOpenAIVideoResponse(task *model.Task, response []byte) ([]byte, error) {
+	if task == nil {
+		return nil, errors.New("task is nil")
+	}
+	if len(response) == 0 {
+		return nil, errors.New("openai video response is empty")
+	}
+
+	safeResponse := service.RedactTaskResponseBody(response)
+	if len(safeResponse) == 0 {
+		return nil, errors.New("openai video response is empty after redaction")
+	}
+	var payload map[string]any
+	if err := common.Unmarshal(safeResponse, &payload); err != nil {
+		return nil, fmt.Errorf("decode openai video response: %w", err)
+	}
+	if payload == nil {
+		return nil, errors.New("openai video response is not an object")
+	}
+
+	if task.Status == model.TaskStatusSuccess {
+		proxyURL := taskcommon.BuildProxyURL(task.TaskID)
+		if strings.TrimSpace(proxyURL) == "" {
+			return nil, errors.New("video proxy URL is empty")
+		}
+		metadata, ok := payload["metadata"].(map[string]any)
+		if !ok || metadata == nil {
+			metadata = make(map[string]any)
+		}
+		metadata["url"] = proxyURL
+		payload["metadata"] = metadata
+	}
+
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode openai video response: %w", err)
+	}
+	return encoded, nil
+}
+
 // tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
 // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
 func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
+	return tryRealtimeFetchWithContext(context.Background(), task, isOpenAIVideoAPI)
+}
+
+func tryRealtimeFetchWithContext(ctx context.Context, task *model.Task, isOpenAIVideoAPI bool) []byte {
+	if task == nil || strings.TrimSpace(task.GetUpstreamTaskID()) == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
-	if err != nil {
+	if err != nil || channelModel == nil {
 		return nil
 	}
 	if channelModel.Type != constant.ChannelTypeVertexAi && channelModel.Type != constant.ChannelTypeGemini {
@@ -446,25 +542,87 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		return nil
 	}
 
-	resp, err := adaptor.FetchTask(baseURL, channelModel.Key, map[string]any{
+	key := strings.TrimSpace(task.PrivateData.Key)
+	if key == "" {
+		key = channelModel.Key
+	}
+	if key == "" {
+		return nil
+	}
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, service.TaskPollingRequestTimeout)
+	resp, err := service.FetchTaskWithContext(fetchCtx, adaptor, baseURL, key, map[string]any{
 		"task_id": task.GetUpstreamTaskID(),
 		"action":  task.Action,
 	}, proxy)
-	if err != nil || resp == nil {
+	if err != nil || resp == nil || resp.Body == nil {
+		fetchCancel()
 		return nil
 	}
+	defer fetchCancel()
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// A realtime fetch error is not a task state transition.  Leave the
+		// durable row untouched so the background poller can retry it.
+		return nil
+	}
+	body, err := service.ReadTaskPollingResponse(resp.Body, resp.ContentLength)
 	if err != nil {
 		return nil
 	}
 
-	ti, err := adaptor.ParseTaskResult(body)
+	ti, err := service.ParseTaskResultWithContext(fetchCtx, adaptor, body, proxy)
 	if err != nil || ti == nil {
+		return nil
+	}
+	if err := service.ValidateTaskPollingResponseIdentity(task, ti.TaskID); err != nil {
+		// A realtime fetch is allowed to fail closed. Returning nil makes the
+		// caller render the durable local task state, while the background poller
+		// can retry the provider request; crucially, no status or billing fields
+		// are touched for a response belonging to another task.
+		common.SysLog(fmt.Sprintf("realtime task response identity mismatch task=%s error_meta=%s", task.TaskID, common.SensitiveLogMeta(err.Error())))
 		return nil
 	}
 
 	snap := task.Snapshot()
+	// Provider responses may arrive out of order. Apply the same monotonic
+	// status fence as the background poller before preparing billing or mutating
+	// the task. A non-empty reason without a status is an explicit FAILURE;
+	// empty/UNKNOWN statuses otherwise have no authority and fall back to the
+	// already-persisted task state.
+	incomingStatus := model.TaskStatus(strings.TrimSpace(ti.Status))
+	if incomingStatus == "" && strings.TrimSpace(ti.Reason) != "" {
+		incomingStatus = model.TaskStatusFailure
+	}
+	if model.IsTaskStatusStale(task.Status, incomingStatus) {
+		// Realtime and background responses may be observed out of order. Keep
+		// returning the durable local state for the custom task format; OpenAI's
+		// converter will render that state in its normal path below.
+		if isOpenAIVideoAPI {
+			return nil
+		}
+		format := detectVideoFormat(body)
+		out := map[string]any{
+			"error": nil, "format": format, "metadata": nil,
+			"status": mapTaskStatusToSimple(task.Status), "task_id": task.TaskID,
+			"url": publicTaskVideoURL(task),
+		}
+		respBody, _ := common.Marshal(dto.TaskResponse[any]{Code: "success", Data: out})
+		return respBody
+	}
+	if incomingStatus != "" {
+		ti.Status = string(incomingStatus)
+	}
+	terminalAdjustmentPrepared := false
+	var terminalAdjustmentErr error
+	if incomingStatus == model.TaskStatusSuccess && strings.TrimSpace(task.BillingRequestId) != "" {
+		var prepareErr error
+		terminalAdjustmentPrepared, prepareErr = service.PrepareTaskBillingAdjustment(task, adaptor, ti)
+		if prepareErr != nil {
+			terminalAdjustmentErr = fmt.Errorf("prepare realtime terminal billing adjustment failed task=%s: %w", task.TaskID, prepareErr)
+			service.StageTaskBillingAdjustmentManual(task, terminalAdjustmentErr)
+			common.SysLog(fmt.Sprintf("prepare realtime terminal billing adjustment failed task=%s error_meta=%s", task.TaskID, common.SensitiveLogMeta(prepareErr.Error())))
+		}
+	}
 
 	// 将上游最新状态更新到 task
 	if ti.Status != "" {
@@ -473,17 +631,112 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 	if ti.Progress != "" {
 		task.Progress = ti.Progress
 	}
+	if ti.Reason != "" {
+		task.FailReason = ti.Reason
+	}
+	if (task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure) && task.FinishTime == 0 {
+		task.FinishTime = time.Now().Unix()
+	}
 	if strings.HasPrefix(ti.Url, "data:") {
-		// data: URI — kept in Data, not ResultURL
+		// data: URI — never expose or persist the inline media. Use the local
+		// proxy endpoint when no result URL has already been committed; it will
+		// re-fetch/validate the provider payload on demand.
+		if strings.TrimSpace(task.PrivateData.ResultURL) == "" && task.Status == model.TaskStatusSuccess {
+			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
+		}
 	} else if ti.Url != "" {
-		task.PrivateData.ResultURL = ti.Url
-	} else if task.Status == model.TaskStatusSuccess {
+		if normalized := service.NormalizeTaskResultURL(ti.Url); normalized != "" {
+			task.PrivateData.ResultURL = normalized
+		} else if strings.TrimSpace(task.PrivateData.ResultURL) == "" {
+			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
+		}
+	} else if ti.RemoteUrl != "" {
+		// Gemini returns a signed/storage URI in RemoteUrl rather than Url.
+		// Persist it so the subsequent video proxy can resolve the completed
+		// task after this realtime fetch path.
+		if normalized := service.NormalizeTaskResultURL(ti.RemoteUrl); normalized != "" {
+			task.PrivateData.ResultURL = normalized
+		} else if strings.TrimSpace(task.PrivateData.ResultURL) == "" {
+			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
+		}
+	} else if task.Status == model.TaskStatusSuccess && strings.TrimSpace(task.PrivateData.ResultURL) == "" {
 		// No URL from adaptor — construct proxy URL using public task ID
 		task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 	}
+	// A terminal failure must enter the durable refund queue in the same write
+	// as the status transition.  This is especially important for realtime
+	// Gemini/Vertex fetch, which may be the first observer of the terminal state.
+	if task.Status == model.TaskStatusFailure && task.Quota > 0 &&
+		(task.SubmitTime <= 0 || task.SubmitTime >= model.TaskRefundLegacyCutoff) {
+		task.BillingReconcileState = model.TaskBillingReconcilePending
+	}
 
+	statusTransitionWon := false
+	statusUpdateErr := error(nil)
+	statusCASAttempted := false
 	if !snap.Equal(task.Snapshot()) {
-		_, _ = task.UpdateWithStatus(snap.Status)
+		statusCASAttempted = true
+		statusTransitionWon, statusUpdateErr = task.UpdateWithStatus(snap.Status)
+	}
+	if statusCASAttempted && !statusTransitionWon && statusUpdateErr == nil {
+		// A concurrent poller may have won the CAS (or the database may report a
+		// same-value no-op). Reload before constructing the response so callers do
+		// not observe a stale terminal status, and never use this stale object for
+		// billing side effects.
+		var current model.Task
+		if err := model.DB.First(&current, task.ID).Error; err != nil {
+			return nil
+		}
+		*task = current
+		terminalAdjustmentErr = nil
+	}
+	// A response that races another poller may parse cleanly but lose the CAS.
+	// Do not run any billing side effects from that stale in-memory object. The
+	// winning worker (or the reconciliation queue) owns settlement/refund.
+	persistedTerminal := statusUpdateErr == nil && (statusTransitionWon || snap.Status == task.Status)
+	terminalStatusTransition := snap.Status != task.Status
+	billingOwner := (terminalStatusTransition && statusTransitionWon) ||
+		(!statusCASAttempted && snap.Status == task.Status)
+	if statusUpdateErr != nil {
+		billingOwner = false
+	}
+
+	// The task submit handler persists a pending settlement marker before
+	// returning the upstream task id.  Complete that durable operation before
+	// applying any terminal adjustment; retries across processes use the same
+	// BillingOperation key and therefore cannot double-charge.
+	if persistedTerminal && billingOwner && task.Status == model.TaskStatusSuccess &&
+		(task.BillingSettlementState == model.TaskBillingSettlementPending ||
+			task.BillingSettlementState == model.TaskBillingSettlementProcessing) {
+		if err := service.FinalizePendingTaskBilling(context.Background(), task); err != nil {
+			// Keep returning the provider status.  The durable marker remains
+			// pending and the background worker will retry it.
+			common.SysLog(fmt.Sprintf("realtime task settlement deferred task=%s error_meta=%s", task.TaskID, common.SensitiveLogMeta(err.Error())))
+		}
+	}
+	if persistedTerminal && billingOwner && task.Status == model.TaskStatusFailure && task.Quota > 0 {
+		// If the submit-time settlement is still pending, commit it before
+		// refunding the terminal task.  This preserves the invariant that the
+		// refund amount (the final task quota) matches the amount actually charged.
+		settlementReady := strings.TrimSpace(task.BillingRequestId) == "" || task.BillingSettlementState == model.TaskBillingSettlementComplete
+		if strings.TrimSpace(task.BillingRequestId) != "" && task.BillingSettlementState != model.TaskBillingSettlementComplete {
+			if err := service.FinalizePendingTaskBilling(context.Background(), task); err != nil {
+				settlementReady = false
+				common.SysLog(fmt.Sprintf("realtime failed task settlement deferred task=%s error_meta=%s", task.TaskID, common.SensitiveLogMeta(err.Error())))
+			} else {
+				settlementReady = task.BillingSettlementState == model.TaskBillingSettlementComplete
+			}
+		}
+		if settlementReady {
+			service.ReconcileFailedTaskBilling(context.Background(), task, task.FailReason)
+		}
+	}
+	if persistedTerminal && billingOwner && task.Status == model.TaskStatusSuccess &&
+		terminalAdjustmentErr == nil &&
+		(terminalAdjustmentPrepared || strings.TrimSpace(task.BillingRequestId) != "") {
+		if billingAdaptor, ok := adaptor.(service.TaskPollingAdaptor); ok {
+			service.SettleTaskBillingOnComplete(context.Background(), billingAdaptor, task, ti)
+		}
 	}
 
 	// OpenAI Video API 由调用者的 ConvertToOpenAIVideo 分支处理
@@ -499,7 +752,7 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		"metadata": nil,
 		"status":   mapTaskStatusToSimple(task.Status),
 		"task_id":  task.TaskID,
-		"url":      task.GetResultURL(),
+		"url":      publicTaskVideoURL(task),
 	}
 	respBody, _ := common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
@@ -547,7 +800,24 @@ func mapTaskStatusToSimple(status model.TaskStatus) string {
 	}
 }
 
+// publicTaskVideoURL is the only URL form that task status responses should
+// expose.  Completed media is served through the authenticated proxy; a
+// non-terminal legacy row may still carry a diagnostic URL, but it must pass
+// through the same redaction boundary as the generic task DTO.
+func publicTaskVideoURL(task *model.Task) string {
+	if task == nil {
+		return ""
+	}
+	if task.Status == model.TaskStatusSuccess {
+		return taskcommon.BuildProxyURL(task.TaskID)
+	}
+	return service.RedactTaskResultURL(task.GetResultURL())
+}
+
 func TaskModel2Dto(task *model.Task) *dto.TaskDto {
+	if task == nil {
+		return nil
+	}
 	return &dto.TaskDto{
 		ID:         task.ID,
 		CreatedAt:  task.CreatedAt,
@@ -560,14 +830,18 @@ func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 		Quota:      task.Quota,
 		Action:     task.Action,
 		Status:     string(task.Status),
-		FailReason: task.FailReason,
-		ResultURL:  task.GetResultURL(),
+		FailReason: service.RedactTaskFailureReason(task.FailReason),
+		ResultURL:  service.RedactTaskResultURL(task.GetResultURL()),
 		SubmitTime: task.SubmitTime,
 		StartTime:  task.StartTime,
 		FinishTime: task.FinishTime,
 		Progress:   task.Progress,
 		Properties: task.Properties,
 		Username:   task.Username,
-		Data:       task.Data,
+		// Task.Data may have been written by an older worker before the polling
+		// redaction boundary existed. Re-apply the same bounded sanitizer at the
+		// DTO edge so historical rows cannot leak credentials or oversized provider
+		// payloads through either user or admin fetch endpoints.
+		Data: service.RedactTaskResponseBody(task.Data),
 	}
 }

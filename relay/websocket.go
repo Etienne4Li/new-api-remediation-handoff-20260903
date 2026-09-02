@@ -2,6 +2,7 @@ package relay
 
 import (
 	"fmt"
+	"net/http"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -31,16 +32,31 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 	}
 
 	if resp != nil {
-		info.TargetWs = resp.(*websocket.Conn)
+		target, ok := resp.(*websocket.Conn)
+		if !ok || target == nil {
+			return types.NewErrorWithStatusCode(fmt.Errorf("invalid upstream WebSocket response type %T", resp), types.ErrorCodeBadResponse, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+		}
+		info.TargetWs = target
 		defer info.TargetWs.Close()
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, nil, info)
+	// Realtime handlers may return both a transport error and a partial usage
+	// snapshot. Settle that observed usage before propagating the error so an
+	// upstream/client disconnect cannot silently turn billable work into a full
+	// reservation refund. A nil snapshot means no usage was observed; the outer
+	// relay failure path will refund the pending reservation as before.
+	realtimeUsage, realtimeUsageOK := usage.(*dto.RealtimeUsage)
+	if realtimeUsageOK && realtimeUsage != nil {
+		service.PostWssConsumeQuota(c, info, info.UpstreamModelName, realtimeUsage, "")
+	}
 	if newAPIError != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, usage.(*dto.RealtimeUsage), "")
+	if !realtimeUsageOK || realtimeUsage == nil {
+		return types.NewErrorWithStatusCode(fmt.Errorf("invalid adaptor realtime usage type %T", usage), types.ErrorCodeBadResponseBody, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+	}
 	return nil
 }

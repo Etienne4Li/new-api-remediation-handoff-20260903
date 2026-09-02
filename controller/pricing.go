@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -35,22 +37,31 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 
 func GetPricing(c *gin.Context) {
 	pricing := model.GetPricing()
-	userId, exists := c.Get("id")
 	usableGroup := map[string]string{}
 	groupRatio := map[string]float64{}
 	for s, f := range ratio_setting.GetGroupRatioCopy() {
 		groupRatio[s] = f
 	}
 	var group string
-	if exists {
-		user, err := model.GetUserCache(userId.(int))
-		if err == nil {
-			group = user.Group
-			for g := range groupRatio {
-				ratio, ok := ratio_setting.GetGroupGroupRatio(group, g)
-				if ok {
-					groupRatio[g] = ratio
-				}
+	if rawUserID, exists := c.Get("id"); exists {
+		userID, ok := rawUserID.(int)
+		if !ok || userID <= 0 {
+			common.ApiErrorMsg(c, "无效的用户上下文")
+			return
+		}
+		user, err := model.GetUserCache(userID)
+		if err != nil || user == nil {
+			if err == nil {
+				err = fmt.Errorf("用户缓存为空")
+			}
+			common.ApiError(c, err)
+			return
+		}
+		group = user.Group
+		for g := range groupRatio {
+			ratio, ok := ratio_setting.GetGroupGroupRatio(group, g)
+			if ok {
+				groupRatio[g] = ratio
 			}
 		}
 	}
@@ -82,7 +93,7 @@ func ResetModelRatio(c *gin.Context) {
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -90,7 +101,7 @@ func ResetModelRatio(c *gin.Context) {
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}

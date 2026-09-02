@@ -194,16 +194,24 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   }
 
   return (
-    <div
+    <article
+      aria-label={props.model.model_name}
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          props.onClick()
+        }
+      }}
       className={cn(
-        'group relative flex flex-col rounded-xl border p-3 transition-colors sm:p-5',
-        'hover:bg-muted/20'
+        'group relative flex flex-col rounded-none border p-3 transition-colors sm:p-5',
+        'hover:bg-muted/20 focus-visible:ring-primary/50 focus-visible:ring-2 focus-visible:outline-none'
       )}
     >
       {/* Header: icon + name + price + actions */}
       <div className='flex items-start justify-between gap-2.5 sm:gap-3'>
         <div className='flex min-w-0 items-start gap-2.5 sm:gap-3'>
-          <div className='bg-muted/40 flex size-9 shrink-0 items-center justify-center rounded-lg sm:size-10 sm:rounded-xl'>
+          <div className='bg-muted/40 flex size-9 shrink-0 items-center justify-center rounded-none sm:size-10'>
             {modelIcon || (
               <span className='text-muted-foreground text-sm font-bold'>
                 {initial}
@@ -224,7 +232,7 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           <button
             type='button'
             onClick={props.onClick}
-            className='text-muted-foreground hover:text-foreground hover:bg-muted inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors sm:px-2.5 sm:py-1.5'
+            className='text-muted-foreground hover:text-foreground hover:bg-muted inline-flex items-center gap-1 rounded-none border px-2 py-1 text-xs transition-colors sm:px-2.5 sm:py-1.5'
           >
             {t('Details')}
             <ChevronRight className='size-3.5' />
@@ -232,7 +240,7 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           <button
             type='button'
             onClick={handleCopy}
-            className='text-muted-foreground hover:text-foreground hover:bg-muted rounded-md border p-1.5 transition-colors'
+            className='text-muted-foreground hover:text-foreground hover:bg-muted rounded-none border p-1.5 transition-colors'
             title={t('Copy')}
           >
             <Copy className='size-3.5' />
@@ -273,6 +281,6 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           )}
         </div>
       </div>
-    </div>
+    </article>
   )
 })

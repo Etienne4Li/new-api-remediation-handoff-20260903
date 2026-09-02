@@ -196,7 +196,7 @@ export function CreateDeploymentDrawer({
         map.set(key, { label: String(name), value: key })
       }
     })
-    return Array.from(map.values())
+    return [...map.values()]
   }, [replicasData])
 
   const { data: priceData, isLoading: _isLoadingPrice } = useQuery({
@@ -374,6 +374,15 @@ export function CreateDeploymentDrawer({
   }, [priceData])
   void priceSummary
 
+  let nameAvailabilityLabel = ''
+  if (isCheckingName) {
+    nameAvailabilityLabel = t('Checking name...')
+  } else if (nameAvailable === true) {
+    nameAvailabilityLabel = t('Name is available')
+  } else if (nameAvailable === false) {
+    nameAvailabilityLabel = t('Name is not available')
+  }
+
   return (
     <Sheet
       open={open}
@@ -417,13 +426,7 @@ export function CreateDeploymentDrawer({
                     </FormControl>
                     {open && field.value?.trim() ? (
                       <div className='text-muted-foreground text-xs'>
-                        {isCheckingName
-                          ? t('Checking name...')
-                          : nameAvailable === true
-                            ? t('Name is available')
-                            : nameAvailable === false
-                              ? t('Name is not available')
-                              : ''}
+                        {nameAvailabilityLabel}
                       </div>
                     ) : null}
                     <FormMessage />
@@ -460,12 +463,10 @@ export function CreateDeploymentDrawer({
                     <FormItem>
                       <FormLabel>{t('Hardware type')}</FormLabel>
                       <Select
-                        items={[
-                          ...hardwareOptions.map((opt) => ({
-                            value: opt.value,
-                            label: opt.label,
-                          })),
-                        ]}
+                        items={hardwareOptions.map((opt) => ({
+                          value: opt.value,
+                          label: opt.label,
+                        }))}
                         value={field.value}
                         onValueChange={(v) => field.onChange(v)}
                         disabled={isLoadingHardware}

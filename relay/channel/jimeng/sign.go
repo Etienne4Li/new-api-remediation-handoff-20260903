@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -41,11 +41,13 @@ import (
 const HexPayloadHashKey = "HexPayloadHash"
 
 func SetPayloadHash(c *gin.Context, req any) error {
-	body, err := json.Marshal(req)
+	body, err := common.Marshal(req)
 	if err != nil {
 		return err
 	}
-	logger.LogInfo(c, fmt.Sprintf("SetPayloadHash body: %s", body))
+	// The payload may contain prompts, uploaded data, or provider credentials;
+	// log only bounded metadata rather than the complete request body.
+	logger.LogInfo(c, fmt.Sprintf("SetPayloadHash body_meta=%s", common.SensitiveLogBody(body)))
 	payloadHash := sha256.Sum256(body)
 	hexPayloadHash := hex.EncodeToString(payloadHash[:])
 	c.Set(HexPayloadHashKey, hexPayloadHash)
@@ -62,7 +64,7 @@ func Sign(c *gin.Context, req *http.Request, apiKey string) error {
 	var err error
 
 	if req.Body != nil {
-		bodyBytes, err = io.ReadAll(req.Body)
+		bodyBytes, err = common.ReadBodyLimited(req.Body, req.ContentLength, common.GetMaxRequestBodyBytes())
 		if err != nil {
 			return err
 		}

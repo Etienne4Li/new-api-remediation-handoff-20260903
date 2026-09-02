@@ -16,8 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, test } from 'vitest'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { CodeBlockEditor } from '../code-block'
 
@@ -25,7 +25,10 @@ afterEach(() => {
   cleanup()
 })
 
-function editorTree(value: string) {
+function editorTree(
+  value: string,
+  onKeyDown: (event: globalThis.KeyboardEvent) => void = () => undefined
+) {
   // A fresh inline onKeyDown per call mirrors PlaygroundMessageEditor, which
   // recreates its handler on every keystroke-driven render.
   return (
@@ -33,7 +36,7 @@ function editorTree(value: string) {
       ariaLabel='Edit message'
       language='markdown'
       onChange={() => undefined}
-      onKeyDown={() => undefined}
+      onKeyDown={onKeyDown}
       value={value}
     />
   )
@@ -54,5 +57,24 @@ describe('CodeBlockEditor', () => {
     // characters pile up at the beginning (text appears right-to-left).
     expect(contentAfter).toBe(contentBefore)
     expect(contentAfter?.textContent).toContain('hi')
+  })
+
+  test('calls the latest keydown handler after rerender without rebuilding the editor', () => {
+    const firstHandler = vi.fn()
+    const latestHandler = vi.fn()
+    const { rerender } = render(editorTree('hello', firstHandler))
+    const contentBefore = document.querySelector('.cm-content')
+
+    rerender(editorTree('hello', latestHandler))
+    const contentAfter = document.querySelector('.cm-content')
+    expect(contentAfter).toBe(contentBefore)
+    if (contentAfter == null) {
+      throw new Error('CodeMirror content element was not rendered')
+    }
+
+    fireEvent.keyDown(contentAfter, { key: 'Enter' })
+
+    expect(firstHandler).not.toHaveBeenCalled()
+    expect(latestHandler).toHaveBeenCalledOnce()
   })
 })

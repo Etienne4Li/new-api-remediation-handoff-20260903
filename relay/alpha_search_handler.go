@@ -3,7 +3,6 @@ package relay
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -61,7 +60,7 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 		}
 	}
 
-	logger.LogDebug(c, "requestBody: %s", jsonData)
+	logger.LogDebug(c, "requestBody_meta=%s", common.SensitiveLogBody(jsonData))
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -95,8 +94,18 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 	if contentType := httpResp.Header.Get("Content-Type"); contentType != "" {
 		c.Writer.Header().Set("Content-Type", contentType)
 	}
+	// Alpha search is a non-streaming endpoint (see AlphaSearchRequest.IsStream).
+	// Read the complete response before committing the downstream headers so an
+	// upstream with an unknown/chunked length cannot make this handler proxy an
+	// unbounded body.  This also lets us return a normal relay error instead of
+	// silently truncating a successful response after a 200 status was sent.
+	responseBody, err := service.ReadProviderResponseBody(httpResp, service.DefaultProviderResponseBodyLimitBytes)
+	if err != nil {
+		return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	c.Writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
 	c.Writer.WriteHeader(httpResp.StatusCode)
-	if _, err := io.Copy(c.Writer, httpResp.Body); err != nil {
+	if _, err := c.Writer.Write(responseBody); err != nil {
 		return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 

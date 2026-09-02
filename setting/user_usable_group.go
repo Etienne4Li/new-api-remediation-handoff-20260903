@@ -1,7 +1,6 @@
 package setting
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -28,7 +27,7 @@ func UserUsableGroups2JSONString() string {
 	userUsableGroupsMutex.RLock()
 	defer userUsableGroupsMutex.RUnlock()
 
-	jsonBytes, err := json.Marshal(userUsableGroups)
+	jsonBytes, err := common.Marshal(userUsableGroups)
 	if err != nil {
 		common.SysLog("error marshalling user groups: " + err.Error())
 	}
@@ -36,11 +35,14 @@ func UserUsableGroups2JSONString() string {
 }
 
 func UpdateUserUsableGroupsByJSONString(jsonStr string) error {
+	decoded := make(map[string]string)
+	if err := common.Unmarshal([]byte(jsonStr), &decoded); err != nil {
+		return err
+	}
 	userUsableGroupsMutex.Lock()
 	defer userUsableGroupsMutex.Unlock()
-
-	userUsableGroups = make(map[string]string)
-	return json.Unmarshal([]byte(jsonStr), &userUsableGroups)
+	userUsableGroups = decoded
+	return nil
 }
 
 func GetUsableGroupDescription(groupName string) string {

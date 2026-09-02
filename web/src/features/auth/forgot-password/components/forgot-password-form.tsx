@@ -83,7 +83,7 @@ export function ForgotPasswordForm({
       } else {
         toast.error(res?.message || t('Failed to send reset email'))
       }
-    } catch (_error) {
+    } catch {
       // Errors are handled by global interceptor
     } finally {
       setIsLoading(false)
@@ -94,7 +94,7 @@ export function ForgotPasswordForm({
     <Form {...form}>
       <form
         onSubmit={form.handleSubmit(onSubmit)}
-        className={cn('grid gap-2', className)}
+        className={cn('grid gap-4', className)}
         {...props}
       >
         <FormField
@@ -102,9 +102,13 @@ export function ForgotPasswordForm({
           name='email'
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Email</FormLabel>
+              <FormLabel>{t('Email')}</FormLabel>
               <FormControl>
-                <Input placeholder='name@example.com' {...field} />
+                <Input
+                  placeholder={t('name@example.com')}
+                  className='h-11'
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -113,7 +117,7 @@ export function ForgotPasswordForm({
 
         <Button
           type='submit'
-          className='mt-2'
+          className='mt-1 h-11'
           disabled={isLoading || isActive || !turnstileReady}
         >
           {isActive
@@ -123,12 +127,11 @@ export function ForgotPasswordForm({
         </Button>
 
         {isTurnstileEnabled && (
-          <div className='mt-2'>
-            <Turnstile
-              siteKey={turnstileSiteKey}
-              onVerify={setTurnstileToken}
-            />
-          </div>
+          <Turnstile
+            siteKey={turnstileSiteKey}
+            onVerify={setTurnstileToken}
+            className='mt-2'
+          />
         )}
       </form>
     </Form>

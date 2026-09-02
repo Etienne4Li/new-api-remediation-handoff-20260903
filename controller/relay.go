@@ -68,9 +68,37 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
+// refundErrorReporter is an optional extension to BillingSettler. Keeping it
+// local lets newer billing sessions expose durable refund failures without
+// changing the relaycommon interface implemented by older integrations.
+type refundErrorReporter interface {
+	RefundWithError(*gin.Context) error
+}
+
+// refundBillingAfterRelayFailure starts the refund while preserving the
+// durable pending state when a database write cannot complete immediately.
+// Observable implementations report that condition to the controller; legacy
+// BillingSettler implementations retain their original void Refund contract.
+func refundBillingAfterRelayFailure(c *gin.Context, billing relaycommon.BillingSettler) {
+	if billing == nil {
+		return
+	}
+	if reporter, ok := billing.(refundErrorReporter); ok {
+		if err := reporter.RefundWithError(c); err != nil {
+			logger.LogError(c, fmt.Sprintf("billing refund remains pending for durable retry: %s", common.MaskSensitiveInfo(err.Error())))
+		}
+		return
+	}
+	billing.Refund(c)
+}
+
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
+	// Snapshot the retry policy once per request.  The option sync worker may
+	// publish a new value while this request is retrying; using a local copy
+	// keeps the loop deterministic and avoids racing the legacy global.
+	retryTimes := common.GetRetryTimes()
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 
@@ -91,7 +119,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	defer func() {
 		if newAPIError != nil {
-			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			logger.LogError(c, fmt.Sprintf("relay error: error_meta=%s", common.SensitiveLogMeta(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
@@ -174,9 +202,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// Only return quota if downstream failed and quota was actually pre-consumed
 		if newAPIError != nil {
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
-			if relayInfo.Billing != nil {
-				relayInfo.Billing.Refund(c)
-			}
+			refundBillingAfterRelayFailure(c, relayInfo.Billing)
 			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
 		}
 	}()
@@ -191,7 +217,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for ; retryParam.GetRetry() <= retryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -238,9 +264,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetry(c, newAPIError, retryTimes-retryParam.GetRetry()) {
 			break
 		}
+		retryParam.ExcludeChannel(channel.Id, channel.ChannelInfo.IsMultiKey)
+		service.ClearCurrentChannelAffinityCacheIfMatches(c, channel.Id)
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -258,7 +286,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 var upgrader = websocket.Upgrader{
 	Subprotocols: []string{"realtime"}, // WS 握手支持的协议，如果有使用 Sec-WebSocket-Protocol，则必须在此声明对应的 Protocol TODO add other protocol
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 允许跨域
+		return middleware.WebSocketOriginAllowed(r)
 	},
 }
 
@@ -332,11 +360,8 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if openaiErr == nil {
 		return false
 	}
-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
 		return false
-	}
-	if types.IsChannelError(openaiErr) {
-		return true
 	}
 	if types.IsSkipRetryError(openaiErr) {
 		return false
@@ -344,24 +369,54 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if retryTimes <= 0 {
 		return false
 	}
-	if _, ok := c.Get("specific_channel_id"); ok {
-		return false
+	if c != nil {
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		if _, ok := c.Get("specific_channel_id"); ok {
+			return false
+		}
 	}
+
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {
 		return false
 	}
-	if code < 100 || code > 599 {
-		return true
+
+	retryable := types.IsChannelError(openaiErr)
+	if !retryable {
+		if code < 100 || code > 599 {
+			retryable = true
+		} else {
+			retryable = operation_setting.ShouldRetryByStatusCode(code)
+		}
 	}
-	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
+	if !retryable {
 		return false
 	}
-	return operation_setting.ShouldRetryByStatusCode(code)
+	if !service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return true
+	}
+
+	// An affinity hit normally stays pinned. Only failures that are clearly
+	// transient may move the same client session to another healthy channel.
+	errorCode := openaiErr.GetErrorCode()
+	if errorCode == types.ErrorCodeDoRequestFailed || errorCode == types.ErrorCodeChannelResponseTimeExceeded {
+		return true
+	}
+	if types.IsChannelError(openaiErr) {
+		return false
+	}
+	return code == http.StatusRequestTimeout ||
+		code == http.StatusTooManyRequests ||
+		(code >= http.StatusInternalServerError && code <= 599)
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
-	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
+	if err == nil {
+		return
+	}
+	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): error_meta=%s", channelError.ChannelId, err.StatusCode, common.SensitiveLogMeta(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if service.ShouldDisableChannel(err) && channelError.AutoBan {
@@ -396,6 +451,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 		}
 		service.AppendChannelAffinityAdminInfo(c, adminInfo)
+		relaycommon.AppendResponsesInputItemIDNormalizationAdminInfo(c, adminInfo)
 		other["admin_info"] = adminInfo
 		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 		if startTime.IsZero() {
@@ -412,7 +468,7 @@ func RelayMidjourney(c *gin.Context) {
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"description": fmt.Sprintf("failed to generate relay info: %s", err.Error()),
+			"description": fmt.Sprintf("failed to generate relay info: %s", common.MaskSensitiveInfo(err.Error())),
 			"type":        "upstream_error",
 			"code":        4,
 		})
@@ -440,13 +496,14 @@ func RelayMidjourney(c *gin.Context) {
 			mjErr.Result = "当前分组负载已饱和，请稍后再试，或升级账户以提升服务质量。"
 			statusCode = http.StatusTooManyRequests
 		}
+		responseDescription := common.MaskSensitiveInfo(strings.TrimSpace(fmt.Sprintf("%s %s", mjErr.Description, mjErr.Result)))
 		c.JSON(statusCode, gin.H{
-			"description": fmt.Sprintf("%s %s", mjErr.Description, mjErr.Result),
+			"description": responseDescription,
 			"type":        "upstream_error",
 			"code":        mjErr.Code,
 		})
 		channelId := c.GetInt("channel_id")
-		logger.LogError(c, fmt.Sprintf("relay error (channel #%d, status code %d): %s", channelId, statusCode, fmt.Sprintf("%s %s", mjErr.Description, mjErr.Result)))
+		logger.LogError(c, fmt.Sprintf("relay error (channel #%d, status code %d): error_meta=%s", channelId, statusCode, common.SensitiveLogMeta(responseDescription)))
 	}
 }
 
@@ -479,7 +536,7 @@ func RelayTaskFetch(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &taskdto.TaskError{
 			Code:       "gen_relay_info_failed",
-			Message:    err.Error(),
+			Message:    common.MaskSensitiveInfo(err.Error()),
 			StatusCode: http.StatusInternalServerError,
 		})
 		return
@@ -490,11 +547,13 @@ func RelayTaskFetch(c *gin.Context) {
 }
 
 func RelayTask(c *gin.Context) {
+	// Keep one coherent retry policy for the whole task submission attempt.
+	retryTimes := common.GetRetryTimes()
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &taskdto.TaskError{
 			Code:       "gen_relay_info_failed",
-			Message:    err.Error(),
+			Message:    common.MaskSensitiveInfo(err.Error()),
 			StatusCode: http.StatusInternalServerError,
 		})
 		return
@@ -508,8 +567,8 @@ func RelayTask(c *gin.Context) {
 	var result *relay.TaskSubmitResult
 	var taskErr *taskdto.TaskError
 	defer func() {
-		if taskErr != nil && relayInfo.Billing != nil {
-			relayInfo.Billing.Refund(c)
+		if taskErr != nil {
+			refundBillingAfterRelayFailure(c, relayInfo.Billing)
 		}
 	}()
 
@@ -521,7 +580,7 @@ func RelayTask(c *gin.Context) {
 		Retry:       common.GetPointer(0),
 	}
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for ; retryParam.GetRetry() <= retryTimes; retryParam.IncreaseRetry() {
 		var channel *model.Channel
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
@@ -566,7 +625,7 @@ func RelayTask(c *gin.Context) {
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
 		}
 
-		if !shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetryTaskRelay(c, channel.Id, taskErr, retryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -577,13 +636,12 @@ func RelayTask(c *gin.Context) {
 		logger.LogInfo(c, retryLogStr)
 	}
 
-	// ── 成功：结算 + 日志 + 插入任务 ──
+	// ── 成功：先持久化任务，再结算 + 日志 ──
+	//
+	// 上游任务一旦接受，客户端已经拿到了 task id。任务行必须先落库并
+	// 带着 pending settlement 状态，才能覆盖“结算失败/进程崩溃”窗口；
+	// 后台 worker 会依据 BillingRequestId 重放同一个幂等账务操作。
 	if taskErr == nil {
-		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
-			common.SysError("settle task billing error: " + settleErr.Error())
-		}
-		service.LogTaskConsumption(c, relayInfo)
-
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
@@ -599,10 +657,78 @@ func RelayTask(c *gin.Context) {
 			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
 		}
 		task.Quota = result.Quota
-		task.Data = result.TaskData
+		task.BillingSettlementQuota = result.Quota
+		task.BillingRequestId = relayInfo.RequestId
+		task.BillingTokenUnlimited = relayInfo.TokenUnlimited
+		task.BillingPlayground = relayInfo.IsPlayground
+		if relayInfo.Billing != nil {
+			task.BillingPreConsumedQuota = relayInfo.Billing.GetPreConsumedQuota()
+			task.BillingSettlementState = model.TaskBillingSettlementPending
+		} else if relayInfo.PriceData.FreeModel {
+			// Free models have no financial operation, but still get a durable
+			// completed marker so they are not mistaken for an unfinished billing
+			// retry.
+			task.BillingSettlementState = model.TaskBillingSettlementComplete
+		} else {
+			// A paid task without a BillingSession is an unexpected legacy/fallback
+			// path.  Keep it fenced for manual review instead of claiming that its
+			// ledger was settled.
+			task.BillingSettlementState = model.TaskBillingSettlementManual
+		}
+		// Provider task responses are untrusted metadata and are returned by the
+		// task fetch APIs. Persist only the bounded, credential-safe projection so
+		// there is no window between submission and the first polling pass where a
+		// raw signed URL, inline media blob, or provider secret can be exposed.
+		task.Data = service.RedactTaskResponseBody(result.TaskData)
 		task.Action = relayInfo.Action
-		if insertErr := task.Insert(); insertErr != nil {
-			common.SysError("insert task error: " + insertErr.Error())
+		// The provider has already accepted the task and the response adaptor has
+		// returned its public ID. Establish the durable marker transaction before
+		// inserting the local row, then retry only local writes. A failure is
+		// deliberately fail-closed: do not settle/refund from this request without
+		// a durable task/operation identity, because doing so would make a later
+		// replay capable of charging or crediting the wrong task. The helper keeps
+		// a successfully inserted row in MANUAL settlement state when marker
+		// creation itself is unavailable; otherwise it leaves marker-only intent
+		// for the polling reconciler and emits an operator-visible event.
+		persistResult := service.PersistAcceptedAsyncTask(task, relayInfo, result.Quota)
+		if persistErr := persistResult.Error(); persistErr != nil {
+			upstreamID := strings.TrimSpace(result.UpstreamTaskID)
+			if upstreamID == "" {
+				upstreamID = "<missing>"
+			}
+			common.SysError(fmt.Sprintf(
+				"accepted async task requires manual reconciliation request_id=%s public_task_id=%s upstream_task_id=%s persisted=%t markers_durable=%t error_meta=%s",
+				relayInfo.RequestId,
+				task.TaskID,
+				upstreamID,
+				persistResult.TaskPersisted,
+				persistResult.MarkersDurable,
+				common.SensitiveLogMeta(persistErr.Error()),
+			))
+			return
+		}
+
+		if relayInfo.Billing != nil {
+			if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+				// Keep the task visible with a durable pending marker.  The response
+				// has already been written by the adaptor, so returning an HTTP error
+				// here would mislead the client; the worker retries the same operation.
+				common.SysError("settle task billing error (deferred): " + settleErr.Error())
+				if markErr := task.MarkBillingSettlementPending(time.Now().Unix()+15, settleErr); markErr != nil {
+					common.SysError("mark task settlement pending error: " + markErr.Error())
+				}
+			} else if usageErr := service.RecordTaskConsumptionOnce(c.Request.Context(), task); usageErr != nil {
+				common.SysError("record task consumption error (deferred): " + usageErr.Error())
+				_ = task.MarkBillingSettlementPending(time.Now().Unix()+15, usageErr)
+			} else if markErr := task.MarkBillingSettlementComplete(); markErr != nil {
+				common.SysError("mark task settlement complete error (deferred): " + markErr.Error())
+			}
+		} else {
+			// Preserve request-count/usage semantics for free task models.  The
+			// marker makes this branch safe if a worker/realtime fetch revisits it.
+			if usageErr := service.RecordTaskConsumptionOnce(c.Request.Context(), task); usageErr != nil {
+				common.SysError("record free task consumption error: " + usageErr.Error())
+			}
 		}
 	}
 

@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 			return "aGVsbG8=", "image/png", nil
 		},
 		DecodeBase64FileData: func(base64String string) (string, string, error) {
-			return "aGVsbG8=", "image/png", nil
+			return "image/png", "aGVsbG8=", nil
 		},
 	})
 	os.Exit(m.Run())

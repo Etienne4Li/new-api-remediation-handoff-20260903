@@ -152,7 +152,7 @@ func GetClaudeAuthHeader(token string) http.Header {
 func GetResponseBody(method, url string, channel *model.Channel, headers http.Header) ([]byte, error) {
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build provider request %s: %w", common.SanitizeRequestURIForLog(url), err)
 	}
 	for k := range headers {
 		req.Header.Add(k, headers.Get(k))
@@ -163,16 +163,13 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("provider request %s failed: %w", common.SanitizeRequestURIForLog(url), err)
 	}
+	defer service.CloseResponseBodyGracefully(res)
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code: %d", res.StatusCode)
 	}
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	err = res.Body.Close()
+	body, err := service.ReadProviderResponseBody(res, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +361,8 @@ func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
 		return 0, fmt.Errorf("failed to update moonshot balance, status: %v, code: %d, scode: %s", response.Status, response.Code, response.Scode)
 	}
 	availableBalanceCny := response.Data.AvailableBalance
-	availableBalanceUsd := decimal.NewFromFloat(availableBalanceCny).Div(decimal.NewFromFloat(operation_setting.Price)).InexactFloat64()
+	paymentConfig := operation_setting.GetPaymentRuntimeConfig()
+	availableBalanceUsd := decimal.NewFromFloat(availableBalanceCny).Div(decimal.NewFromFloat(paymentConfig.Price)).InexactFloat64()
 	channel.UpdateBalance(availableBalanceUsd)
 	return availableBalanceUsd, nil
 }

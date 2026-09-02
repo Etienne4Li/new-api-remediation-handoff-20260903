@@ -127,9 +127,15 @@ export function PrefillGroupManagementDialog({
   )
 
   useEffect(() => {
-    if (!open) {
+    if (open) return
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (cancelled) return
       setDeleteState({ open: false, group: null })
       setIsDeleting(false)
+    })
+    return () => {
+      cancelled = true
     }
   }, [open])
 

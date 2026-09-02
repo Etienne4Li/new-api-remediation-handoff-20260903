@@ -64,6 +64,15 @@ redemption.failed: "兑换失败，请稍后重试"
 redemption.not_provided: "未提供兑换码"
 redemption.expire_time_invalid: "过期时间不能早于当前时间"
 
+# 工单消息
+ticket.title_length: "工单标题长度必须在 {{.Min}} 到 {{.Max}} 个字符之间"
+ticket.message_length: "工单内容长度必须在 1 到 {{.Max}} 个字符之间"
+ticket.category_invalid: "无效的工单分类"
+ticket.priority_invalid: "无效的工单优先级"
+ticket.status_invalid: "无效的工单状态"
+ticket.not_found: "工单不存在"
+ticket.closed: "该工单已关闭，请重新打开后再回复"
+
 # User messages
 user.password_login_disabled: "管理员关闭了密码登录"
 user.register_disabled: "管理员关闭了新用户注册"

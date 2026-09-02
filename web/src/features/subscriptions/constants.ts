@@ -16,13 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+import type { TFunction } from 'i18next'
 
 // ============================================================================
 // Duration Unit Options
 // ============================================================================
 
-export const DURATION_UNITS = [
+const DURATION_UNITS = [
   { value: 'year', labelKey: 'years' },
   { value: 'month', labelKey: 'months' },
   { value: 'day', labelKey: 'days' },
@@ -30,7 +30,7 @@ export const DURATION_UNITS = [
   { value: 'custom', labelKey: 'Custom (seconds)' },
 ] as const
 
-export const RESET_PERIODS = [
+const RESET_PERIODS = [
   { value: 'never', labelKey: 'No Reset' },
   { value: 'daily', labelKey: 'Daily' },
   { value: 'weekly', labelKey: 'Weekly' },

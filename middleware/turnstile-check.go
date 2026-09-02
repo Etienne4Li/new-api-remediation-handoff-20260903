@@ -14,7 +14,8 @@ type turnstileCheckResponse struct {
 
 func TurnstileCheck() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if common.TurnstileCheckEnabled {
+		securityConfig := common.GetSecurityRuntimeConfig()
+		if securityConfig.TurnstileCheckEnabled {
 			response := c.Query("turnstile")
 			if response == "" {
 				c.JSON(http.StatusOK, gin.H{
@@ -25,27 +26,27 @@ func TurnstileCheck() gin.HandlerFunc {
 				return
 			}
 			rawRes, err := http.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", url.Values{
-				"secret":   {common.TurnstileSecretKey},
+				"secret":   {securityConfig.TurnstileSecretKey},
 				"response": {response},
 				"remoteip": {c.ClientIP()},
 			})
 			if err != nil {
-				common.SysLog(err.Error())
+				common.SysLog("turnstile verification request failed error_meta=" + common.SensitiveLogMeta(err.Error()))
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": "Turnstile 校验服务暂时不可用，请稍后重试",
 				})
 				c.Abort()
 				return
 			}
 			defer rawRes.Body.Close()
 			var res turnstileCheckResponse
-			err = common.DecodeJson(rawRes.Body, &res)
+			err = common.DecodeJsonLimited(rawRes.Body, 64<<10, &res)
 			if err != nil {
-				common.SysLog(err.Error())
+				common.SysLog("turnstile verification response decode failed error_meta=" + common.SensitiveLogMeta(err.Error()))
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": "Turnstile 校验服务返回无效响应",
 				})
 				c.Abort()
 				return

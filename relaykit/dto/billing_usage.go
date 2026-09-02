@@ -1,5 +1,7 @@
 package dto
 
+import "github.com/QuantumNous/new-api/relaykit/types"
+
 const (
 	BillingUsageSourceClaudeMessages = "claude_messages"
 	BillingUsageSourceGeminiChat     = "gemini_chat"
@@ -113,7 +115,7 @@ func NewEstimatedGeminiChatBillingUsage(usage *Usage) *BillingUsage {
 	}
 	totalTokens := usage.TotalTokens
 	if totalTokens == 0 {
-		totalTokens = usage.PromptTokens + usage.CompletionTokens
+		totalTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	}
 	return newGeminiChatBillingUsage(&GeminiUsageMetadata{
 		PromptTokenCount:     usage.PromptTokens,

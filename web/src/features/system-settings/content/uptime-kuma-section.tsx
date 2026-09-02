@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Plus, Trash2, Save } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -88,13 +88,26 @@ type UptimeKumaFormValues = z.infer<ReturnType<typeof createUptimeKumaSchema>>
 
 const UPTIME_KUMA_FORM_ID = 'uptime-kuma-form'
 
+function parseUptimeKumaGroups(data: string): UptimeKumaGroup[] {
+  try {
+    const parsed: unknown = JSON.parse(data || '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item, idx) => ({
+      ...(item as UptimeKumaGroup),
+      id: (item as UptimeKumaGroup).id || idx + 1,
+    }))
+  } catch {
+    return []
+  }
+}
+
 export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const uptimeKumaSchema = createUptimeKumaSchema(t)
-  const [groups, setGroups] = useState<UptimeKumaGroup[]>([])
-  const [isEnabled, setIsEnabled] = useState(enabled)
-  const [hasChanges, setHasChanges] = useState(false)
+  const parsedGroups = useMemo(() => parseUptimeKumaGroups(data), [data])
+  const [draftGroups, setDraftGroups] = useState<UptimeKumaGroup[] | null>(null)
+  const [isEnabledDraft, setIsEnabledDraft] = useState<boolean | null>(null)
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [showDialog, setShowDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -110,25 +123,8 @@ export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
     },
   })
 
-  useEffect(() => {
-    try {
-      const parsed = JSON.parse(data || '[]')
-      if (Array.isArray(parsed)) {
-        setGroups(
-          parsed.map((item, idx) => ({
-            ...item,
-            id: item.id || idx + 1,
-          }))
-        )
-      }
-    } catch {
-      setGroups([])
-    }
-  }, [data])
-
-  useEffect(() => {
-    setIsEnabled(enabled)
-  }, [enabled])
+  const groups = draftGroups ?? parsedGroups
+  const isEnabled = isEnabledDraft ?? enabled
 
   const handleToggleEnabled = async (checked: boolean) => {
     try {
@@ -136,7 +132,7 @@ export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
         key: 'console_setting.uptime_kuma_enabled',
         value: checked,
       })
-      setIsEnabled(checked)
+      setIsEnabledDraft(checked)
       toast.success(t('Setting saved'))
     } catch {
       toast.error(t('Failed to update setting'))
@@ -180,13 +176,11 @@ export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
 
   const confirmDelete = () => {
     if (deleteTarget === 'single' && editingGroup) {
-      setGroups((prev) => prev.filter((item) => item.id !== editingGroup.id))
-      setHasChanges(true)
+      setDraftGroups(groups.filter((item) => item.id !== editingGroup.id))
       toast.success(t('Group deleted. Click "Save Settings" to apply.'))
     } else if (deleteTarget === 'batch') {
-      setGroups((prev) => prev.filter((item) => !selectedIds.includes(item.id)))
+      setDraftGroups(groups.filter((item) => !selectedIds.includes(item.id)))
       setSelectedIds([])
-      setHasChanges(true)
       toast.success(
         t('{{count}} groups deleted. Click "Save Settings" to apply.', {
           count: selectedIds.length,
@@ -199,29 +193,30 @@ export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
 
   const handleSubmitForm = (values: UptimeKumaFormValues) => {
     if (editingGroup) {
-      setGroups((prev) =>
-        prev.map((item) =>
+      setDraftGroups(
+        groups.map((item) =>
           item.id === editingGroup.id ? { ...item, ...values } : item
         )
       )
       toast.success(t('Group updated. Click "Save Settings" to apply.'))
     } else {
       const newId = Math.max(...groups.map((item) => item.id), 0) + 1
-      setGroups((prev) => [...prev, { id: newId, ...values }])
+      setDraftGroups([...groups, { id: newId, ...values }])
       toast.success(t('Group added. Click "Save Settings" to apply.'))
     }
-    setHasChanges(true)
     setShowDialog(false)
   }
 
   const handleSaveAll = async () => {
     try {
-      await updateOption.mutateAsync({
+      const result = await updateOption.mutateAsync({
         key: 'console_setting.uptime_kuma_groups',
         value: JSON.stringify(groups),
       })
-      setHasChanges(false)
-      toast.success(t('Uptime Kuma groups saved successfully'))
+      if (result.success) {
+        setDraftGroups(null)
+        toast.success(t('Uptime Kuma groups saved successfully'))
+      }
     } catch {
       toast.error(t('Failed to save Uptime Kuma groups'))
     }
@@ -260,7 +255,7 @@ export function UptimeKumaSection({ enabled, data }: UptimeKumaSectionProps) {
               onClick={handleSaveAll}
               size='sm'
               variant='secondary'
-              disabled={!hasChanges || updateOption.isPending}
+              disabled={draftGroups === null || updateOption.isPending}
             >
               <Save className='mr-2 h-4 w-4' />
               {updateOption.isPending ? t('Saving...') : t('Save Settings')}

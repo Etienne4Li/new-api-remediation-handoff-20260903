@@ -102,23 +102,30 @@ export function RedemptionsMutateDrawer({
   // Load existing data when updating
   useEffect(() => {
     if (!open) {
-      setRedemptionLoadState('idle')
-      setLoadedRedemption(null)
+      void Promise.resolve().then(() => {
+        setRedemptionLoadState('idle')
+        setLoadedRedemption(null)
+      })
       return
     }
 
     if (!isUpdate || redemptionId === undefined) {
       form.reset(REDEMPTION_FORM_DEFAULT_VALUES)
-      setRedemptionLoadState('ready')
-      setLoadedRedemption(null)
+      void Promise.resolve().then(() => {
+        setRedemptionLoadState('ready')
+        setLoadedRedemption(null)
+      })
       return
     }
 
     let ignoreResult = false
 
-    form.reset(REDEMPTION_FORM_DEFAULT_VALUES)
-    setRedemptionLoadState('loading')
-    setLoadedRedemption(null)
+    void Promise.resolve().then(() => {
+      if (ignoreResult) return
+      form.reset(REDEMPTION_FORM_DEFAULT_VALUES)
+      setRedemptionLoadState('loading')
+      setLoadedRedemption(null)
+    })
 
     void getRedemption(redemptionId)
       .then((result) => {

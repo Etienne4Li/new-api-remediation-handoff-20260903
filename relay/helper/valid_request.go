@@ -83,7 +83,7 @@ func GetAndValidateRerankRequest(c *gin.Context) (*dto.RerankRequest, error) {
 	var rerankRequest *dto.RerankRequest
 	err := common.UnmarshalBodyReusable(c, &rerankRequest)
 	if err != nil {
-		logger.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: %s", err.Error()))
+		logger.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: error_meta=%s", common.SensitiveLogMeta(err.Error())))
 		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
@@ -100,7 +100,7 @@ func GetAndValidateEmbeddingRequest(c *gin.Context, relayMode int) (*dto.Embeddi
 	var embeddingRequest *dto.EmbeddingRequest
 	err := common.UnmarshalBodyReusable(c, &embeddingRequest)
 	if err != nil {
-		logger.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: %s", err.Error()))
+		logger.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: error_meta=%s", common.SensitiveLogMeta(err.Error())))
 		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
@@ -124,6 +124,25 @@ const maxTokensLimit = math.MaxInt32 / 2
 func exceedsMaxTokensLimit(values ...*uint) bool {
 	for _, v := range values {
 		if lo.FromPtrOr(v, uint(0)) > maxTokensLimit {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiRequestExceedsMaxTokens walks a Gemini request tree. Native Gemini
+// batchGenerate requests embed full GeminiChatRequest values under `requests`,
+// so validating only the outer generationConfig would let an oversized nested
+// maxOutputTokens reach conversion and billing code.
+func geminiRequestExceedsMaxTokens(request *dto.GeminiChatRequest) bool {
+	if request == nil {
+		return false
+	}
+	if exceedsMaxTokensLimit(request.GenerationConfig.MaxOutputTokens) {
+		return true
+	}
+	for i := range request.Requests {
+		if geminiRequestExceedsMaxTokens(&request.Requests[i]) {
 			return true
 		}
 	}
@@ -376,7 +395,7 @@ func GetAndValidateGeminiRequest(c *gin.Context) (*dto.GeminiChatRequest, error)
 	if len(request.Contents) == 0 && len(request.Requests) == 0 {
 		return nil, errors.New("contents is required")
 	}
-	if exceedsMaxTokensLimit(request.GenerationConfig.MaxOutputTokens) {
+	if geminiRequestExceedsMaxTokens(request) {
 		return nil, errors.New("maxOutputTokens is invalid")
 	}
 

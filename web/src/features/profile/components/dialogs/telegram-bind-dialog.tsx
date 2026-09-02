@@ -81,12 +81,14 @@ export function TelegramBindDialog({
 
   useEffect(() => {
     if (!open) {
-      setCallbackUrl(null)
-      setFlowToken(null)
-      setError(null)
+      void Promise.resolve().then(() => {
+        setCallbackUrl(null)
+        setFlowToken(null)
+        setError(null)
+      })
       return
     }
-    void createBindFlow()
+    void Promise.resolve().then(() => createBindFlow())
   }, [createBindFlow, open])
 
   useEffect(() => {

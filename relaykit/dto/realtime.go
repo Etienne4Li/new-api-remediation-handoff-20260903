@@ -34,7 +34,12 @@ type RealtimeEvent struct {
 }
 
 type RealtimeResponse struct {
-	Usage *RealtimeUsage `json:"usage"`
+	// Id identifies the response/turn. It is present on response.done and is
+	// useful as a durable deduplication key when a proxy retries a terminal
+	// frame with a different event_id.
+	Id     string         `json:"id,omitempty"`
+	Status string         `json:"status,omitempty"`
+	Usage  *RealtimeUsage `json:"usage"`
 }
 
 type RealtimeUsage struct {

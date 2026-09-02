@@ -20,13 +20,27 @@ For commercial licensing, please contact support@quantumnous.com
  * Application-wide constants
  */
 
-// System Configuration Defaults
-export const DEFAULT_SYSTEM_NAME = 'New API'
-export const DEFAULT_LOGO = '/logo.png'
+// Presentation defaults. The backend keeps its upstream project identity, while
+// the shipped interface uses the Lietio brand until an administrator overrides it.
+export const DEFAULT_SYSTEM_NAME = 'Lietio'
+export const DEFAULT_DOCUMENT_TITLE = 'Lietio'
+export const DEFAULT_LOGO = '/lietio-mark.svg'
+
+const PRESENTATION_NAME_ALIASES = new Set(['New API', 'NewAPI', 'Lietio API'])
+const UPSTREAM_DEFAULT_LOGOS = new Set(['/logo.png'])
+
+export function resolveSystemName(value?: string): string {
+  const configuredName = typeof value === 'string' ? value.trim() : ''
+  return !configuredName || PRESENTATION_NAME_ALIASES.has(configuredName)
+    ? DEFAULT_SYSTEM_NAME
+    : configuredName
+}
+
+export function resolveSystemLogo(value?: string): string {
+  const configuredLogo = typeof value === 'string' ? value.trim() : ''
+  return !configuredLogo || UPSTREAM_DEFAULT_LOGOS.has(configuredLogo)
+    ? DEFAULT_LOGO
+    : configuredLogo
+}
 
 // LocalStorage Keys
-export const STORAGE_KEYS = {
-  SYSTEM_NAME: 'system_name',
-  LOGO: 'logo',
-  FOOTER_HTML: 'footer_html',
-} as const

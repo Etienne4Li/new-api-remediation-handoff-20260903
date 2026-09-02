@@ -17,7 +17,13 @@ func formatNotifyType(channelId int, status int) string {
 
 // disable & notify
 func DisableChannel(channelError types.ChannelError, reason string) {
-	common.SysLog(fmt.Sprintf("通道「%s」（#%d）发生错误，准备禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, common.LocalLogPreview(reason)))
+	// Provider errors may include request bodies, signed URLs, or credentials.
+	// The disable reason is written to the channel record and forwarded in an
+	// administrator notification, so sanitize it once at this persistence
+	// boundary before using it anywhere downstream.
+	safeReason := common.MaskSensitiveInfo(reason)
+	safeReason = common.LocalLogPreview(safeReason)
+	common.SysLog(fmt.Sprintf("通道「%s」（#%d）发生错误，准备禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, safeReason))
 
 	// 检查是否启用自动禁用功能
 	if !channelError.AutoBan {
@@ -25,10 +31,10 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 		return
 	}
 
-	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason)
+	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, safeReason)
 	if success {
 		subject := fmt.Sprintf("通道「%s」（#%d）已被禁用", channelError.ChannelName, channelError.ChannelId)
-		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
+		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, safeReason)
 		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, content)
 	}
 }
@@ -43,7 +49,11 @@ func EnableChannel(channelId int, usingKey string, channelName string) {
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {
-	if !common.AutomaticDisableChannelEnabled {
+	runtimeConfig := common.GetGeneralRuntimeConfig()
+	// Load the complete failure policy once.  This keeps the status-code and
+	// keyword checks on the same copy when an administrator hot-reloads rules.
+	operationConfig := operation_setting.GetOperationRuntimeConfig()
+	if !runtimeConfig.AutomaticDisableChannelEnabled {
 		return false
 	}
 	if err == nil {
@@ -55,17 +65,18 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if types.IsSkipRetryError(err) {
 		return false
 	}
-	if operation_setting.ShouldDisableByStatusCode(err.StatusCode) {
+	if operationConfig.ShouldDisableByStatusCode(err.StatusCode) {
 		return true
 	}
 
 	lowerMessage := strings.ToLower(err.Error())
-	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords, true)
+	search, _ := AcSearch(lowerMessage, operationConfig.AutomaticDisableKeywords, true)
 	return search
 }
 
 func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {
-	if !common.AutomaticEnableChannelEnabled {
+	runtimeConfig := common.GetGeneralRuntimeConfig()
+	if !runtimeConfig.AutomaticEnableChannelEnabled {
 		return false
 	}
 	if newAPIError != nil {

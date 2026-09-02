@@ -3,7 +3,10 @@ package service
 import (
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -22,6 +25,49 @@ func effectiveBillingUsage(usage *dto.Usage) *dto.Usage {
 		return billingUsage
 	}
 	return usage
+}
+
+type perfCacheUsage struct {
+	InputTokens      int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	Observed         bool
+}
+
+// perfCacheUsageFromUpstream returns normalized cache counters only when the
+// successful relay has real upstream usage. Local and explicitly estimated
+// billing usage must not be mixed into cache hit-rate statistics.
+func perfCacheUsageFromUpstream(ctx *gin.Context, originalUsage *dto.Usage, effectiveUsage *dto.Usage) perfCacheUsage {
+	if originalUsage == nil || effectiveUsage == nil {
+		return perfCacheUsage{}
+	}
+	if ctx != nil && common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
+		return perfCacheUsage{}
+	}
+	if originalUsage.BillingUsage != nil && originalUsage.BillingUsage.Estimated {
+		return perfCacheUsage{}
+	}
+
+	inputTokens := effectiveUsage.InputTokens
+	if inputTokens <= 0 {
+		inputTokens = effectiveUsage.PromptTokens
+	}
+	if inputTokens <= 0 {
+		return perfCacheUsage{}
+	}
+
+	cacheReadTokens := effectiveUsage.PromptTokensDetails.CachedTokens
+	if cacheReadTokens <= 0 {
+		cacheReadTokens = effectiveUsage.PromptCacheHitTokens
+	}
+	cacheWriteTokens := effectiveUsage.PromptTokensDetails.CacheCreationTokensTotal()
+
+	return perfCacheUsage{
+		InputTokens:      int64(inputTokens),
+		CacheReadTokens:  int64(max(cacheReadTokens, 0)),
+		CacheWriteTokens: int64(max(cacheWriteTokens, 0)),
+		Observed:         true,
+	}
 }
 
 func usageBillingPathForLog(isLocalCountTokens bool, usage *dto.Usage) string {
@@ -111,7 +157,7 @@ func usageFromOpenAIBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 		usage.OutputTokens = usage.CompletionTokens
 	}
 	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.TotalTokens = safeTokenTotal(usage.PromptTokens, usage.CompletionTokens)
 	}
 	if inputDetails := usage.InputTokensDetails; inputDetails != nil {
 		if usage.PromptTokensDetails.CachedTokens == 0 && inputDetails.CachedTokens > 0 {
@@ -156,8 +202,8 @@ func usageFromClaudeBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 	usage := &dto.Usage{
 		PromptTokens:                claudeUsage.InputTokens,
 		CompletionTokens:            claudeUsage.OutputTokens,
-		TotalTokens:                 claudeUsage.InputTokens + claudeUsage.OutputTokens,
-		InputTokens:                 claudeUsage.InputTokens + claudeUsage.CacheReadInputTokens + claudeUsage.CacheCreationInputTokens,
+		TotalTokens:                 safeTokenTotal(claudeUsage.InputTokens, claudeUsage.OutputTokens),
+		InputTokens:                 safeTokenTotal(safeTokenTotal(claudeUsage.InputTokens, claudeUsage.CacheReadInputTokens), claudeUsage.CacheCreationInputTokens),
 		OutputTokens:                claudeUsage.OutputTokens,
 		UsageSemantic:               dto.BillingUsageSemanticAnthropic,
 		UsageSource:                 dto.BillingUsageSourceClaudeMessages,
@@ -172,10 +218,10 @@ func usageFromClaudeBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 
 func usageFromGeminiBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 	metadata := *billingUsage.GeminiUsageMetadata
-	promptTokens := metadata.PromptTokenCount + metadata.ToolUsePromptTokenCount
+	promptTokens := safeTokenTotal(metadata.PromptTokenCount, metadata.ToolUsePromptTokenCount)
 	usage := &dto.Usage{
 		PromptTokens:     promptTokens,
-		CompletionTokens: metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount,
+		CompletionTokens: safeTokenTotal(metadata.CandidatesTokenCount, metadata.ThoughtsTokenCount),
 		TotalTokens:      metadata.TotalTokenCount,
 		UsageSemantic:    dto.BillingUsageSemanticGemini,
 		UsageSource:      dto.BillingUsageSourceGeminiChat,
@@ -193,18 +239,24 @@ func usageFromGeminiBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 	for _, detail := range metadata.CandidatesTokensDetails {
 		switch detail.Modality {
 		case "IMAGE":
-			usage.CompletionTokenDetails.ImageTokens += detail.TokenCount
+			usage.CompletionTokenDetails.ImageTokens = safeTokenTotal(usage.CompletionTokenDetails.ImageTokens, detail.TokenCount)
 		case "AUDIO":
-			usage.CompletionTokenDetails.AudioTokens += detail.TokenCount
+			usage.CompletionTokenDetails.AudioTokens = safeTokenTotal(usage.CompletionTokenDetails.AudioTokens, detail.TokenCount)
 		case "TEXT":
-			usage.CompletionTokenDetails.TextTokens += detail.TokenCount
+			usage.CompletionTokenDetails.TextTokens = safeTokenTotal(usage.CompletionTokenDetails.TextTokens, detail.TokenCount)
 		}
 	}
 
 	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.TotalTokens = safeTokenTotal(usage.PromptTokens, usage.CompletionTokens)
 	} else if usage.CompletionTokens <= 0 {
-		usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+		if usage.TotalTokens > usage.PromptTokens {
+			usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+		} else {
+			// An inconsistent or negative upstream total must never become a
+			// negative completion count (which would reduce the charge).
+			usage.CompletionTokens = 0
+		}
 	}
 	if usage.PromptTokens > 0 && usage.PromptTokensDetails.TextTokens == 0 && usage.PromptTokensDetails.AudioTokens == 0 {
 		usage.PromptTokensDetails.TextTokens = usage.PromptTokens
@@ -215,10 +267,10 @@ func usageFromGeminiBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 func addGeminiInputTokenDetail(details *dto.InputTokenDetails, detail dto.GeminiPromptTokensDetails) {
 	switch detail.Modality {
 	case "AUDIO":
-		details.AudioTokens += detail.TokenCount
+		details.AudioTokens = safeTokenTotal(details.AudioTokens, detail.TokenCount)
 	case "IMAGE":
-		details.ImageTokens += detail.TokenCount
+		details.ImageTokens = safeTokenTotal(details.ImageTokens, detail.TokenCount)
 	case "TEXT":
-		details.TextTokens += detail.TokenCount
+		details.TextTokens = safeTokenTotal(details.TextTokens, detail.TokenCount)
 	}
 }

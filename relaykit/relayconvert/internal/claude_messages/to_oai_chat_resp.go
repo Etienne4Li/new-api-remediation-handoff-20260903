@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/reasonmap"
 	sharedclaude "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/claude"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -194,7 +195,7 @@ func cacheCreationTokensForOpenAIUsage(usage *dto.Usage) int {
 	if usage == nil {
 		return 0
 	}
-	splitCacheCreationTokens := usage.ClaudeCacheCreation5mTokens + usage.ClaudeCacheCreation1hTokens
+	splitCacheCreationTokens := types.SaturatingAddNonNegativeInt(usage.ClaudeCacheCreation5mTokens, usage.ClaudeCacheCreation1hTokens)
 	if splitCacheCreationTokens == 0 {
 		return usage.PromptTokensDetails.CachedCreationTokens
 	}
@@ -219,10 +220,10 @@ func buildOpenAIStyleUsageFromClaudeUsage(usage *dto.Usage) dto.Usage {
 	// Expose the standard OpenAI cache-write field alongside the legacy
 	// cached_creation_tokens so OpenAI-format clients can bill cache writes.
 	clone.PromptTokensDetails.CacheWriteTokens = cacheCreationTokens
-	totalInputTokens := usage.PromptTokens + usage.PromptTokensDetails.CachedTokens + cacheCreationTokens
+	totalInputTokens := types.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.PromptTokensDetails.CachedTokens, cacheCreationTokens)
 	clone.PromptTokens = totalInputTokens
 	clone.InputTokens = totalInputTokens
-	clone.TotalTokens = totalInputTokens + usage.CompletionTokens
+	clone.TotalTokens = types.SaturatingAddNonNegativeInt(totalInputTokens, usage.CompletionTokens)
 	clone.UsageSemantic = "openai"
 	clone.UsageSource = "anthropic"
 	return clone
@@ -382,7 +383,7 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			if claudeResponse.Usage.OutputTokens > 0 {
 				claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
 			}
-			claudeInfo.Usage.TotalTokens = claudeInfo.Usage.PromptTokens + claudeInfo.Usage.CompletionTokens
+			claudeInfo.Usage.TotalTokens = types.SaturatingAddNonNegativeInt(claudeInfo.Usage.PromptTokens, claudeInfo.Usage.CompletionTokens)
 			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(claudeInfo.Usage)
 		}
 

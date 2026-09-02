@@ -57,9 +57,9 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
+	Id                int    `json:"id" gorm:"index:idx_logs_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
 	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
+	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_logs_created_at_id,priority:1;index:idx_created_at_type"`
 	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
 	Content           string `json:"content"`
 	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
@@ -79,6 +79,8 @@ type Log struct {
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
 }
+
+const maxLogCleanupBatchSize = 1000
 
 // don't use iota, avoid change log type value
 const (
@@ -142,7 +144,7 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 }
 
 func RecordLog(userId int, logType int, content string) {
-	if logType == LogTypeConsume && !common.LogConsumeEnabled {
+	if logType == LogTypeConsume && !common.IsLogConsumeEnabled() {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
@@ -161,7 +163,7 @@ func RecordLog(userId int, logType int, content string) {
 
 // RecordLogWithAdminInfo 记录操作日志，并将管理员相关信息存入 Other.admin_info，
 func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo map[string]interface{}) {
-	if logType == LogTypeConsume && !common.LogConsumeEnabled {
+	if logType == LogTypeConsume && !common.IsLogConsumeEnabled() {
 		return
 	}
 	username, _ := GetUsernameById(userId, false)
@@ -341,9 +343,10 @@ type RecordConsumeLogParams struct {
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
-	if !common.LogConsumeEnabled {
+	if !common.IsLogConsumeEnabled() {
 		return
 	}
+	runtimeConfig := common.GetGeneralRuntimeConfig()
 	logger.LogInfo(c, fmt.Sprintf("record consume log: userId=%d, params=%s", userId, common.GetJsonString(params)))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
@@ -387,7 +390,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
 	}
-	if common.DataExportEnabled {
+	if runtimeConfig.DataExportEnabled {
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
@@ -417,9 +420,10 @@ type RecordTaskBillingLogParams struct {
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
-	if params.LogType == LogTypeConsume && !common.LogConsumeEnabled {
+	if params.LogType == LogTypeConsume && !common.IsLogConsumeEnabled() {
 		return
 	}
+	runtimeConfig := common.GetGeneralRuntimeConfig()
 	username, _ := GetUsernameById(params.UserId, false)
 	tokenName := ""
 	if params.TokenId > 0 {
@@ -446,7 +450,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	if err != nil {
 		common.SysLog("failed to record task billing log: " + err.Error())
 	}
-	if params.LogType == LogTypeConsume && common.DataExportEnabled {
+	if params.LogType == LogTypeConsume && runtimeConfig.DataExportEnabled {
 		nodeName := params.NodeName
 		if nodeName == "" {
 			nodeName = common.NodeName
@@ -465,12 +469,32 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
+// GetAllLogs keeps the historical unrestricted model API for internal callers.
+// Administrator-facing controllers should use GetAllLogsForRole so the
+// operator's role is applied before any filtering, counting, or pagination.
 func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+	return getAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, startIdx, num, channel, group, requestId, upstreamRequestId, nil)
+}
+
+// GetAllLogsForRole returns only rows owned by users below actorRole (Root is
+// unrestricted).  The role predicate is installed before the bounded count,
+// so neither the page nor its total can disclose higher-role activity.
+func GetAllLogsForRole(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, actorRole int) (logs []*Log, total int64, err error) {
+	return getAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, startIdx, num, channel, group, requestId, upstreamRequestId, &actorRole)
+}
+
+func getAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, actorRole *int) (logs []*Log, total int64, err error) {
+	startIdx, num = normalizeLogPagination(startIdx, num)
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
 	} else {
 		tx = LOG_DB.Where("logs.type = ?", logType)
+	}
+	if actorRole != nil {
+		if tx, err = applyAdminUserRoleScope(tx, "logs.user_id", *actorRole); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
@@ -500,7 +524,11 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
+	// Keep the existing paginated response shape while bounding the work needed
+	// to populate PageInfo.total. For more than logSearchCountLimit matches the
+	// returned total is the cap, avoiding an unbounded aggregate over the log
+	// table for administrator searches.
+	total, err = boundedLogCount(tx.Model(&Log{}), logSearchCountLimit)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -561,7 +589,44 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
+// normalizeLogPagination keeps the legacy page-number API bounded even when a
+// caller bypasses common.GetPageQuery (or supplies an overflowing page value).
+// The list total is capped at logSearchCountLimit, so rows beyond that window
+// are not addressable through this endpoint and should never trigger a deeper
+// OFFSET scan.  GORM treats LIMIT <= 0 as "no limit"; normalize that input as
+// well so an internal caller cannot accidentally turn a list request into a
+// full-table fetch.
+func normalizeLogPagination(startIdx int, num int) (int, int) {
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx > logSearchCountLimit {
+		startIdx = logSearchCountLimit
+	}
+	if num <= 0 {
+		num = common.ItemsPerPage
+		if num <= 0 {
+			num = 1
+		}
+	}
+	if num > common.MaxPageSize {
+		num = common.MaxPageSize
+	}
+	return startIdx, num
+}
+
+// boundedLogCount returns the number of matching logs up to limit.  Applying
+// Limit directly to GORM's Count is not a bound: SQL aggregates are evaluated
+// before LIMIT, so `query.Limit(limit).Count(&total)` still scans and counts
+// every matching row.  Fetching only limit+1 primary keys keeps the result
+// bounded while preserving the historical API contract (the caller receives
+// at most logSearchCountLimit as its total).
+func boundedLogCount(query *gorm.DB, limit int) (int64, error) {
+	return boundedPrimaryKeyCount(query, limit)
+}
+
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+	startIdx, num = normalizeLogPagination(startIdx, num)
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
@@ -590,7 +655,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
+	total, err = boundedLogCount(tx.Model(&Log{}), logSearchCountLimit)
 	if err != nil {
 		common.SysError("failed to count user logs: " + err.Error())
 		return nil, 0, errors.New("查询日志失败")
@@ -616,10 +681,28 @@ type Stat struct {
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+	return sumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, nil)
+}
+
+// SumUsedQuotaForRole mirrors SumUsedQuota but applies the same role boundary
+// to both the quota and the short-window RPM/TPM query.
+func SumUsedQuotaForRole(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, actorRole int) (stat Stat, err error) {
+	return sumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, &actorRole)
+}
+
+func sumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, actorRole *int) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm和tpm创建单独的查询
 	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
+	if actorRole != nil {
+		if tx, err = applyAdminUserRoleScope(tx, "user_id", *actorRole); err != nil {
+			return stat, err
+		}
+		if rpmTpmQuery, err = applyAdminUserRoleScope(rpmTpmQuery, "user_id", *actorRole); err != nil {
+			return stat, err
+		}
+	}
 
 	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
 		return stat, err
@@ -693,6 +776,12 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 }
 
 func CountOldLog(ctx context.Context, targetTimestamp int64) (int64, error) {
+	if LOG_DB == nil {
+		return 0, errors.New("log database is not initialized")
+	}
+	if targetTimestamp <= 0 {
+		return 0, errors.New("target timestamp must be positive")
+	}
 	var total int64
 	if err := LOG_DB.WithContext(ctx).Model(&Log{}).Where("created_at < ?", targetTimestamp).Count(&total).Error; err != nil {
 		return 0, err
@@ -701,8 +790,17 @@ func CountOldLog(ctx context.Context, targetTimestamp int64) (int64, error) {
 }
 
 func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
+	if LOG_DB == nil {
+		return 0, errors.New("log database is not initialized")
+	}
+	if targetTimestamp <= 0 {
+		return 0, errors.New("target timestamp must be positive")
+	}
 	if limit <= 0 {
 		limit = 100
+	}
+	if limit > maxLogCleanupBatchSize {
+		limit = maxLogCleanupBatchSize
 	}
 	if nil != ctx.Err() {
 		return 0, ctx.Err()
@@ -729,7 +827,24 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 		return total, nil
 	}
 
-	result := LOG_DB.WithContext(ctx).Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+	// GORM does not translate LIMIT on DELETE consistently across dialects
+	// (PostgreSQL rejects it while MySQL accepts it). Select a bounded set of
+	// primary keys first, then issue a portable `WHERE id IN (...)` delete. The
+	// ordering keeps cleanup deterministic and avoids an accidental unbounded
+	// delete when the log database is PostgreSQL.
+	var ids []int
+	if err := LOG_DB.WithContext(ctx).
+		Model(&Log{}).
+		Where("created_at < ?", targetTimestamp).
+		Order("created_at asc, id asc").
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	result := LOG_DB.WithContext(ctx).Where("id IN ?", ids).Delete(&Log{})
 	if nil != result.Error {
 		return 0, result.Error
 	}

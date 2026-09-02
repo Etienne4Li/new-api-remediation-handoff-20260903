@@ -72,6 +72,9 @@ func appendRequestPath(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other
 func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelRatio, groupRatio, completionRatio float64,
 	cacheTokens int, cacheRatio float64, modelPrice float64, userGroupRatio float64) map[string]interface{} {
 	other := make(map[string]interface{})
+	if relayInfo == nil {
+		return other
+	}
 	other["model_ratio"] = modelRatio
 	other["group_ratio"] = groupRatio
 	other["completion_ratio"] = completionRatio
@@ -88,25 +91,37 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 		other["upstream_model_name"] = relayInfo.UpstreamModelName
 	}
 
-	isSystemPromptOverwritten := common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride)
+	isSystemPromptOverwritten := false
+	if ctx != nil {
+		isSystemPromptOverwritten = common.GetContextKeyBool(ctx, constant.ContextKeySystemPromptOverride)
+	}
 	if isSystemPromptOverwritten {
 		other["is_system_prompt_overwritten"] = true
 	}
 
 	adminInfo := make(map[string]interface{})
-	adminInfo["use_channel"] = ctx.GetStringSlice("use_channel")
-	isMultiKey := common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey)
+	if ctx != nil {
+		adminInfo["use_channel"] = ctx.GetStringSlice("use_channel")
+	}
+	isMultiKey := false
+	if ctx != nil {
+		isMultiKey = common.GetContextKeyBool(ctx, constant.ContextKeyChannelIsMultiKey)
+	}
 	if isMultiKey {
 		adminInfo["is_multi_key"] = true
 		adminInfo["multi_key_index"] = common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex)
 	}
 
-	isLocalCountTokens := common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens)
+	isLocalCountTokens := false
+	if ctx != nil {
+		isLocalCountTokens = common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens)
+	}
 	if isLocalCountTokens {
 		adminInfo["local_count_tokens"] = isLocalCountTokens
 	}
 
 	AppendChannelAffinityAdminInfo(ctx, adminInfo)
+	relaycommon.AppendResponsesInputItemIDNormalizationAdminInfo(ctx, adminInfo)
 
 	other["admin_info"] = adminInfo
 	appendRequestPath(ctx, relayInfo, other)
@@ -139,13 +154,16 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]inter
 		"end_reason": string(ss.EndReason),
 	}
 	if ss.EndError != nil {
-		streamInfo["end_error"] = ss.EndError.Error()
+		// Stream errors can contain upstream response fragments, URLs, or
+		// client-supplied content. Usage logs are persisted and may be visible
+		// in the admin UI, so retain only correlation metadata here.
+		streamInfo["end_error"] = common.SensitiveLogMeta(ss.EndError.Error())
 	}
 	if ss.ErrorCount > 0 {
 		streamInfo["error_count"] = ss.ErrorCount
 		messages := make([]string, 0, len(ss.Errors))
 		for _, e := range ss.Errors {
-			messages = append(messages, e.Message)
+			messages = append(messages, common.SensitiveLogMeta(e.Message))
 		}
 		streamInfo["errors"] = messages
 	}
@@ -246,6 +264,12 @@ func appendFinalRequestFormat(relayInfo *relaycommon.RelayInfo, other map[string
 }
 
 func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage, modelRatio, groupRatio, completionRatio, audioRatio, audioCompletionRatio, modelPrice, userGroupRatio float64) map[string]interface{} {
+	if relayInfo == nil {
+		return map[string]interface{}{}
+	}
+	if usage == nil {
+		usage = &dto.RealtimeUsage{}
+	}
 	info := GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
 	info["ws"] = true
 	info["audio_input"] = usage.InputTokenDetails.AudioTokens
@@ -258,6 +282,12 @@ func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 }
 
 func GenerateAudioOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, modelRatio, groupRatio, completionRatio, audioRatio, audioCompletionRatio, modelPrice, userGroupRatio float64) map[string]interface{} {
+	if relayInfo == nil {
+		return map[string]interface{}{}
+	}
+	if usage == nil {
+		usage = &dto.Usage{}
+	}
 	info := GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
 	info["audio"] = true
 	info["audio_input"] = usage.PromptTokensDetails.AudioTokens

@@ -109,6 +109,46 @@ const MEDIA_PRICE_VARS = BILLING_EXTRA_VARS.filter(
   (variable) => variable.group === 'media'
 )
 
+function nextStableListKey(keys: string[], prefix: string): string {
+  let max = 0
+  for (const key of keys) {
+    const match = key.match(/-(\d+)$/)
+    if (match) max = Math.max(max, Number(match[1]))
+  }
+  return `${prefix}-${max + 1}`
+}
+
+/**
+ * Stable keys for editable lists without reading refs during render.
+ * Keys are synchronously extended for externally-provided list changes and
+ * updated by event handlers when items are added/removed locally.
+ */
+function useStableListKeys(length: number, prefix: string) {
+  const [keys, setKeys] = useState<string[]>(() =>
+    Array.from({ length }, (_, index) => `${prefix}-${index + 1}`)
+  )
+
+  const visibleKeys = useMemo(() => {
+    const next = keys.slice(0, length)
+    while (next.length < length) {
+      next.push(nextStableListKey(next, prefix))
+    }
+    return next
+  }, [keys, length, prefix])
+
+  const appendKey = useCallback(() => {
+    setKeys((previous) => [...previous, nextStableListKey(previous, prefix)])
+  }, [prefix])
+
+  const removeKey = useCallback((index: number) => {
+    setKeys((previous) =>
+      previous.filter((_, itemIndex) => itemIndex !== index)
+    )
+  }, [])
+
+  return { keys: visibleKeys, appendKey, removeKey }
+}
+
 const CONDITION_INPUT_OPTIONS: {
   value: TierConditionInput['var']
   labelKey: string
@@ -332,8 +372,9 @@ function formatTokenHint(n: number | string | null | undefined): string {
 
 function formatNumberDraft(value: number | string): string {
   if (value === '') return ''
-  if (typeof value === 'number')
+  if (typeof value === 'number') {
     return Number.isFinite(value) ? String(value) : '0'
+  }
   return value
 }
 
@@ -367,12 +408,7 @@ function DraftNumberInput({
 }: DraftNumberInputProps) {
   const [draft, setDraft] = useState(() => formatNumberDraft(value))
   const [focused, setFocused] = useState(false)
-
-  useEffect(() => {
-    if (!focused) {
-      setDraft(formatNumberDraft(value))
-    }
-  }, [focused, value])
+  const displayedDraft = focused ? draft : formatNumberDraft(value)
 
   const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
     const nextDraft = event.target.value
@@ -381,6 +417,7 @@ function DraftNumberInput({
   }
 
   const handleFocus = (event: FocusEvent<HTMLInputElement>) => {
+    setDraft(formatNumberDraft(value))
     setFocused(true)
     onFocus?.(event)
     if (selectZeroOnFocus && isZeroDraft(event.currentTarget.value)) {
@@ -408,7 +445,7 @@ function DraftNumberInput({
     <Input
       {...props}
       type='number'
-      value={draft}
+      value={displayedDraft}
       onChange={handleChange}
       onFocus={handleFocus}
       onMouseUp={handleMouseUp}
@@ -436,12 +473,10 @@ function ConditionRow({ condition, onChange, onRemove }: ConditionRowProps) {
   return (
     <div className='flex items-center gap-2'>
       <Select
-        items={[
-          ...CONDITION_INPUT_OPTIONS.map((option) => ({
-            value: option.value,
-            label: t(option.labelKey),
-          })),
-        ]}
+        items={CONDITION_INPUT_OPTIONS.map((option) => ({
+          value: option.value,
+          label: t(option.labelKey),
+        }))}
         value={condition.var}
         onValueChange={(value) =>
           onChange({ ...condition, var: value as TierConditionInput['var'] })
@@ -557,6 +592,10 @@ function VisualTierCard({
 }: VisualTierCardProps) {
   const { t } = useTranslation()
   const cacheMode = getTierCacheMode(tier)
+  const conditionKeys = useStableListKeys(
+    tier.conditions.length,
+    'tier-condition'
+  )
 
   const handleConditionChange = (
     conditionIndex: number,
@@ -568,6 +607,7 @@ function VisualTierCard({
   }
 
   const handleConditionRemove = (conditionIndex: number) => {
+    conditionKeys.removeKey(conditionIndex)
     onChange({
       ...tier,
       conditions: tier.conditions.filter((_, i) => i !== conditionIndex),
@@ -575,6 +615,12 @@ function VisualTierCard({
   }
 
   const handlePriceChange = (field: keyof VisualTier, value: number) => {
+    if (
+      MEDIA_PRICE_VARS.some((variable) => variable.tierField === field) &&
+      value > 0
+    ) {
+      setMediaOpen(true)
+    }
     onChange({ ...tier, [field]: value })
   }
 
@@ -594,10 +640,6 @@ function VisualTierCard({
     return unitCostToPrice((tier[fieldKey] as number | undefined) ?? 0) > 0
   })
   const [mediaOpen, setMediaOpen] = useState(hasMediaPricing)
-
-  useEffect(() => {
-    if (hasMediaPricing) setMediaOpen(true)
-  }, [hasMediaPricing])
 
   const renderPriceVariable = (
     variable: (typeof BILLING_EXTRA_VARS)[number]
@@ -652,7 +694,10 @@ function VisualTierCard({
           <Button
             variant='ghost'
             size='sm'
-            onClick={onAddCondition}
+            onClick={() => {
+              conditionKeys.appendKey()
+              onAddCondition()
+            }}
             disabled={tier.conditions.length >= 2}
             className='h-7 px-2 text-xs'
           >
@@ -667,7 +712,7 @@ function VisualTierCard({
         ) : (
           tier.conditions.map((condition, conditionIndex) => (
             <ConditionRow
-              key={conditionIndex}
+              key={conditionKeys.keys[conditionIndex]}
               condition={condition}
               onChange={(next) => handleConditionChange(conditionIndex, next)}
               onRemove={() => handleConditionRemove(conditionIndex)}
@@ -780,6 +825,7 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
     () => normalizeVisualConfig(visualConfig),
     [visualConfig]
   )
+  const tierKeys = useStableListKeys(config.tiers.length, 'visual-tier')
 
   const handleTierChange = (index: number, next: VisualTier) => {
     const tiers = [...config.tiers]
@@ -807,10 +853,12 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
         output_unit_cost: 0,
       })
     )
+    tierKeys.appendKey()
     onChange({ ...config, tiers })
   }
 
   const handleRemoveTier = (index: number) => {
+    tierKeys.removeKey(index)
     const tiers = config.tiers.filter((_, i) => i !== index)
     onChange({ ...config, tiers: tiers.length > 0 ? tiers : config.tiers })
   }
@@ -849,7 +897,7 @@ function VisualEditor({ visualConfig, onChange }: VisualEditorProps) {
       </p>
       {config.tiers.map((tier, index) => (
         <VisualTierCard
-          key={index}
+          key={tierKeys.keys[index]}
           tier={tier}
           index={index}
           total={config.tiers.length}
@@ -967,12 +1015,12 @@ function RuleConditionRow({
         return timeFunc
     }
   }
-  const sourceLabel =
-    condition.source === SOURCE_PARAM
-      ? t('Body param')
-      : condition.source === SOURCE_HEADER
-        ? t('Header')
-        : t('Time')
+  let sourceLabel = t('Time')
+  if (condition.source === SOURCE_PARAM) {
+    sourceLabel = t('Body param')
+  } else if (condition.source === SOURCE_HEADER) {
+    sourceLabel = t('Header')
+  }
 
   const handleSourceChange = (source: string) => {
     if (source === SOURCE_TIME) {
@@ -992,12 +1040,10 @@ function RuleConditionRow({
   const renderTimeCondition = (timeCond: TimeCondition) => (
     <>
       <Select
-        items={[
-          ...TIME_FUNCS.map((fn) => ({
-            value: fn,
-            label: getTimeFuncLabel(fn),
-          })),
-        ]}
+        items={TIME_FUNCS.map((fn) => ({
+          value: fn,
+          label: getTimeFuncLabel(fn),
+        }))}
         value={timeCond.timeFunc}
         onValueChange={(value) =>
           onChange({ ...timeCond, timeFunc: value as TimeFunc })
@@ -1017,12 +1063,10 @@ function RuleConditionRow({
         </SelectContent>
       </Select>
       <Select
-        items={[
-          ...COMMON_TIMEZONES.map((tz) => ({
-            value: tz.value,
-            label: tz.label,
-          })),
-        ]}
+        items={COMMON_TIMEZONES.map((tz) => ({
+          value: tz.value,
+          label: tz.label,
+        }))}
         value={timeCond.timezone}
         onValueChange={(value) =>
           value !== null && onChange({ ...timeCond, timezone: value })
@@ -1045,12 +1089,10 @@ function RuleConditionRow({
         </SelectContent>
       </Select>
       <Select
-        items={[
-          ...matchOptions.map((option) => ({
-            value: option.value,
-            label: getMatchLabel(option.value),
-          })),
-        ]}
+        items={matchOptions.map((option) => ({
+          value: option.value,
+          label: getMatchLabel(option.value),
+        }))}
         value={timeCond.mode}
         onValueChange={(v) => v !== null && handleModeChange(v)}
       >
@@ -1111,12 +1153,10 @@ function RuleConditionRow({
         className='w-44'
       />
       <Select
-        items={[
-          ...matchOptions.map((option) => ({
-            value: option.value,
-            label: getMatchLabel(option.value),
-          })),
-        ]}
+        items={matchOptions.map((option) => ({
+          value: option.value,
+          label: getMatchLabel(option.value),
+        }))}
         value={phCond.mode}
         onValueChange={(v) => v !== null && handleModeChange(v)}
       >
@@ -1202,6 +1242,10 @@ function RuleGroupCard({
   onRemove,
 }: RuleGroupCardProps) {
   const { t } = useTranslation()
+  const conditionKeys = useStableListKeys(
+    group.conditions.length,
+    'rule-condition'
+  )
 
   const handleConditionChange = (
     conditionIndex: number,
@@ -1213,6 +1257,7 @@ function RuleGroupCard({
   }
 
   const handleAddCondition = (timeMode: boolean) => {
+    conditionKeys.appendKey()
     onChange({
       ...group,
       conditions: [
@@ -1241,17 +1286,18 @@ function RuleGroupCard({
       <div className='space-y-2'>
         {group.conditions.map((condition, conditionIndex) => (
           <RuleConditionRow
-            key={conditionIndex}
+            key={conditionKeys.keys[conditionIndex]}
             condition={condition}
             onChange={(next) => handleConditionChange(conditionIndex, next)}
-            onRemove={() =>
+            onRemove={() => {
+              conditionKeys.removeKey(conditionIndex)
               onChange({
                 ...group,
                 conditions: group.conditions.filter(
                   (_, i) => i !== conditionIndex
                 ),
               })
-            }
+            }}
           />
         ))}
         <div className='flex flex-wrap gap-2'>
@@ -1562,7 +1608,7 @@ function LlmPromptHelper({ modelName }: LlmPromptHelperProps) {
 
   const prompt = useMemo(() => {
     if (modelName) {
-      return LLM_PROMPT_TEMPLATE + `\n\nCurrent model: ${modelName}`
+      return `${LLM_PROMPT_TEMPLATE}\n\nCurrent model: ${modelName}`
     }
     return LLM_PROMPT_TEMPLATE
   }, [modelName])
@@ -1649,26 +1695,39 @@ export const TieredPricingEditor = memo(function TieredPricingEditor({
   const [requestRuleGroups, setRequestRuleGroups] = useState<
     RequestRuleGroup[]
   >(() => tryParseRequestRuleExpr(currentRequestRuleExpr) || [])
+  const ruleGroupKeys = useStableListKeys(
+    requestRuleGroups.length,
+    'request-rule-group'
+  )
   const initRef = useRef(false)
 
   useEffect(() => {
     if (initRef.current) return
     initRef.current = true
-    const parsedConfig = tryParseVisualConfig(currentExpr)
-    if (parsedConfig) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setVisualConfig(parsedConfig)
-      setEditorMode('visual')
-    } else if (currentExpr) {
-      setVisualConfig(null)
-      setEditorMode('raw')
-    } else {
-      setVisualConfig(createDefaultVisualConfig())
+    let didRun = false
+    const timer = window.setTimeout(() => {
+      didRun = true
+      const parsedConfig = tryParseVisualConfig(currentExpr)
+      if (parsedConfig) {
+        setVisualConfig(parsedConfig)
+        setEditorMode('visual')
+      } else if (currentExpr) {
+        setVisualConfig(null)
+        setEditorMode('raw')
+      } else {
+        setVisualConfig(createDefaultVisualConfig())
+      }
+      setRawExpr(
+        combineBillingExpr(currentExpr || '', currentRequestRuleExpr || '')
+      )
+      setRequestRuleGroups(
+        tryParseRequestRuleExpr(currentRequestRuleExpr) || []
+      )
+    }, 0)
+    return () => {
+      window.clearTimeout(timer)
+      if (!didRun) initRef.current = false
     }
-    setRawExpr(
-      combineBillingExpr(currentExpr || '', currentRequestRuleExpr || '')
-    )
-    setRequestRuleGroups(tryParseRequestRuleExpr(currentRequestRuleExpr) || [])
   }, [currentExpr, currentRequestRuleExpr])
 
   useEffect(() => {
@@ -1769,6 +1828,11 @@ export const TieredPricingEditor = memo(function TieredPricingEditor({
     setRequestRuleGroups(next)
   }, [])
 
+  const handleAddRuleGroup = useCallback(() => {
+    ruleGroupKeys.appendKey()
+    handleRuleGroupsChange([...requestRuleGroups, createEmptyRuleGroup()])
+  }, [handleRuleGroupsChange, requestRuleGroups, ruleGroupKeys])
+
   return (
     <div className='space-y-5'>
       <div className='grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end'>
@@ -1837,7 +1901,7 @@ export const TieredPricingEditor = memo(function TieredPricingEditor({
               <>
                 {requestRuleGroups.map((group, groupIndex) => (
                   <RuleGroupCard
-                    key={groupIndex}
+                    key={ruleGroupKeys.keys[groupIndex]}
                     group={group}
                     index={groupIndex}
                     onChange={(next) => {
@@ -1845,23 +1909,19 @@ export const TieredPricingEditor = memo(function TieredPricingEditor({
                       updated[groupIndex] = next
                       handleRuleGroupsChange(updated)
                     }}
-                    onRemove={() =>
+                    onRemove={() => {
+                      ruleGroupKeys.removeKey(groupIndex)
                       handleRuleGroupsChange(
                         requestRuleGroups.filter((_, i) => i !== groupIndex)
                       )
-                    }
+                    }}
                   />
                 ))}
                 <Button
                   variant='outline'
                   size='sm'
                   className='h-9 w-36 justify-center'
-                  onClick={() =>
-                    handleRuleGroupsChange([
-                      ...requestRuleGroups,
-                      createEmptyRuleGroup(),
-                    ])
-                  }
+                  onClick={handleAddRuleGroup}
                 >
                   <Plus className='mr-2 h-4 w-4' />
                   {t('Add rule group')}

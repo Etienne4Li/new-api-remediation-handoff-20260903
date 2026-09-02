@@ -63,16 +63,22 @@ export function SyncWizardDialog({
   const SYNC_LOCALE_OPTIONS = getSyncLocaleOptions(t)
 
   useEffect(() => {
-    if (open) {
+    if (!open) return
+    const preferredSource = SYNC_SOURCE_OPTIONS.find(
+      (option) => option.value === syncWizardOptions.source
+    )
+    const nextSource =
+      preferredSource && !preferredSource.disabled
+        ? (preferredSource.value as SyncSource)
+        : 'official'
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (cancelled) return
       setLocale(syncWizardOptions.locale || 'zh')
-      const preferredSource = SYNC_SOURCE_OPTIONS.find(
-        (option) => option.value === syncWizardOptions.source
-      )
-      setSource(
-        preferredSource && !preferredSource.disabled
-          ? (preferredSource.value as SyncSource)
-          : 'official'
-      )
+      setSource(nextSource)
+    })
+    return () => {
+      cancelled = true
     }
   }, [open, syncWizardOptions, SYNC_SOURCE_OPTIONS])
 

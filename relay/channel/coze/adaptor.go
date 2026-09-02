@@ -1,17 +1,18 @@
 package coze
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	rootcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,28 +21,27 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *common.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }
 
 // ConvertAudioRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *common.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIAudio))
 }
 
 // ConvertClaudeRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *common.RelayInfo, request *dto.ClaudeRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatClaude))
 }
 
 // ConvertEmbeddingRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *common.RelayInfo, request dto.EmbeddingRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatEmbedding))
 }
 
 // ConvertImageRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *common.RelayInfo, request dto.ImageRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIImage))
 }
 
 // ConvertOpenAIRequest implements channel.Adaptor.
@@ -54,12 +54,12 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *common.RelayInfo, r
 
 // ConvertOpenAIResponsesRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *common.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 // ConvertRerankRequest implements channel.Adaptor.
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 // DoRequest implements channel.Adaptor.
@@ -75,13 +75,14 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *common.RelayInfo, requestBody 
 	}
 	// 解析 resp
 	var cozeResponse CozeChatResponse
-	respBody, err := io.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	respBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, err
 	}
-	err = json.Unmarshal(respBody, &cozeResponse)
+	err = rootcommon.Unmarshal(respBody, &cozeResponse)
 	if cozeResponse.Code != 0 {
-		return nil, errors.New(cozeResponse.Msg)
+		return nil, fmt.Errorf("coze upstream error: message_meta=%s", rootcommon.SensitiveLogMeta(cozeResponse.Msg))
 	}
 	c.Set("coze_conversation_id", cozeResponse.Data.ConversationId)
 	c.Set("coze_chat_id", cozeResponse.Data.Id)

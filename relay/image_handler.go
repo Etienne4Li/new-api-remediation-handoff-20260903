@@ -55,7 +55,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	} else {
 		convertedRequest, err := adaptor.ConvertImageRequest(c, info, *request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed)
+			return requestConversionError(err)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
@@ -76,7 +76,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 				}
 			}
 
-			logger.LogDebug(c, "image request body: %s", jsonData)
+			logger.LogDebug(c, "image request body_meta=%s", common.SensitiveLogBody(jsonData))
 			body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 			if err != nil {
 				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -93,20 +93,20 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
-	var httpResp *http.Response
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
-		if httpResp.StatusCode != http.StatusOK {
-			if httpResp.StatusCode == http.StatusCreated && info.ApiType == constant.APITypeReplicate {
-				// replicate channel returns 201 Created when using Prefer: wait, treat it as success.
-				httpResp.StatusCode = http.StatusOK
-			} else {
-				newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-				// reset status code 重置状态码
-				service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-				return newAPIError
-			}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
+	info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+	if httpResp.StatusCode != http.StatusOK {
+		if httpResp.StatusCode == http.StatusCreated && info.ApiType == constant.APITypeReplicate {
+			// replicate channel returns 201 Created when using Prefer: wait, treat it as success.
+			httpResp.StatusCode = http.StatusOK
+		} else {
+			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+			// reset status code 重置状态码
+			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+			return newAPIError
 		}
 	}
 
@@ -116,17 +116,22 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
 
 	imageN := uint(1)
 	if request.N != nil {
 		imageN = *request.N
 	}
 
-	if usage.(*dto.Usage).TotalTokens == 0 {
-		usage.(*dto.Usage).TotalTokens = 1
+	if usageDto.TotalTokens == 0 {
+		usageDto.TotalTokens = 1
 	}
-	if usage.(*dto.Usage).PromptTokens == 0 {
-		usage.(*dto.Usage).PromptTokens = 1
+	if usageDto.PromptTokens == 0 {
+		usageDto.PromptTokens = 1
 	}
 
 	quality := request.Quality
@@ -146,6 +151,6 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		logContent = append(logContent, fmt.Sprintf("生成数量 %d", imageN))
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
+	service.PostTextConsumeQuota(c, info, usageDto, logContent)
 	return nil
 }

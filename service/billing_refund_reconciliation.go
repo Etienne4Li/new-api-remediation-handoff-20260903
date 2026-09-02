@@ -1,0 +1,160 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
+)
+
+var billingRefundOperationComponents = []string{
+	model.BillingOperationRefundComponent,
+	model.BillingOperationLegacyTaskRefundComponent,
+	model.BillingOperationWalletRefundComponent,
+	model.BillingOperationSubscriptionRefundComponent,
+	model.BillingOperationTokenRefundComponent,
+	model.BillingOperationExtraRefundComponent,
+	model.BillingOperationTaskRefundComponent,
+	model.BillingOperationTerminalRefundComponent,
+}
+
+// BillingRefundOperationComponents returns every durable refund alias that
+// may be left pending after a process/database interruption. Keep this list in
+// the service package so scheduler probes and the replay worker cannot drift
+// apart when a compatibility component is added.
+func BillingRefundOperationComponents() []string {
+	return append([]string(nil), billingRefundOperationComponents...)
+}
+
+// ReconcilePendingBillingRefunds replays durable refund intents left behind by
+// a failed or ambiguous request process.  The operation row is the source of
+// truth: all ledger deltas are reconstructed from its immutable columns, so a
+// retry cannot accidentally use a newer in-memory session snapshot.
+//
+// Synchronous subscription refunds use the combined model transaction that
+// also closes the subscription pre-consume marker. Wallet/token refunds and
+// marker-less legacy task refunds use the regular idempotent operation
+// transaction. Every failed candidate remains pending for a later pass;
+// callers receive the number of candidates, successful replays, and unresolved
+// rows for scheduler telemetry.
+func ReconcilePendingBillingRefunds(ctx context.Context, limit int) (candidates, completed, pending int) {
+	candidates, completed, pending, _ = reconcilePendingBillingRefundsWithError(ctx, limit)
+	return candidates, completed, pending
+}
+
+// reconcilePendingBillingRefundsWithError is the scheduler-facing variant. It
+// returns an aggregate error after attempting every row so one malformed or
+// temporarily unavailable account does not starve unrelated refunds.
+func reconcilePendingBillingRefundsWithError(ctx context.Context, limit int) (candidates, completed, pending int, runErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Generic synchronous refunds, task refunds, and component-specific
+	// compatibility aliases all use the same idempotent operation journal. Read
+	// the complete allowlist so a pending alias cannot strand the scheduler.
+	rows, err := model.GetPendingBillingOperations(BillingRefundOperationComponents(), limit)
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("load pending billing refunds failed: %v", err))
+		return 0, 0, 1, err
+	}
+	candidates = len(rows)
+	var runErrors []error
+	for i, row := range rows {
+		if err := ctx.Err(); err != nil {
+			// The rows not visited in this pass are still pending. Include the
+			// cancellation in runErr so the owning system task is not recorded as
+			// a false success.
+			pending += len(rows) - i
+			runErrors = append(runErrors, err)
+			break
+		}
+		if err := applyPendingBillingRefundRow(row); err != nil {
+			pending++
+			runErrors = append(runErrors, deferPendingBillingOperation(row, err))
+			logger.LogWarn(ctx, fmt.Sprintf("replay pending billing refund failed request_meta=%s: %v", common.SensitiveLogMeta(row.RequestId), err))
+			continue
+		}
+		completed++
+	}
+	return candidates, completed, pending, errors.Join(runErrors...)
+}
+
+// applyPendingBillingRefundRow reconstructs a spec without trusting any
+// process-local BillingSession. TokenKey is only a cache-repair hint and is
+// resolved opportunistically; a rotated/deleted token must not prevent the
+// durable database operation from being retried.
+func applyPendingBillingRefundRow(row model.BillingOperation) error {
+	if !containsBillingRefundComponent(row.Component) || row.Status != model.BillingOperationPending {
+		return model.ErrBillingOperationConflict
+	}
+	spec := model.BillingOperationSpec{
+		RequestID:             row.RequestId,
+		Component:             row.Component,
+		UserID:                row.UserId,
+		TokenID:               row.TokenId,
+		SubscriptionID:        row.SubscriptionId,
+		WalletDelta:           row.WalletDelta,
+		TokenDelta:            row.TokenDelta,
+		SubscriptionDelta:     row.SubscriptionDelta,
+		UserUsedQuotaDelta:    row.UserUsedQuotaDelta,
+		UserRequestCountDelta: row.UserRequestCountDelta,
+		ChannelID:             row.ChannelId,
+		ChannelUsedQuotaDelta: row.ChannelUsedQuotaDelta,
+		RequireWalletBalance:  row.RequireWalletBalance,
+		RequireTokenBalance:   row.RequireTokenBalance,
+		TokenUnlimited:        row.TokenUnlimited,
+	}
+	if spec.TokenDelta != 0 && spec.TokenID > 0 {
+		if token, err := model.GetTokenById(spec.TokenID); err == nil && token != nil {
+			spec.TokenKey = token.Key
+		}
+	}
+
+	// Legacy task refunds (and old generic markers generated by the previous
+	// deployment) intentionally have no reservation marker. Replay them through
+	// the plain idempotent operation transaction. The request-id prefix check is
+	// explicit to avoid treating an ordinary synchronous subscription refund as
+	// legacy merely because its component is `refund`.
+	if row.Component == LegacyTaskRefundComponent {
+		return model.ApplyBillingOperation(spec)
+	}
+	if row.Component == model.BillingOperationRefundComponent &&
+		strings.HasPrefix(strings.TrimSpace(row.RequestId), "legacy-refund-") {
+		// A caller could legitimately choose a request ID beginning with the
+		// historical prefix. If a reservation marker exists, preserve the
+		// synchronous reservation path and close that marker; only marker-less
+		// rows are treated as old task refunds.
+		var markerCount int64
+		if err := model.DB.Model(&model.SubscriptionPreConsumeRecord{}).
+			Where("request_id = ?", row.RequestId).Count(&markerCount).Error; err != nil {
+			return err
+		}
+		if markerCount == 0 {
+			return model.ApplyBillingOperation(spec)
+		}
+	}
+
+	// A negative subscription delta identifies a reservation refund. The
+	// combined transaction verifies the exact reservation total and changes its
+	// marker to "refunded" together with the ledger mutation. Calling the plain
+	// operation helper here would leave the marker open and allow a later
+	// Reserve to resurrect the charge.
+	if spec.SubscriptionDelta != 0 {
+		return model.ApplyBillingOperationAndMarkSubscriptionReservationRefunded(spec, spec.RequestID)
+	}
+	return model.ApplyBillingOperation(spec)
+}
+
+func containsBillingRefundComponent(component string) bool {
+	component = strings.TrimSpace(component)
+	for _, candidate := range billingRefundOperationComponents {
+		if component == candidate {
+			return true
+		}
+	}
+	return false
+}

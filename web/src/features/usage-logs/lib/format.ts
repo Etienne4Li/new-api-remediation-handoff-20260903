@@ -27,8 +27,6 @@ import {
 import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
 
-export { normalizeTierLabel }
-
 const PARAM_OVERRIDE_ACTION_MAP: Record<string, string> = {
   set: 'Set',
   delete: 'Delete',
@@ -189,9 +187,7 @@ export function getReasoningEffortVariant(
 /**
  * Get time color based on duration (in seconds)
  */
-export function getTimeColor(
-  seconds: number
-): 'success' | 'warning' | 'danger' {
+function getTimeColor(seconds: number): 'success' | 'warning' | 'danger' {
   if (seconds < 10) return 'success'
   if (seconds < 30) return 'warning'
   return 'danger'
@@ -211,7 +207,7 @@ export function getFirstResponseTimeColor(
 /**
  * Get throughput color based on generated tokens per second
  */
-export function getThroughputColor(
+function getThroughputColor(
   tokensPerSecond: number
 ): 'success' | 'warning' | 'danger' {
   if (tokensPerSecond >= 30) return 'success'
@@ -288,7 +284,7 @@ export function decodeBillingExprB64(exprB64: string | undefined): string {
  * entry. Missing or unknown labels do not fall back to another tier because
  * that would display guessed unit prices.
  */
-export function resolveMatchedTier(
+function resolveMatchedTier(
   tiers: ParsedTier[],
   matchedLabel: string | undefined
 ): ParsedTier | null {

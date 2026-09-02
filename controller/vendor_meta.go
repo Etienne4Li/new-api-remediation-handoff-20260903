@@ -18,7 +18,10 @@ func GetAllVendors(c *gin.Context) {
 		return
 	}
 	var total int64
-	model.DB.Model(&model.Vendor{}).Count(&total)
+	if err := model.DB.Model(&model.Vendor{}).Count(&total).Error; err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(vendors)
 	common.ApiSuccess(c, pageInfo)
@@ -116,8 +119,13 @@ func DeleteVendorMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.DB.Delete(&model.Vendor{}, id).Error; err != nil {
-		common.ApiError(c, err)
+	result := model.DB.Delete(&model.Vendor{}, id)
+	if result.Error != nil {
+		common.ApiError(c, result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		common.ApiErrorMsg(c, "供应商不存在")
 		return
 	}
 	common.ApiSuccess(c, nil)

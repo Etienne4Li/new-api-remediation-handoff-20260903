@@ -3,9 +3,7 @@ package coze
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -47,7 +45,7 @@ func convertCozeChatRequest(c *gin.Context, request dto.GeneralOpenAIRequest) *C
 }
 
 func cozeChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
@@ -56,12 +54,12 @@ func cozeChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 	var response dto.TextResponse
 	var cozeResponse CozeChatDetailResponse
 	response.Model = info.UpstreamModelName
-	err = json.Unmarshal(responseBody, &cozeResponse)
+	err = common.Unmarshal(responseBody, &cozeResponse)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if cozeResponse.Code != 0 {
-		return nil, types.NewError(errors.New(cozeResponse.Msg), types.ErrorCodeBadResponseBody)
+		return nil, types.NewError(fmt.Errorf("coze upstream error: message_meta=%s", common.SensitiveLogMeta(cozeResponse.Msg)), types.ErrorCodeBadResponseBody)
 	}
 	// 从上下文获取 usage
 	var usage dto.Usage
@@ -86,7 +84,7 @@ func cozeChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 			FinishReason: "stop",
 		},
 	}
-	jsonResponse, err := json.Marshal(response)
+	jsonResponse, err := common.Marshal(response)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
@@ -154,9 +152,9 @@ func handleCozeEvent(c *gin.Context, event string, data string, responseText *st
 	case "conversation.chat.completed":
 		// 将 data 解析为 CozeChatResponseData
 		var chatData CozeChatResponseData
-		err := json.Unmarshal([]byte(data), &chatData)
+		err := common.Unmarshal([]byte(data), &chatData)
 		if err != nil {
-			common.SysLog("error_unmarshalling_stream_response: " + err.Error())
+			common.SysLog("error_unmarshalling_stream_response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
@@ -171,16 +169,16 @@ func handleCozeEvent(c *gin.Context, event string, data string, responseText *st
 	case "conversation.message.delta":
 		// 将 data 解析为 CozeChatV3MessageDetail
 		var messageData CozeChatV3MessageDetail
-		err := json.Unmarshal([]byte(data), &messageData)
+		err := common.Unmarshal([]byte(data), &messageData)
 		if err != nil {
-			common.SysLog("error_unmarshalling_stream_response: " + err.Error())
+			common.SysLog("error_unmarshalling_stream_response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
 		var content string
-		err = json.Unmarshal(messageData.Content, &content)
+		err = common.Unmarshal(messageData.Content, &content)
 		if err != nil {
-			common.SysLog("error_unmarshalling_stream_response: " + err.Error())
+			common.SysLog("error_unmarshalling_stream_response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
@@ -203,13 +201,13 @@ func handleCozeEvent(c *gin.Context, event string, data string, responseText *st
 
 	case "error":
 		var errorData CozeError
-		err := json.Unmarshal([]byte(data), &errorData)
+		err := common.Unmarshal([]byte(data), &errorData)
 		if err != nil {
-			common.SysLog("error_unmarshalling_stream_response: " + err.Error())
+			common.SysLog("error_unmarshalling_stream_response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
-		common.SysLog(fmt.Sprintf("stream event error: %v %v", errorData.Code, errorData.Message))
+		common.SysLog(fmt.Sprintf("stream event error code=%v message_meta=%s", errorData.Code, common.SensitiveLogMeta(errorData.Message)))
 	}
 }
 
@@ -238,11 +236,11 @@ func checkIfChatComplete(a *Adaptor, c *gin.Context, info *relaycommon.RelayInfo
 
 	// 解析 resp 到 CozeChatResponse
 	var cozeResponse CozeChatResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return fmt.Errorf("read response body failed: %w", err), false
 	}
-	err = json.Unmarshal(responseBody, &cozeResponse)
+	err = common.Unmarshal(responseBody, &cozeResponse)
 	if err != nil {
 		return fmt.Errorf("unmarshal response body failed: %w", err), false
 	}

@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -79,7 +78,11 @@ func fetchLatestCodexClientVersion(ctx context.Context, client *http.Client, rel
 		Draft      bool   `json:"draft"`
 		Prerelease bool   `json:"prerelease"`
 	}
-	if err := common.DecodeJson(resp.Body, &release); err != nil {
+	body, err := ReadProviderResponseBody(resp, DefaultProviderResponseBodyLimitBytes)
+	if err != nil {
+		return "", err
+	}
+	if err := common.Unmarshal(body, &release); err != nil {
 		return "", err
 	}
 	if release.Draft || release.Prerelease {
@@ -146,7 +149,7 @@ func FetchCodexModels(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := ReadProviderResponseBody(resp, DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}

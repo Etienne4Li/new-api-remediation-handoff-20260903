@@ -509,6 +509,27 @@ func TestGetTokenMasksKeyInResponse(t *testing.T) {
 	}
 }
 
+func TestDeleteTokenRejectsMalformedPathID(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "delete-guard", "delete-guard-key")
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodDelete, "/api/token/not-an-id", nil, 1)
+	ctx.Params = gin.Params{{Key: "id", Value: "not-an-id"}}
+	DeleteToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	if response.Success {
+		t.Fatalf("malformed token id must be rejected")
+	}
+	var count int64
+	if err := db.Model(&model.Token{}).Where("id = ?", token.Id).Count(&count).Error; err != nil {
+		t.Fatalf("failed to verify token after rejected delete: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("malformed id unexpectedly changed token, count=%d", count)
+	}
+}
+
 func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "editable-token", "yzab1234cdef5678")

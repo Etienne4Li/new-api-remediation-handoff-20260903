@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+import type { TFunction } from 'i18next'
 
 import type { TokenUnit } from './types'
 
@@ -98,22 +98,12 @@ export function getEndpointTypeLabels(
 }
 
 /** Filter section keys */
-export const FILTER_SECTIONS = {
-  PRICING_TYPE: 'pricingType',
-  ENDPOINT_TYPE: 'endpointType',
-  VENDOR: 'vendor',
-  GROUP: 'group',
-  TAG: 'tag',
-} as const
 
 /** Maximum number of tags to display in model row */
-export const MAX_TAGS_DISPLAY = 5
 
 /** Maximum number of filter items to display before showing "More..." */
-export const MAX_FILTER_ITEMS = 5
 
 /** Sidebar width */
-export const SIDEBAR_WIDTH = 'w-64'
 
 /** Excluded groups */
 export const EXCLUDED_GROUPS = ['', 'auto']

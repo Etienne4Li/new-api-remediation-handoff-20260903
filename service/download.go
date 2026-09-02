@@ -2,10 +2,15 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -20,50 +25,146 @@ type WorkerRequest struct {
 	Body    json.RawMessage   `json:"body,omitempty"`
 }
 
+const (
+	// Downloads are also used by non-streaming image/audio paths.  They must
+	// retain a finite deadline even when RELAY_TIMEOUT is intentionally zero for
+	// long-lived streaming relay requests.
+	defaultDownloadRequestTimeout = 60 * time.Second
+	maxDownloadRequestTimeout     = 5 * time.Minute
+)
+
+// boundedDownloadRequestTimeout derives a safe per-request deadline from the
+// global relay setting.  A positive RELAY_TIMEOUT is respected up to a hard
+// cap; zero/negative values use the finite download default.
+func boundedDownloadRequestTimeout(relayTimeoutSeconds int) time.Duration {
+	if relayTimeoutSeconds <= 0 {
+		return defaultDownloadRequestTimeout
+	}
+	seconds := int64(relayTimeoutSeconds)
+	maxSeconds := int64(maxDownloadRequestTimeout / time.Second)
+	if seconds > maxSeconds {
+		return maxDownloadRequestTimeout
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// cancelOnCloseBody keeps the request context alive while the caller consumes
+// the response body, then releases its timer as soon as the body is closed.
+// If a caller forgets to close, the context deadline still bounds the leak.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
+	return err
+}
+
+func doBoundedHTTPClientRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	if client == nil {
+		return nil, fmt.Errorf("http client is nil")
+	}
+	if req == nil {
+		return nil, fmt.Errorf("http request is nil")
+	}
+	parent := req.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, boundedDownloadRequestTimeout(common.RelayTimeout))
+	resp, err := client.Do(req.Clone(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if resp == nil || resp.Body == nil {
+		cancel()
+		return resp, nil
+	}
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// validateDownloadURL enforces the URL contract regardless of whether SSRF
+// protection is enabled.  The latter is a policy toggle, not permission to
+// pass arbitrary schemes or malformed hosts to a worker/proxy.
+func validateDownloadURL(rawURL string) (string, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if err := common.ValidateHTTPURL(trimmed); err != nil {
+		return "", err
+	}
+	if err := ValidateSSRFProtectedFetchURL(trimmed); err != nil {
+		return "", err
+	}
+	return trimmed, nil
+}
+
 // DoWorkerRequest 通过Worker发送请求
 func DoWorkerRequest(req *WorkerRequest) (*http.Response, error) {
-	if !system_setting.EnableWorker() {
+	if req == nil {
+		return nil, fmt.Errorf("worker request is nil")
+	}
+	systemConfig := system_setting.GetRuntimeConfig()
+	if systemConfig.WorkerURL == "" {
 		return nil, fmt.Errorf("worker not enabled")
 	}
-	if !system_setting.WorkerAllowHttpImageRequestEnabled && !strings.HasPrefix(req.URL, "https") {
-		return nil, fmt.Errorf("only support https url")
-	}
-
-	// SSRF防护：验证请求URL
-	fetchSetting := system_setting.GetFetchSetting()
-	if err := common.ValidateURLWithFetchSetting(req.URL, fetchSetting.EnableSSRFProtection, fetchSetting.AllowPrivateIp, fetchSetting.DomainFilterMode, fetchSetting.IpFilterMode, fetchSetting.DomainList, fetchSetting.IpList, fetchSetting.AllowedPorts, fetchSetting.ApplyIPFilterForDomain); err != nil {
+	normalizedURL, err := validateDownloadURL(req.URL)
+	if err != nil {
 		return nil, fmt.Errorf("request reject: %v", err)
 	}
+	if !systemConfig.WorkerAllowHttpImageRequestEnabled {
+		parsed, parseErr := url.Parse(normalizedURL)
+		if parseErr != nil || !strings.EqualFold(parsed.Scheme, "https") {
+			return nil, fmt.Errorf("only support https url")
+		}
+	}
+	req.URL = normalizedURL
 
-	workerUrl := system_setting.WorkerUrl
+	workerUrl := strings.TrimSpace(systemConfig.WorkerURL)
+	if err := common.ValidateHTTPURL(workerUrl); err != nil {
+		return nil, fmt.Errorf("invalid worker URL: %v", err)
+	}
 	if !strings.HasSuffix(workerUrl, "/") {
 		workerUrl += "/"
 	}
 
-	// 序列化worker请求数据
+	// Serialize worker request data
 	workerPayload, err := common.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal worker payload: %v", err)
 	}
 
-	return GetHttpClient().Post(workerUrl, "application/json", bytes.NewBuffer(workerPayload))
+	request, err := http.NewRequest(http.MethodPost, workerUrl, bytes.NewBuffer(workerPayload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create worker request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return doBoundedHTTPClientRequest(GetHttpClient(), request)
 }
 
 func DoDownloadRequest(originUrl string, reason ...string) (resp *http.Response, err error) {
-	if system_setting.EnableWorker() {
-		common.SysLog(fmt.Sprintf("downloading file from worker: %s, reason: %s", originUrl, strings.Join(reason, ", ")))
+	normalizedURL, validationErr := validateDownloadURL(originUrl)
+	if validationErr != nil {
+		return nil, fmt.Errorf("request reject: %v", validationErr)
+	}
+	originUrl = normalizedURL
+	systemConfig := system_setting.GetRuntimeConfig()
+	if systemConfig.WorkerURL != "" {
+		common.SysLog(fmt.Sprintf("downloading file from worker: url_meta=%s, reason: %s", common.SensitiveLogMeta(originUrl), strings.Join(reason, ", ")))
 		req := &WorkerRequest{
 			URL: originUrl,
-			Key: system_setting.WorkerValidKey,
+			Key: systemConfig.WorkerValidKey,
 		}
 		return DoWorkerRequest(req)
 	} else {
-		// SSRF防护：验证请求URL（非Worker模式）
-		if err := ValidateSSRFProtectedFetchURL(originUrl); err != nil {
-			return nil, fmt.Errorf("request reject: %v", err)
+		common.SysLog(fmt.Sprintf("downloading from origin: url_meta=%s, reason: %s", common.SensitiveLogMeta(originUrl), strings.Join(reason, ", ")))
+		request, err := http.NewRequest(http.MethodGet, originUrl, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create download request: %v", err)
 		}
-
-		common.SysLog(fmt.Sprintf("downloading from origin: %s, reason: %s", common.MaskSensitiveInfo(originUrl), strings.Join(reason, ", ")))
-		return GetSSRFProtectedHTTPClient().Get(originUrl)
+		return doBoundedHTTPClientRequest(GetSSRFProtectedHTTPClient(), request)
 	}
 }

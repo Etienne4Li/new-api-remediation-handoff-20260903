@@ -124,6 +124,10 @@ export function SidebarModulesSection({
         title: t('Wallet'),
         description: t('Top up balance and view billing history.'),
       },
+      ticket: {
+        title: t('Support tickets'),
+        description: t('Contact support and follow ticket conversations.'),
+      },
       personal: {
         title: t('Profile'),
         description: t('Personal settings and profile management.'),

@@ -37,17 +37,33 @@ var (
 // AuthFlow stores one-time, short-lived state for authentication ceremonies.
 // TokenHash is an HMAC of the opaque token; the token itself is never persisted.
 type AuthFlow struct {
-	Id         int64      `json:"id" gorm:"primaryKey"`
-	TokenHash  string     `json:"-" gorm:"type:char(64);not null;uniqueIndex"`
-	Purpose    string     `json:"purpose" gorm:"type:varchar(32);not null;index:idx_auth_flow_purpose_expiry"`
-	Provider   string     `json:"provider,omitempty" gorm:"type:varchar(64)"`
-	Intent     string     `json:"intent,omitempty" gorm:"type:varchar(16)"`
-	UserId     int        `json:"user_id,omitempty" gorm:"index"`
-	SessionId  string     `json:"session_id,omitempty" gorm:"type:varchar(64);index"`
-	Payload    string     `json:"-" gorm:"type:text"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at" gorm:"not null;index:idx_auth_flow_purpose_expiry"`
-	ConsumedAt *time.Time `json:"consumed_at,omitempty" gorm:"index"`
+	Id        int64  `json:"id" gorm:"primaryKey"`
+	TokenHash string `json:"-" gorm:"type:char(64);not null;uniqueIndex"`
+	Purpose   string `json:"purpose" gorm:"type:varchar(32);not null;index:idx_auth_flow_purpose_expiry"`
+	Provider  string `json:"provider,omitempty" gorm:"type:varchar(64)"`
+	Intent    string `json:"intent,omitempty" gorm:"type:varchar(16)"`
+	UserId    int    `json:"user_id,omitempty" gorm:"index"`
+	// SessionId stores the originating dashboard session for bound flows. OAuth
+	// login flows use the same column for an HMAC of their browser-only nonce;
+	// the raw nonce is never persisted.
+	SessionId string `json:"session_id,omitempty" gorm:"type:varchar(64);index"`
+	// CodeVerifierHash stores only the HMAC of the RFC 7636 PKCE verifier.
+	// Login-flow verifiers remain in a flow-scoped HttpOnly browser cookie;
+	// bind-flow verifiers are deterministically derived from the authenticated
+	// dashboard session. Legacy rows may leave this field empty.
+	// varchar avoids database-specific blank-padding semantics of CHAR for
+	// legacy/non-OAuth rows that intentionally leave this optional field empty.
+	CodeVerifierHash string `json:"-" gorm:"type:varchar(64)"`
+	// RedirectURI records the exact browser callback URI used to start an OAuth
+	// flow.  A deployment may host the frontend and API on different origins;
+	// replaying a mutable global ServerAddress during token exchange would then
+	// make an otherwise valid authorization code fail.  It is populated only
+	// for OAuth flows and is never exposed to clients through the flow row.
+	RedirectURI string     `json:"-" gorm:"type:varchar(512)"`
+	Payload     string     `json:"-" gorm:"type:text"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   time.Time  `json:"expires_at" gorm:"not null;index:idx_auth_flow_purpose_expiry"`
+	ConsumedAt  *time.Time `json:"consumed_at,omitempty" gorm:"index"`
 }
 
 func (AuthFlow) TableName() string {
@@ -55,13 +71,15 @@ func (AuthFlow) TableName() string {
 }
 
 type AuthFlowCreate struct {
-	Purpose   string
-	Provider  string
-	Intent    string
-	UserId    int
-	SessionId string
-	Payload   string
-	ExpiresAt time.Time
+	Purpose          string
+	Provider         string
+	Intent           string
+	UserId           int
+	SessionId        string
+	CodeVerifierHash string
+	RedirectURI      string
+	Payload          string
+	ExpiresAt        time.Time
 }
 
 type AuthFlowMatch struct {
@@ -94,25 +112,49 @@ func authFlowTokenHash(token string) string {
 }
 
 func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
+	return CreateAuthFlowWithAction(input, nil)
+}
+
+// CreateAuthFlowWithAction creates a flow and, when provided, runs action in
+// the same database transaction before the row becomes visible. This is used
+// by OAuth flows whose verifier hash depends on the generated opaque token;
+// callers can set that derived field without a post-commit update window.
+// Returning an error from action rolls the flow creation back atomically.
+func CreateAuthFlowWithAction(input AuthFlowCreate, action func(tx *gorm.DB, token string, flow *AuthFlow) error) (string, *AuthFlow, error) {
 	if strings.TrimSpace(input.Purpose) == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
 		return "", nil, ErrAuthFlowInvalid
 	}
-	random := make([]byte, AuthFlowTokenBytes)
-	if _, err := rand.Read(random); err != nil {
-		return "", nil, fmt.Errorf("generate auth flow token: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(random)
-	flow := &AuthFlow{
-		TokenHash: authFlowTokenHash(token),
-		Purpose:   input.Purpose,
-		Provider:  input.Provider,
-		Intent:    input.Intent,
-		UserId:    input.UserId,
-		SessionId: input.SessionId,
-		Payload:   input.Payload,
-		ExpiresAt: input.ExpiresAt,
-	}
-	if err := DB.Create(flow).Error; err != nil {
+	var token string
+	var flow *AuthFlow
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		random := make([]byte, AuthFlowTokenBytes)
+		if _, err := rand.Read(random); err != nil {
+			return fmt.Errorf("generate auth flow token: %w", err)
+		}
+		token = base64.RawURLEncoding.EncodeToString(random)
+		flow = &AuthFlow{
+			TokenHash:        authFlowTokenHash(token),
+			Purpose:          input.Purpose,
+			Provider:         input.Provider,
+			Intent:           input.Intent,
+			UserId:           input.UserId,
+			SessionId:        input.SessionId,
+			CodeVerifierHash: input.CodeVerifierHash,
+			RedirectURI:      input.RedirectURI,
+			Payload:          input.Payload,
+			ExpiresAt:        input.ExpiresAt,
+		}
+		if err := tx.Create(flow).Error; err != nil {
+			return err
+		}
+		if action != nil {
+			if err := action(tx, token, flow); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return "", nil, err
 	}
 	return token, flow, nil

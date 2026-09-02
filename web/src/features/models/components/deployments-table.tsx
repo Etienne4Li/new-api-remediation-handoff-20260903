@@ -211,6 +211,7 @@ export function DeploymentsTable() {
   const statusFilterOptions = useMemo(() => {
     return [...getDeploymentStatusOptions(t)].map((opt) => ({
       label: opt.label,
+      labelKey: opt.labelKey,
       value: opt.value,
     }))
   }, [t])

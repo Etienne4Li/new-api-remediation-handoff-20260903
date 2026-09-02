@@ -138,7 +138,12 @@ export function ThemeCustomizationProvider(props: {
   useEffect(() => {
     applyAttribute(
       'data-theme-preset',
-      preset === DEFAULT_THEME_CUSTOMIZATION.preset ? null : preset
+      // `default` is the neutral built-in palette and intentionally has no
+      // selector. The configured enterprise-gold default does have a
+      // selector, so comparing against DEFAULT_THEME_CUSTOMIZATION here would
+      // incorrectly remove the attribute and leave the reference palette
+      // unapplied.
+      preset === 'default' ? null : preset
     )
   }, [preset])
 
@@ -155,7 +160,10 @@ export function ThemeCustomizationProvider(props: {
   useEffect(() => {
     applyAttribute(
       'data-theme-radius',
-      radius === DEFAULT_THEME_CUSTOMIZATION.radius ? null : radius
+      // `default` defers to the active preset's radius hint. The configured
+      // default is `none`, which is an explicit value and must remain on the
+      // DOM so the enterprise-gold baseline is actually square.
+      radius === 'default' ? null : radius
     )
   }, [radius])
 

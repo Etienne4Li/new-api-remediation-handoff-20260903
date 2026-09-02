@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -198,4 +199,35 @@ func TestAdminResetPlanSubscriptionsNoMatchSucceeds(t *testing.T) {
 	assert.Zero(t, result.ResetCount)
 	assert.Zero(t, result.UserCount)
 	assert.Empty(t, result.AffectedUserIds)
+}
+
+func TestAdminResetPlanSubscriptionsForRoleSkipsPeerAndHigherRoles(t *testing.T) {
+	truncateTables(t)
+
+	now := GetDBTimestamp()
+	plan := &SubscriptionPlan{
+		Id: 9701, Title: "Scoped", PriceAmount: 10,
+		DurationUnit: SubscriptionDurationMonth, DurationValue: 1, TotalAmount: 1000,
+	}
+	seedSubscriptionResetPlan(t, plan)
+	users := []User{
+		{Id: 9711, Username: "scope-common", Password: "unused", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AffCode: "scope-common-aff"},
+		{Id: 9712, Username: "scope-admin", Password: "unused", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, AffCode: "scope-admin-aff"},
+		{Id: 9713, Username: "scope-root", Password: "unused", Role: common.RoleRootUser, Status: common.UserStatusEnabled, AffCode: "scope-root-aff"},
+	}
+	for i := range users {
+		require.NoError(t, DB.Create(&users[i]).Error)
+		seedSubscriptionResetSub(t, &UserSubscription{
+			Id: 9721 + i, UserId: users[i].Id, PlanId: plan.Id,
+			AmountTotal: 1000, AmountUsed: int64(100 + i), StartTime: now - 60,
+			EndTime: now + 3600, Status: "active",
+		})
+	}
+
+	result, err := AdminResetPlanSubscriptionsForRole(plan.Id, true, common.RoleAdminUser)
+	require.NoError(t, err)
+	assert.Equal(t, []int{users[0].Id}, result.AffectedUserIds)
+	assert.Zero(t, getSubscriptionResetSub(t, 9721).AmountUsed)
+	assert.EqualValues(t, 101, getSubscriptionResetSub(t, 9722).AmountUsed)
+	assert.EqualValues(t, 102, getSubscriptionResetSub(t, 9723).AmountUsed)
 }

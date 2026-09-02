@@ -49,11 +49,12 @@ import { indexCustomOAuthBindings, type CustomOAuthBinding } from '@/lib/oauth'
 
 import {
   getUser,
+  getUserBindingStatus,
   getUserOAuthBindings,
   adminClearUserBinding,
   adminUnbindCustomOAuth,
 } from '../../api'
-import type { User } from '../../types'
+import type { AdminUserBindingStatus, User } from '../../types'
 
 interface Props {
   open: boolean
@@ -161,7 +162,10 @@ function CustomProviderIcon(props: { iconUrl?: string }) {
 
 export function UserBindingDialog(props: Props) {
   const { t } = useTranslation()
+  const onOpenChange = props.onOpenChange
   const [user, setUser] = useState<User | null>(null)
+  const [bindingStatus, setBindingStatus] =
+    useState<AdminUserBindingStatus | null>(null)
   const [oauthBindings, setOauthBindings] = useState<CustomOAuthBinding[]>([])
   const [statusInfo, setStatusInfo] = useState<StatusInfo>({})
   const [loading, setLoading] = useState(false)
@@ -171,27 +175,39 @@ export function UserBindingDialog(props: Props) {
 
   const fetchData = useCallback(async () => {
     if (!props.userId) return
+    // Yield before changing loading state so the effect below only schedules
+    // the asynchronous external request; state updates happen after the
+    // request task begins rather than synchronously during effect execution.
+    await Promise.resolve()
     setLoading(true)
     try {
-      const [userRes, oauthRes, statusRes] = await Promise.all([
-        getUser(props.userId),
-        getUserOAuthBindings(props.userId).catch(() => ({
-          success: false,
-          data: [],
-        })),
-        api
-          .get('/api/status')
-          .then((r) => r.data)
-          .catch(() => ({
+      const [userRes, oauthRes, bindingStatusRes, statusRes] =
+        await Promise.all([
+          getUser(props.userId),
+          getUserOAuthBindings(props.userId).catch(() => ({
             success: false,
-            data: {},
+            data: [],
           })),
-      ])
+          getUserBindingStatus(props.userId).catch(() => ({
+            success: false,
+            data: undefined,
+          })),
+          api
+            .get('/api/status')
+            .then((r) => r.data)
+            .catch(() => ({
+              success: false,
+              data: {},
+            })),
+        ])
       if (userRes.success && userRes.data) {
         setUser(userRes.data)
       }
       if (oauthRes.success && oauthRes.data) {
         setOauthBindings(oauthRes.data)
+      }
+      if (bindingStatusRes.success && bindingStatusRes.data) {
+        setBindingStatus(bindingStatusRes.data)
       }
       if (statusRes.success && statusRes.data) {
         setStatusInfo(statusRes.data as StatusInfo)
@@ -205,23 +221,35 @@ export function UserBindingDialog(props: Props) {
 
   useEffect(() => {
     if (props.open && props.userId) {
-      setShowBoundOnly(true)
-      fetchData()
-    } else {
-      setUser(null)
-      setOauthBindings([])
-      setStatusInfo({})
+      void Promise.resolve().then(fetchData)
     }
   }, [props.open, props.userId, fetchData])
+
+  const handleDialogOpenChange = useCallback(
+    (open: boolean) => {
+      if (!open) {
+        setUser(null)
+        setBindingStatus(null)
+        setOauthBindings([])
+        setStatusInfo({})
+        setShowBoundOnly(true)
+      }
+      onOpenChange(open)
+    },
+    [onOpenChange]
+  )
 
   const allBindings = useMemo<BindingItem[]>(() => {
     const items: BindingItem[] = []
 
     for (const field of BUILTIN_BINDINGS) {
-      const value = user
-        ? String((user as Record<string, unknown>)[field.field] || '')
-        : ''
-      const isBound = !!value
+      // Built-in identity values are deliberately never read from the user
+      // detail response. The admin-only status endpoint returns booleans,
+      // which are sufficient for this management UI without exposing stable
+      // provider account identifiers.
+      const isBound = Boolean(
+        bindingStatus?.[field.key as keyof AdminUserBindingStatus]
+      )
       const isEnabled =
         field.statusKey == null ? true : Boolean(statusInfo[field.statusKey])
 
@@ -229,7 +257,7 @@ export function UserBindingDialog(props: Props) {
         key: field.key,
         label: field.label,
         icon: field.icon,
-        value: isBound ? value : '',
+        value: isBound ? t('Bound') : '',
         type: 'builtin',
         isBound,
         isEnabled,
@@ -248,7 +276,7 @@ export function UserBindingDialog(props: Props) {
         key: `oauth_${provider.id}`,
         label: provider.name || String(provider.id),
         icon: <CustomProviderIcon iconUrl={provider.icon} />,
-        value: binding?.provider_user_id || '',
+        value: binding ? t('Bound') : '',
         type: 'custom',
         providerId: provider.id,
         isBound: !!binding,
@@ -262,7 +290,7 @@ export function UserBindingDialog(props: Props) {
           key: `oauth_${binding.provider_id}`,
           label: binding.provider_name || String(binding.provider_id),
           icon: <Link2 className='h-4 w-4' />,
-          value: binding.provider_user_id || '-',
+          value: t('Bound'),
           type: 'custom',
           providerId: binding.provider_id,
           isBound: true,
@@ -272,7 +300,7 @@ export function UserBindingDialog(props: Props) {
     }
 
     return items
-  }, [user, oauthBindings, statusInfo])
+  }, [bindingStatus, oauthBindings, statusInfo, t])
 
   const displayedBindings = showBoundOnly
     ? allBindings.filter((b) => b.isBound)
@@ -314,7 +342,7 @@ export function UserBindingDialog(props: Props) {
     <>
       <Dialog
         open={props.open}
-        onOpenChange={props.onOpenChange}
+        onOpenChange={handleDialogOpenChange}
         title={
           <>
             <Link2 className='h-5 w-5' />

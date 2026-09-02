@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -64,7 +63,7 @@ func ClaudeErrorWrapper(err error, code string, statusCode int) *dto.ClaudeError
 	lowerText := strings.ToLower(text)
 	if !strings.HasPrefix(lowerText, "get file base64 from url") {
 		if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
-			common.SysLog(fmt.Sprintf("error: %s", text))
+			common.SysLog(fmt.Sprintf("error_meta=%s", common.SensitiveLogMeta(text)))
 			text = "请求上游地址失败"
 		}
 	}
@@ -86,20 +85,24 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	defer CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := ReadProviderResponseBody(resp, DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return
 	}
-	CloseResponseBodyGracefully(resp)
 	var errResponse dto.GeneralErrorResponse
-	responseBodyText := string(responseBody)
-	responseBodyPreview := common.LocalLogPreview(responseBodyText)
+	responseBodyMeta := common.SensitiveLogBody(responseBody)
+	responseBodyPreview := common.LocalLogPreview(responseBodyMeta)
 	buildErrWithBody := func(message string) error {
 		if message == "" {
-			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)
+			return fmt.Errorf("bad response status code %d, body_meta: %s", resp.StatusCode, responseBodyMeta)
 		}
-		return fmt.Errorf("bad response status code %d, message: %s, body: %s", resp.StatusCode, message, responseBodyText)
+		// showBodyWhenFail is used by the channel-test endpoint. Provider
+		// messages are untrusted and may contain prompts, signed URLs, or
+		// credentials, so expose only correlatable metadata in the returned
+		// error while retaining the response-body metadata for diagnostics.
+		return fmt.Errorf("bad response status code %d, message_meta: %s, body_meta: %s", resp.StatusCode, common.SensitiveLogMeta(message), responseBodyMeta)
 	}
 
 	err = common.Unmarshal(responseBody, &errResponse)
@@ -198,13 +201,18 @@ func TaskErrorWrapperLocal(err error, code string, statusCode int) *taskdto.Task
 }
 
 func TaskErrorWrapper(err error, code string, statusCode int) *taskdto.TaskError {
+	if err == nil {
+		err = errors.New("unknown task error")
+	}
 	text := err.Error()
 	lowerText := strings.ToLower(text)
 	if strings.Contains(lowerText, "post") || strings.Contains(lowerText, "dial") || strings.Contains(lowerText, "http") {
-		common.SysLog(fmt.Sprintf("error: %s", text))
-		//text = "请求上游地址失败"
-		text = common.MaskSensitiveInfo(text)
+		common.SysLog(fmt.Sprintf("error_meta=%s", common.SensitiveLogMeta(text)))
 	}
+	// TaskError.Message is serialized directly to the task API client. Always
+	// pass it through the shared boundary sanitizer, including errors that do
+	// not happen to contain an HTTP keyword (provider payloads often don't).
+	text = common.MaskSensitiveInfo(text)
 	//避免暴露内部错误
 	taskError := &taskdto.TaskError{
 		Code:       code,
@@ -221,9 +229,13 @@ func TaskErrorFromAPIError(apiErr *types.NewAPIError) *taskdto.TaskError {
 	if apiErr == nil {
 		return nil
 	}
+	message := apiErr.ToOpenAIError().Message
+	if message == "" {
+		message = string(apiErr.GetErrorCode())
+	}
 	return &taskdto.TaskError{
 		Code:       string(apiErr.GetErrorCode()),
-		Message:    apiErr.Err.Error(),
+		Message:    common.MaskSensitiveInfo(message),
 		StatusCode: apiErr.StatusCode,
 		Error:      apiErr.Err,
 	}

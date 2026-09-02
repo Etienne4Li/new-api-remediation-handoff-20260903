@@ -16,34 +16,55 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import i18n from 'i18next'
+import i18n, { type BackendModule } from 'i18next'
 import LanguageDetector from 'i18next-browser-languagedetector'
 import { initReactI18next } from 'react-i18next'
 
-import { convertDetectedLanguage } from './languages'
-import en from './locales/en.json'
-import fr from './locales/fr.json'
-import ja from './locales/ja.json'
-import ru from './locales/ru.json'
-import vi from './locales/vi.json'
-import zhTW from './locales/zh-TW.json'
-import zhCN from './locales/zh.json'
+import {
+  convertDetectedLanguage,
+  type InterfaceLanguageCode,
+} from './languages'
 
-export const resources = {
-  en,
-  zhCN,
-  fr,
-  ru,
-  ja,
-  vi,
-  zhTW,
-} as const
+type TranslationResource = Record<string, string>
+type LocaleLoader = () => Promise<TranslationResource>
 
-i18n
+const localeLoaders = {
+  en: () =>
+    import('./locales/en.json').then((module) => module.default.translation),
+  zhCN: () =>
+    import('./locales/zh.json').then((module) => module.default.translation),
+  fr: () =>
+    import('./locales/fr.json').then((module) => module.default.translation),
+  ru: () =>
+    import('./locales/ru.json').then((module) => module.default.translation),
+  ja: () =>
+    import('./locales/ja.json').then((module) => module.default.translation),
+  vi: () =>
+    import('./locales/vi.json').then((module) => module.default.translation),
+  zhTW: () =>
+    import('./locales/zh-TW.json').then((module) => module.default.translation),
+} satisfies Record<InterfaceLanguageCode, LocaleLoader>
+
+const localeBackend: BackendModule = {
+  type: 'backend',
+  init() {},
+  read(language: string, _namespace: string) {
+    const loader = localeLoaders[language as InterfaceLanguageCode]
+    if (!loader) {
+      return Promise.reject(
+        new Error(`Unsupported interface language: ${language}`)
+      )
+    }
+
+    return loader()
+  },
+}
+
+export const i18nReady = i18n
+  .use(localeBackend)
   .use(LanguageDetector)
   .use(initReactI18next)
   .init({
-    resources,
     fallbackLng: 'en',
     supportedLngs: ['en', 'zhCN', 'fr', 'ru', 'ja', 'vi', 'zhTW'],
     load: 'currentOnly',
@@ -60,5 +81,3 @@ i18n
       convertDetectedLanguage,
     },
   })
-
-export default i18n

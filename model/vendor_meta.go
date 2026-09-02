@@ -43,8 +43,20 @@ func IsVendorNameDuplicated(id int, name string) (bool, error) {
 
 // Update 更新供应商记录
 func (v *Vendor) Update() error {
+	if v == nil || v.Id <= 0 {
+		return gorm.ErrRecordNotFound
+	}
 	v.UpdatedTime = common.GetTimestamp()
-	return DB.Save(v).Error
+	result := DB.Model(&Vendor{}).Where("id = ?", v.Id).
+		Select("name", "description", "icon", "status", "updated_time").
+		Updates(v)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // Delete 软删除供应商

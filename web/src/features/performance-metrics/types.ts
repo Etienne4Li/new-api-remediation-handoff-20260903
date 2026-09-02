@@ -18,6 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 export type PerformanceSeriesPoint = {
   ts: number
+  request_count?: number
+  success_count?: number
+  input_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  cache_observed_requests?: number
+  cache_hit_rate?: number
   avg_ttft_ms: number
   avg_latency_ms: number
   success_rate: number
@@ -26,6 +33,13 @@ export type PerformanceSeriesPoint = {
 
 export type PerformanceGroup = {
   group: string
+  request_count?: number
+  success_count?: number
+  input_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  cache_observed_requests?: number
+  cache_hit_rate?: number
   avg_ttft_ms: number
   avg_latency_ms: number
   success_rate: number
@@ -50,6 +64,11 @@ export type PerfModelSummary = {
   avg_tps: number
   recent_success_rates?: number[]
   request_count?: number
+  input_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  cache_observed_requests?: number
+  cache_hit_rate?: number
 }
 
 export type PerfSummaryAllData = {

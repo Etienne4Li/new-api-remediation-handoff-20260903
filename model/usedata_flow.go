@@ -23,13 +23,18 @@ type FlowQuotaData struct {
 }
 
 func GetFlowQuotaData(startTime int64, endTime int64, username string, userID int, role int) ([]*FlowQuotaData, error) {
-	switch {
-	case role >= common.RoleRootUser:
+	switch role {
+	case common.RoleRootUser:
 		return getRootFlowQuotaData(startTime, endTime, username)
-	case role >= common.RoleAdminUser:
-		return getAdminFlowQuotaData(startTime, endTime, username)
-	default:
+	case common.RoleAdminUser:
+		return getAdminFlowQuotaData(startTime, endTime, username, role)
+	case common.RoleGuestUser, common.RoleCommonUser:
 		return getSelfFlowQuotaData(startTime, endTime, userID)
+	default:
+		// Role values are an allow-list, not an ordinal capability.  Treat
+		// malformed values as an empty result instead of letting e.g. 101
+		// inherit Root visibility through a >= comparison.
+		return []*FlowQuotaData{}, nil
 	}
 }
 
@@ -54,14 +59,18 @@ func getSelfFlowQuotaData(startTime int64, endTime int64, userID int) ([]*FlowQu
 	return rows, fillFlowTokenNames(rows)
 }
 
-func getAdminFlowQuotaData(startTime int64, endTime int64, username string) ([]*FlowQuotaData, error) {
+func getAdminFlowQuotaData(startTime int64, endTime int64, username string, actorRole int) ([]*FlowQuotaData, error) {
 	rows := make([]*FlowQuotaData, 0)
 	query := flowQuotaBaseQuery(startTime, endTime).
 		Select("user_id, username, use_group, model_name, channel_id, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used")
+	var err error
+	if query, err = applyAdminUserRoleScope(query, "quota_data.user_id", actorRole); err != nil {
+		return nil, err
+	}
 	if username != "" {
 		query = query.Where("username = ?", username)
 	}
-	err := query.
+	err = query.
 		Group("user_id, username, use_group, model_name, channel_id").
 		Order("quota DESC").
 		Find(&rows).Error

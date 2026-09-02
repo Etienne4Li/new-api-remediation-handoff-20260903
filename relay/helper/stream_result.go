@@ -8,12 +8,17 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status  *relaycommon.StreamStatus
-	stopped bool
+	status   *relaycommon.StreamStatus
+	stopped  bool
+	draining func() bool
 }
 
-func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
-	return &StreamResult{status: status}
+func newStreamResult(status *relaycommon.StreamStatus, draining ...func() bool) *StreamResult {
+	result := &StreamResult{status: status}
+	if len(draining) > 0 {
+		result.draining = draining[0]
+	}
+	return result
 }
 
 // Error records a soft error. The stream continues processing.
@@ -44,6 +49,14 @@ func (r *StreamResult) Done() {
 // IsStopped returns whether Stop() or Done() was called during this chunk.
 func (r *StreamResult) IsStopped() bool {
 	return r.stopped
+}
+
+// IsDraining reports that the downstream client has disconnected and the
+// adapter is consuming a short, bounded tail of the upstream stream.  A
+// drain-capable adapter should continue parsing/accounting events but skip
+// writes to the now-closed downstream connection.
+func (r *StreamResult) IsDraining() bool {
+	return r != nil && r.draining != nil && r.draining()
 }
 
 // reset clears the per-chunk stopped flag so the object can be reused.

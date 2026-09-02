@@ -118,7 +118,7 @@ const CONTENT_SECTIONS = [
   },
 ] as const
 
-export type ContentSectionId = (typeof CONTENT_SECTIONS)[number]['id']
+type ContentSectionId = (typeof CONTENT_SECTIONS)[number]['id']
 
 const contentRegistry = createSectionRegistry<
   ContentSectionId,

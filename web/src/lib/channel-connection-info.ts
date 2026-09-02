@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-export const CHANNEL_CONNECTION_INFO_TYPE = 'newapi_channel_conn'
+const CHANNEL_CONNECTION_INFO_TYPE = 'newapi_channel_conn'
 
 export type ChannelConnectionInfo = {
   key: string

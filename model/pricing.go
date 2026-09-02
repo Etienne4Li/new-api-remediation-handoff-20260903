@@ -51,6 +51,7 @@ var (
 	supportedEndpointMap map[string]common.EndpointInfo
 	lastGetPricingTime   time.Time
 	updatePricingLock    sync.Mutex
+	pricingCacheMu       sync.RWMutex
 
 	// 缓存映射：模型名 -> 启用分组 / 计费类型
 	modelEnableGroups     = make(map[string][]string)
@@ -64,35 +65,54 @@ var (
 )
 
 func GetPricing() []Pricing {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
+	pricingCacheMu.RLock()
+	needsRefresh := time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0
+	pricingCacheMu.RUnlock()
+	if needsRefresh {
 		updatePricingLock.Lock()
-		defer updatePricingLock.Unlock()
-		// Double check after acquiring the lock
-		if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
+		// Double check after acquiring the lock.  The cache lock protects both
+		// the freshness timestamp and the slices returned to concurrent readers.
+		pricingCacheMu.RLock()
+		needsRefresh = time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0
+		pricingCacheMu.RUnlock()
+		if needsRefresh {
 			modelSupportEndpointsLock.Lock()
-			defer modelSupportEndpointsLock.Unlock()
-			updatePricing()
+			err := updatePricing()
+			modelSupportEndpointsLock.Unlock()
+			if err != nil {
+				// Keep serving the last complete snapshot.  Returning an empty or
+				// partially rebuilt pricing map after a transient DB error can make
+				// clients believe models are unavailable (or, worse, use defaults).
+				common.SysError("刷新定价缓存失败: " + err.Error())
+			}
 		}
+		updatePricingLock.Unlock()
 	}
-	return pricingMap
+	pricingCacheMu.RLock()
+	defer pricingCacheMu.RUnlock()
+	return append([]Pricing(nil), pricingMap...)
 }
 
 func InvalidatePricingCache() {
 	updatePricingLock.Lock()
-	defer updatePricingLock.Unlock()
-
+	modelSupportEndpointsLock.Lock()
+	pricingCacheMu.Lock()
 	pricingMap = nil
 	vendorsList = nil
+	supportedEndpointMap = nil
 	lastGetPricingTime = time.Time{}
+	pricingCacheMu.Unlock()
+	modelSupportEndpointsLock.Unlock()
+	updatePricingLock.Unlock()
 }
 
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		// 保证先刷新一次
-		GetPricing()
-	}
-	return vendorsList
+	// 保证先刷新一次
+	GetPricing()
+	pricingCacheMu.RLock()
+	defer pricingCacheMu.RUnlock()
+	return append([]PricingVendor(nil), vendorsList...)
 }
 
 func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
@@ -102,7 +122,10 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 	modelSupportEndpointsLock.RLock()
 	defer modelSupportEndpointsLock.RUnlock()
 	if endpoints, ok := modelSupportEndpointTypes[model]; ok {
-		return endpoints
+		// Do not expose the cache-owned backing array to callers.  Several
+		// request paths append or sort endpoint capabilities, and mutating this
+		// slice would race with cache refreshes and corrupt the shared snapshot.
+		return append([]constant.EndpointType(nil), endpoints...)
 	}
 	return make([]constant.EndpointType, 0)
 }
@@ -177,16 +200,25 @@ func appendPricingEndpoint(endpoints []string, endpoint string) []string {
 	return append(endpoints, endpoint)
 }
 
-func updatePricing() {
+func updatePricing() error {
 	//modelRatios := common.GetModelRatios()
 	enableAbilities, err := GetAllEnableAbilityWithChannels()
 	if err != nil {
-		common.SysLog(fmt.Sprintf("GetAllEnableAbilityWithChannels error: %v", err))
-		return
+		return fmt.Errorf("get enabled abilities: %w", err)
 	}
+	if DB == nil {
+		return fmt.Errorf("database is not initialized")
+	}
+	// Hold the cache lock while publishing the derived maps.  All expensive
+	// source queries happen before this point; readers either see the previous
+	// complete snapshot or the new complete snapshot, never a half-built one.
+	pricingCacheMu.Lock()
+	defer pricingCacheMu.Unlock()
 	// 预加载模型元数据与供应商一次，避免循环查询
 	var allMeta []Model
-	_ = DB.Find(&allMeta).Error
+	if err := DB.Find(&allMeta).Error; err != nil {
+		return fmt.Errorf("load model metadata: %w", err)
+	}
 	metaMap := make(map[string]*Model)
 	prefixList := make([]*Model, 0)
 	suffixList := make([]*Model, 0)
@@ -238,7 +270,9 @@ func updatePricing() {
 
 	// 预加载供应商
 	var vendors []Vendor
-	_ = DB.Find(&vendors).Error
+	if err := DB.Find(&vendors).Error; err != nil {
+		return fmt.Errorf("load vendors: %w", err)
+	}
 	vendorMap := make(map[int]*Vendor)
 	for i := range vendors {
 		vendorMap[vendors[i].Id] = &vendors[i]
@@ -425,9 +459,16 @@ func updatePricing() {
 	modelEnableGroupsLock.Unlock()
 
 	lastGetPricingTime = time.Now()
+	return nil
 }
 
 // GetSupportedEndpointMap 返回全局端点到路径的映射
 func GetSupportedEndpointMap() map[string]common.EndpointInfo {
-	return supportedEndpointMap
+	pricingCacheMu.RLock()
+	defer pricingCacheMu.RUnlock()
+	result := make(map[string]common.EndpointInfo, len(supportedEndpointMap))
+	for key, value := range supportedEndpointMap {
+		result[key] = value
+	}
+	return result
 }

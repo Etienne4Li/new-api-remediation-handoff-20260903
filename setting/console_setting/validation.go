@@ -13,7 +13,6 @@ import (
 )
 
 var (
-	urlRegex       = regexp.MustCompile(`^https?://(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))(?:\:[0-9]{1,5})?(?:/.*)?$`)
 	dangerousChars = []string{"<script", "<iframe", "javascript:", "onload=", "onerror=", "onclick="}
 	validColors    = map[string]bool{
 		"blue": true, "green": true, "cyan": true, "purple": true, "pink": true,
@@ -37,11 +36,11 @@ func exceedsMaxCharacters(s string, max int) bool {
 }
 
 func validateURL(urlStr string, index int, itemType string) error {
-	if !urlRegex.MatchString(urlStr) {
-		return fmt.Errorf("第%d个%s的URL格式不正确", index, itemType)
+	if urlStr != strings.TrimSpace(urlStr) {
+		return fmt.Errorf("第%d个%s的URL不能包含首尾空白", index, itemType)
 	}
-	if _, err := url.Parse(urlStr); err != nil {
-		return fmt.Errorf("第%d个%s的URL无法解析：%s", index, itemType, err.Error())
+	if err := common.ValidateHTTPURL(urlStr); err != nil {
+		return fmt.Errorf("第%d个%s的URL格式不正确：%s", index, itemType, err.Error())
 	}
 	return nil
 }
@@ -71,13 +70,13 @@ func ValidateConsoleSettings(settingsStr string, settingType string) error {
 	}
 
 	switch settingType {
-	case "ApiInfo":
+	case "ApiInfo", "api_info":
 		return validateApiInfo(settingsStr)
-	case "Announcements":
+	case "Announcements", "announcements":
 		return validateAnnouncements(settingsStr)
-	case "FAQ":
+	case "FAQ", "faq":
 		return validateFAQ(settingsStr)
-	case "UptimeKumaGroups":
+	case "UptimeKumaGroups", "uptime_kuma_groups":
 		return validateUptimeKumaGroups(settingsStr)
 	default:
 		return fmt.Errorf("未知的设置类型：%s", settingType)
@@ -276,6 +275,10 @@ func validateUptimeKumaGroups(groupsStr string) error {
 
 		if err := validateURL(urlStr, i+1, "分组"); err != nil {
 			return err
+		}
+		parsedURL, _ := url.Parse(urlStr) // validateURL already established parseability.
+		if parsedURL.RawQuery != "" || parsedURL.ForceQuery {
+			return fmt.Errorf("第%d个分组的URL不能包含查询参数", i+1)
 		}
 
 		if exceedsMaxCharacters(categoryName, 50) {

@@ -44,7 +44,7 @@ export type BillingVar = {
   group?: string
 }
 
-export const BILLING_VARS: BillingVar[] = [
+const BILLING_VARS: BillingVar[] = [
   {
     key: 'p',
     field: 'inputPrice',
@@ -143,9 +143,6 @@ export const BILLING_PRICING_VARS: BillingVar[] = BILLING_VARS.filter(
 )
 
 /** Vars valid in tier conditions (`p`, `c`, `len`) */
-export const BILLING_CONDITION_VARS: string[] = BILLING_VARS.filter(
-  (v) => v.isBase || v.isConditionOnly
-).map((v) => v.key)
 
 const BILLING_VAR_KEY_TO_FIELD = Object.fromEntries(
   BILLING_PRICING_VARS.map((v) => [v.key, v.field as string])
@@ -625,10 +622,6 @@ export function createEmptyRuleGroup(): RequestRuleGroup {
   return { conditions: [createEmptyCondition()], multiplier: '' }
 }
 
-export function createEmptyTimeRuleGroup(): RequestRuleGroup {
-  return { conditions: [createEmptyTimeCondition()], multiplier: '' }
-}
-
 // ---------------------------------------------------------------------------
 // Editor: match option helpers
 // ---------------------------------------------------------------------------
@@ -667,7 +660,7 @@ function isTimeFunc(value: unknown): value is TimeFunc {
   return typeof value === 'string' && TIME_FUNCS.includes(value as TimeFunc)
 }
 
-export function normalizeCondition(
+function normalizeCondition(
   cond: Partial<RequestCondition> | null | undefined
 ): RequestCondition {
   let source: RequestCondition['source'] = 'param'

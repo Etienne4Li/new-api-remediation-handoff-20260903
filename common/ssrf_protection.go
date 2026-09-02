@@ -325,6 +325,9 @@ func (p *SSRFProtection) ValidateResolvedIP(host string, ip net.IP) error {
 
 // ValidateURL 验证URL是否安全
 func (p *SSRFProtection) ValidateURL(urlStr string) error {
+	if err := ValidateHTTPURL(urlStr); err != nil {
+		return err
+	}
 	// 解析URL
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -378,6 +381,12 @@ func (p *SSRFProtection) ValidateURL(urlStr string) error {
 
 // ValidateURLWithFetchSetting 使用FetchSetting配置验证URL
 func ValidateURLWithFetchSetting(urlStr string, enableSSRFProtection, allowPrivateIp bool, domainFilterMode bool, ipFilterMode bool, domainList, ipList, allowedPorts []string, applyIPFilterForDomain bool) error {
+	// The policy toggle controls network-address filtering only. URL syntax is
+	// always enforced because callers also use this helper on redirect targets
+	// and on requests that will be handed to an outbound proxy.
+	if err := ValidateHTTPURL(urlStr); err != nil {
+		return err
+	}
 	// 如果SSRF防护被禁用，直接返回成功
 	if !enableSSRFProtection {
 		return nil

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -48,8 +49,7 @@ func TestPasskeyRegisterFinishRejectsMissingOrWrongProofWithoutConsumingFlow(t *
 	previousType := common.MainDatabaseType()
 	previousRedis := common.RedisEnabled
 	previousSecret := common.SessionSecret
-	settings := system_setting.GetPasskeySettings()
-	previousSettings := *settings
+	previousSettings := *system_setting.GetPasskeySettings()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
@@ -58,13 +58,13 @@ func TestPasskeyRegisterFinishRejectsMissingOrWrongProofWithoutConsumingFlow(t *
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
 	common.SessionSecret = "passkey-register-proof-test-secret"
-	*settings = system_setting.PasskeySettings{Enabled: true}
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"passkey.enabled": "true"}))
 	t.Cleanup(func() {
 		model.DB = previousDB
 		common.SetMainDatabaseType(previousType)
 		common.RedisEnabled = previousRedis
 		common.SessionSecret = previousSecret
-		*settings = previousSettings
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"passkey.enabled": fmt.Sprintf("%t", previousSettings.Enabled)}))
 		sqlDB, dbErr := db.DB()
 		if dbErr == nil {
 			_ = sqlDB.Close()

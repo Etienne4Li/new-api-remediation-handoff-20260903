@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Code2, Copy, Eye, Plus, Trash2 } from 'lucide-react'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -118,19 +118,14 @@ export const ToolPriceSettings = memo(function ToolPriceSettings({
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [editMode, setEditMode] = useState<'visual' | 'json'>('visual')
-  const [rows, setRows] = useState<ToolPriceRow[]>([])
-  const [jsonText, setJsonText] = useState('')
+  const initialPrices = parseInitialPrices(defaultValue)
+  const initialRows = objectToRows(initialPrices)
+  const [rows, setRows] = useState<ToolPriceRow[]>(initialRows)
+  const [jsonText, setJsonText] = useState(() =>
+    JSON.stringify(initialPrices, null, 2)
+  )
   const [jsonError, setJsonError] = useState('')
-  const [nextRowId, setNextRowId] = useState(1)
-
-  useEffect(() => {
-    const prices = parseInitialPrices(defaultValue)
-    const initialRows = objectToRows(prices)
-    setRows(initialRows)
-    setJsonText(JSON.stringify(prices, null, 2))
-    setJsonError('')
-    setNextRowId(initialRows.length + 1)
-  }, [defaultValue])
+  const [nextRowId, setNextRowId] = useState(initialRows.length + 1)
 
   const currentPrices = useMemo(() => rowsToObject(rows), [rows])
   const invalidRowIds = useMemo(

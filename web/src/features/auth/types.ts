@@ -42,21 +42,6 @@ export interface RegisterPayload {
   turnstile?: string
 }
 
-export interface PasswordResetPayload {
-  email: string
-  turnstile?: string
-}
-
-export interface EmailVerificationPayload {
-  email: string
-  turnstile?: string
-}
-
-export interface BindEmailPayload {
-  email: string
-  code: string
-}
-
 // ============================================================================
 // API Responses
 // ============================================================================
@@ -187,12 +172,18 @@ export interface SystemStatus {
 // OAuth
 // ============================================================================
 
-export interface OAuthProvider {
-  name: string
-  type: 'github' | 'discord' | 'oidc' | 'linuxdo' | 'telegram' | 'wechat'
-  enabled: boolean
-  clientId?: string
-  authEndpoint?: string
+/**
+ * Server-created OAuth ceremony parameters. The verifier itself is kept in
+ * an HttpOnly browser cookie; only its RFC 7636 S256 challenge is exposed to
+ * the authorization endpoint.
+ */
+export interface OAuthFlowStart {
+  flow_token: string
+  code_challenge: string
+  code_challenge_method?: 'S256'
+  /** Exact browser callback URI bound to this flow by the server. */
+  redirect_uri?: string
+  expires_at?: number
 }
 
 export interface CustomOAuthProviderInfo {

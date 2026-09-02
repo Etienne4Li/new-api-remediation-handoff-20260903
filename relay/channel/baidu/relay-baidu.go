@@ -1,10 +1,8 @@
 package baidu
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -119,7 +117,7 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var baiduResponse BaiduChatStreamResponse
 		if err := common.Unmarshal([]byte(data), &baiduResponse); err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			sr.Error(err)
 			return
 		}
@@ -130,7 +128,7 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		}
 		response := streamResponseBaidu2OpenAI(&baiduResponse)
 		if err := helper.ObjectData(c, response); err != nil {
-			common.SysLog("error sending stream response: " + err.Error())
+			common.SysLog("error sending stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			sr.Error(err)
 		}
 	})
@@ -140,20 +138,20 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 
 func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	var baiduResponse BaiduChatResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	service.CloseResponseBodyGracefully(resp)
-	err = json.Unmarshal(responseBody, &baiduResponse)
+	err = common.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	if baiduResponse.ErrorMsg != "" {
-		return types.NewError(fmt.Errorf("%s", baiduResponse.ErrorMsg), types.ErrorCodeBadResponseBody), nil
+		return types.NewError(fmt.Errorf("baidu upstream error: message_meta=%s", common.SensitiveLogMeta(baiduResponse.ErrorMsg)), types.ErrorCodeBadResponseBody), nil
 	}
 	fullTextResponse := responseBaidu2OpenAI(&baiduResponse)
-	jsonResponse, err := json.Marshal(fullTextResponse)
+	jsonResponse, err := common.Marshal(fullTextResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
@@ -165,20 +163,20 @@ func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 
 func baiduEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	var baiduResponse BaiduEmbeddingResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	service.CloseResponseBodyGracefully(resp)
-	err = json.Unmarshal(responseBody, &baiduResponse)
+	err = common.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	if baiduResponse.ErrorMsg != "" {
-		return types.NewError(fmt.Errorf("%s", baiduResponse.ErrorMsg), types.ErrorCodeBadResponseBody), nil
+		return types.NewError(fmt.Errorf("baidu upstream error: message_meta=%s", common.SensitiveLogMeta(baiduResponse.ErrorMsg)), types.ErrorCodeBadResponseBody), nil
 	}
 	fullTextResponse := embeddingResponseBaidu2OpenAI(&baiduResponse)
-	jsonResponse, err := json.Marshal(fullTextResponse)
+	jsonResponse, err := common.Marshal(fullTextResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
@@ -230,12 +228,17 @@ func getBaiduAccessTokenHelper(apiKey string) (*BaiduAccessToken, error) {
 	defer res.Body.Close()
 
 	var accessToken BaiduAccessToken
-	err = json.NewDecoder(res.Body).Decode(&accessToken)
+	body, err := service.ReadProviderResponseBody(res, service.DefaultProviderResponseBodyLimitBytes)
+	if err != nil {
+		return nil, err
+	}
+	err = common.Unmarshal(body, &accessToken)
 	if err != nil {
 		return nil, err
 	}
 	if accessToken.Error != "" {
-		return nil, errors.New(accessToken.Error + ": " + accessToken.ErrorDescription)
+		return nil, fmt.Errorf("baidu token exchange failed: error_meta=%s description_meta=%s",
+			common.SensitiveLogMeta(accessToken.Error), common.SensitiveLogMeta(accessToken.ErrorDescription))
 	}
 	if accessToken.AccessToken == "" {
 		return nil, errors.New("getBaiduAccessTokenHelper get empty access token")

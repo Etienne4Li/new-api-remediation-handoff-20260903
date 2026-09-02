@@ -2,6 +2,9 @@ package openai
 
 import (
 	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +18,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func openAIEditTestImage(t *testing.T) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{B: 0xff, A: 0xff})
+	require.NoError(t, png.Encode(&data, img))
+	return data.Bytes()
+}
 
 // TestConvertImageEditRequestMultipart verifies that ConvertImageRequest
 // re-serializes multipart image edit requests with all fields (including
@@ -32,7 +44,7 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 		require.NoError(t, writer.WriteField("partial_images", "3"))
 		part, err := writer.CreateFormFile("image", "input.png")
 		require.NoError(t, err)
-		_, err = part.Write([]byte("fake image"))
+		_, err = part.Write(openAIEditTestImage(t))
 		require.NoError(t, err)
 		require.NoError(t, writer.Close())
 
@@ -72,7 +84,8 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 		defer file.Close()
 		fileBytes, err := io.ReadAll(file)
 		require.NoError(t, err)
-		require.Equal(t, []byte("fake image"), fileBytes)
+		require.NotEmpty(t, fileBytes)
+		require.Equal(t, "image/png", http.DetectContentType(fileBytes))
 	}
 
 	t.Run("with pre-parsed form", func(t *testing.T) {
@@ -95,4 +108,25 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 
 		convertAndReplay(t, c, prompt)
 	})
+}
+
+func TestConvertImageEditRequestRejectsForgedImageAndFilenameInjection(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("model", "gpt-image-1"))
+	require.NoError(t, writer.WriteField("prompt", "reject unsafe"))
+	part, err := writer.CreateFormFile("image", "../../evil\r\nX-Injected: yes.png")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("<html><script>alert(1)</script>"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	defer common.CleanupBodyStorage(c)
+
+	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesEdits}
+	_, err = (&Adaptor{}).ConvertImageRequest(c, info, dto.ImageRequest{Model: "gpt-image-1", Prompt: "reject unsafe"})
+	require.Error(t, err)
 }

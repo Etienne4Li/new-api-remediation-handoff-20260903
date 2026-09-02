@@ -36,14 +36,18 @@ func (user *UserBase) WriteContext(c *gin.Context) {
 }
 
 func (user *UserBase) GetSetting() dto.UserSetting {
-	setting := dto.UserSetting{}
-	if user.Setting != "" {
-		err := common.Unmarshal([]byte(user.Setting), &setting)
-		if err != nil {
-			common.SysLog("failed to unmarshal setting: " + err.Error())
-		}
+	setting, err := user.GetSettingWithError()
+	if err != nil {
+		common.SysLog("failed to read cached user setting: " + err.Error())
 	}
 	return setting
+}
+
+func (user *UserBase) GetSettingWithError() (dto.UserSetting, error) {
+	if user == nil {
+		return dto.UserSetting{}, nil
+	}
+	return unmarshalUserSettingFromStorage(user.Setting)
 }
 
 // getUserCacheKey returns the key for user cache
@@ -86,6 +90,27 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (*UserBase, error) {
+	// When batch accounting is enabled, spendable wallet quota is committed
+	// directly to the database and Redis may contain a snapshot from before a
+	// reservation.  Bypassing the cache entirely also closes the less obvious
+	// stale-reader race where an in-flight DB snapshot could republish the old
+	// quota after the reservation's DEL.  Keep the authentication-version floor
+	// check so a restrictive user update still fails closed while its cache
+	// fence is pending.
+	if common.BatchUpdateEnabled && DB != nil {
+		var user User
+		if err := DB.Select("Id", "Group", "Email", "Quota", "Status", "Role", "Username", "Setting", "AuthVersion").
+			Where("id = ?", userId).First(&user).Error; err != nil {
+			return nil, err
+		}
+		if floor, floorErr := getUserAuthVersionFloor(userId); floorErr != nil {
+			return nil, floorErr
+		} else if floor > user.AuthVersion {
+			return nil, ErrUserAuthCachePending
+		}
+		return user.ToBaseUser(), nil
+	}
+
 	// Try getting from Redis first
 	userCache, err := cacheGetUserBase(userId)
 	if err == nil {
@@ -144,12 +169,54 @@ func cacheIncrUserQuota(userId int, delta int64) error {
 	if !common.RedisEnabled {
 		return nil
 	}
-	_, err := cacheApplyUserQuotaDelta(userId, delta)
-	return err
+	result, err := cacheApplyUserQuotaDelta(userId, delta)
+	if err != nil {
+		return err
+	}
+	if result != cacheQuotaOK {
+		return ErrQuotaCacheMiss
+	}
+	return nil
 }
 
 func cacheDecrUserQuota(userId int, delta int64) error {
 	return cacheIncrUserQuota(userId, -delta)
+}
+
+// repairUserQuotaCache is called after a database-authoritative quota update
+// when the incremental Redis write failed. Dropping the hash makes the next
+// read hydrate from the database instead of serving a stale balance. When
+// Redis is available immediately, publish the current snapshot as well.
+func repairUserQuotaCache(userId int) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	if err := invalidateUserCache(userId); err != nil {
+		return err
+	}
+	user, err := GetUserById(userId, false)
+	if err != nil {
+		return err
+	}
+	return populateUserCache(*user)
+}
+
+// handleUserQuotaCacheMutationFailure keeps the hot mutation path non-fatal
+// while making the inconsistency durable.  In synchronous mode we can repair
+// immediately from the committed database row; in batch mode the database
+// delta is still queued, so only fencing plus a deferred repair is safe.
+func handleUserQuotaCacheMutationFailure(userId int, cause error) {
+	if !common.RedisEnabled || userId <= 0 {
+		return
+	}
+	if !common.BatchUpdateEnabled {
+		if err := repairUserQuotaCache(userId); err == nil {
+			return
+		} else {
+			common.SysLog(fmt.Sprintf("failed immediate user quota cache repair: %v", err))
+		}
+	}
+	recordQuotaCacheRepair(QuotaCacheRepairEntityUser, userId, getUserCacheKey(userId), cause)
 }
 
 // syncCreditUserQuotaCache 在授信事务（充值/兑换等）提交后同步把增量补进缓存
@@ -161,6 +228,10 @@ func syncCreditUserQuotaCache(userId int, quota int, operation string) {
 	}
 	if err := cacheIncrUserQuota(userId, int64(quota)); err != nil {
 		common.SysLog(fmt.Sprintf("failed to sync %s credit to user quota cache: %s", operation, err.Error()))
+		// The database transaction has already committed. Invalidate the stale
+		// entry and persist a retry hint so a Redis outage cannot leave the old
+		// balance authoritative for the whole TTL window.
+		recordQuotaCacheRepair(QuotaCacheRepairEntityUser, userId, getUserCacheKey(userId), err)
 	}
 }
 
@@ -194,7 +265,7 @@ func getUserSettingCache(userId int) (dto.UserSetting, error) {
 	if err != nil {
 		return dto.UserSetting{}, err
 	}
-	return cache.GetSetting(), nil
+	return cache.GetSettingWithError()
 }
 
 // RefreshUserGroupCache writes the database-authoritative group into an

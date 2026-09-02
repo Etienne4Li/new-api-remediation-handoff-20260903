@@ -123,6 +123,28 @@ For commercial licensing, please contact support@quantumnous.com
   }
 }
 
+@layer components {
+  [data-authenticated-shell] [data-slot='sidebar-inset'] {
+    background-color: var(--background);
+  }
+
+  [data-authenticated-shell] [data-slot='card'] {
+    border-color: color-mix(in oklch, var(--border) 88%, transparent);
+    border-radius: 8px;
+    box-shadow: none;
+  }
+
+  [data-authenticated-shell] [data-slot='table-container'] {
+    background-color: var(--card);
+    border-radius: 8px;
+  }
+
+  [data-authenticated-shell] [data-slot='dialog-footer'],
+  [data-authenticated-shell] [data-slot='card-footer'] {
+    background-color: color-mix(in oklch, var(--muted) 72%, var(--card));
+  }
+}
+
 /* Vercel Geist-style skeleton shimmer */
 .skeleton-shimmer {
   background: linear-gradient(
@@ -146,23 +168,8 @@ For commercial licensing, please contact support@quantumnous.com
   }
 }
 
-/* Override auto-skeleton-react inline styles with Vercel shimmer */
-.auto-skeleton-fade [class^='skeleton-'] {
-  background: linear-gradient(
-    90deg,
-    var(--skeleton-base) 0%,
-    var(--skeleton-base) 33%,
-    var(--skeleton-highlight) 50%,
-    var(--skeleton-base) 67%,
-    var(--skeleton-base) 100%
-  ) !important;
-  background-size: 300% 100% !important;
-  animation: skeleton-shimmer 1.8s ease-in-out infinite !important;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-shimmer,
-  .auto-skeleton-fade [class^='skeleton-'] {
+  .skeleton-shimmer {
     animation: none !important;
     background: var(--skeleton-base) !important;
   }
@@ -179,6 +186,10 @@ For commercial licensing, please contact support@quantumnous.com
 
 @utility max-w-container-lg {
   max-width: 1536px;
+}
+
+[data-authenticated-shell] {
+  --app-page-gutter: clamp(0.75rem, 1.1vw, 1.25rem);
 }
 
 @utility no-scrollbar {
@@ -442,6 +453,19 @@ For commercial licensing, please contact support@quantumnous.com
   }
 }
 
+html.home-reference-scroll {
+  scrollbar-width: none;
+}
+
+html.home-reference-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+[data-home-page='true'] {
+  --home-accent: #3080ff;
+  --home-accent-soft: #54a2ff;
+}
+
 /* Smooth streaming: one-shot fade-in on newly streamed words.
  * Duration must match FADE_DURATION_MS in response-fade.ts */
 @keyframes stream-fade-in {
@@ -514,6 +538,222 @@ For commercial licensing, please contact support@quantumnous.com
   }
 }
 
+@keyframes home-entry-signal-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+  }
+  to {
+    clip-path: inset(0);
+    opacity: var(--home-entry-final-opacity);
+  }
+}
+
+@keyframes home-entry-content-rise {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(48px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+@keyframes home-entry-header-drop {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(-18px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+.home-entry-signal-layer {
+  --home-entry-final-opacity: 0.9;
+}
+
+.landing-mask {
+  display: block;
+  margin-bottom: -0.14em;
+  padding-bottom: 0.14em;
+  overflow: hidden;
+}
+
+@keyframes landing-mask-rise {
+  from {
+    opacity: 0;
+    transform: translateY(112%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.landing-mask-rise-line {
+  will-change: transform, opacity;
+}
+
+.landing-mask-rise-ready .landing-mask-rise-line {
+  opacity: 0;
+  transform: translateY(112%);
+}
+
+.landing-animate-mask-rise {
+  animation: landing-mask-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.home-brand-reveal {
+  --home-brand-reveal-height: clamp(14rem, 28vw, 27rem);
+  pointer-events: none;
+  position: relative;
+  z-index: 0;
+  height: var(--home-brand-reveal-height);
+}
+
+.home-brand-reveal-fixed {
+  pointer-events: auto;
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 0;
+  isolation: isolate;
+  height: var(--home-brand-reveal-height);
+  color: var(--home-brand-ink);
+  background: var(--background);
+  overflow: hidden;
+}
+
+.home-brand-reveal-fixed[data-brand-reveal-theme='system'] {
+  --home-brand-ink: var(--foreground);
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  .home-brand-reveal-fixed[data-brand-reveal-theme='system'] {
+    --home-brand-ink: color-mix(in oklab, var(--foreground) 82%, #2563eb);
+  }
+}
+
+.home-brand-reveal-static {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.home-brand-reveal-static[data-canvas-active='true'] {
+  opacity: 0;
+}
+
+.home-brand-reveal-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.home-brand-reveal-word {
+  position: absolute;
+  bottom: -0.1em;
+  left: 50%;
+  color: var(--home-brand-ink);
+  font-size: 5rem;
+  font-weight: 900;
+  line-height: 0.78;
+  letter-spacing: 0;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+@media (min-width: 40rem) {
+  .home-brand-reveal-word {
+    font-size: 7.25rem;
+  }
+}
+
+@media (min-width: 48rem) {
+  .home-brand-reveal-word {
+    font-size: 9.5rem;
+  }
+}
+
+@media (min-width: 64rem) {
+  .home-brand-reveal-word {
+    font-size: 11rem;
+  }
+}
+
+@media (min-width: 80rem) {
+  .home-brand-reveal-word {
+    font-size: 13rem;
+  }
+}
+
+@media (min-width: 96rem) {
+  .home-brand-reveal-word {
+    font-size: 15.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .home-motion-stage .home-entry-reveal-layer,
+  .home-entry-hero .home-entry-reveal-layer {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+  }
+
+  .home-entry-hero .home-entry-content {
+    opacity: 0;
+    transform: translateY(48px);
+  }
+
+  .home-motion-stage.home-entry-started .home-entry-reveal-layer,
+  .home-entry-hero.home-entry-started .home-entry-reveal-layer {
+    animation: home-entry-signal-reveal 0.96s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .home-entry-hero.home-entry-started .home-entry-content {
+    animation: home-entry-content-rise 0.68s cubic-bezier(0.16, 1, 0.3, 1) 0.62s
+      both;
+  }
+
+  .home-entry-header.home-entry-started > div {
+    pointer-events: auto;
+    animation: home-entry-header-drop 0.56s cubic-bezier(0.16, 1, 0.3, 1) 0.46s
+      both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-motion-stage .home-entry-reveal-layer,
+  .home-entry-hero .home-entry-reveal-layer,
+  .home-entry-hero .home-entry-content,
+  .home-entry-header > div {
+    clip-path: none !important;
+    filter: none !important;
+    pointer-events: auto !important;
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .home-motion-stage .home-entry-signal-layer,
+  .home-entry-hero .home-entry-signal-layer {
+    opacity: 0.9 !important;
+  }
+
+  .home-entry-hero .home-entry-content,
+  .home-entry-header > div {
+    opacity: 1 !important;
+  }
+}
+
 .landing-animate-fade-up {
   animation: landing-fade-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -536,6 +776,13 @@ For commercial licensing, please contact support@quantumnous.com
   .landing-animate-scale-in,
   .landing-animate-fade-left,
   .landing-animate-fade-right {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .landing-mask-rise-line,
+  .landing-animate-mask-rise {
     animation: none !important;
     opacity: 1 !important;
     transform: none !important;
@@ -717,4 +964,18 @@ For commercial licensing, please contact support@quantumnous.com
   .auto-group-flow-border {
     display: none;
   }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  z-index: 1;
+}
+
+::view-transition-new(root) {
+  z-index: 2;
 }

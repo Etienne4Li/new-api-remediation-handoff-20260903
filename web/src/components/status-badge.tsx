@@ -270,29 +270,3 @@ export function StatusBadgeList<T>(props: StatusBadgeListProps<T>) {
     </div>
   )
 }
-
-export const statusPresets = {
-  active: {
-    variant: 'success' as const,
-    label: 'Active',
-  },
-  inactive: {
-    variant: 'neutral' as const,
-    label: 'Inactive',
-  },
-  invited: {
-    variant: 'info' as const,
-    label: 'Invited',
-  },
-  suspended: {
-    variant: 'danger' as const,
-    label: 'Suspended',
-  },
-  pending: {
-    variant: 'warning' as const,
-    label: 'Pending',
-    pulse: true,
-  },
-} as const
-
-export type StatusPreset = keyof typeof statusPresets

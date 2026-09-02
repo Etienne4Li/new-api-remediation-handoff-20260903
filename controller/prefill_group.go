@@ -82,8 +82,13 @@ func DeletePrefillGroup(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.DeletePrefillGroupByID(id); err != nil {
-		common.ApiError(c, err)
+	result := model.DB.Delete(&model.PrefillGroup{}, id)
+	if result.Error != nil {
+		common.ApiError(c, result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		common.ApiErrorMsg(c, "预填组不存在")
 		return
 	}
 	common.ApiSuccess(c, nil)

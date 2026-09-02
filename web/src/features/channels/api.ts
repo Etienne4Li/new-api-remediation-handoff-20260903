@@ -360,7 +360,7 @@ export async function resetCodexUsage(
 /**
  * Manage multi-key channel operations
  */
-export async function manageMultiKeys(
+async function manageMultiKeys(
   params: MultiKeyManageParams
 ): Promise<MultiKeyStatusResponse | { success: boolean; message?: string }> {
   const res = await api.post(
@@ -613,12 +613,6 @@ export async function getEnabledModels(): Promise<{
 /**
  * Check Ollama version for a given channel
  */
-export async function getOllamaVersion(
-  channelId: number
-): Promise<{ success: boolean; message?: string; data?: { version: string } }> {
-  const res = await api.get(`/api/channel/ollama/version/${channelId}`)
-  return res.data
-}
 
 // ============================================================================
 // Group Management

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
@@ -38,6 +38,7 @@ type ApiCall = ((proofToken?: string) => Promise<unknown>) | null
 
 interface InternalState extends SecureVerificationState {
   apiCall: ApiCall
+  flowId: number
 }
 
 const defaultMethods: VerificationMethods = {
@@ -53,6 +54,7 @@ const initialState: InternalState = {
   title: undefined,
   description: undefined,
   apiCall: null,
+  flowId: 0,
 }
 
 export function useSecureVerification(
@@ -63,18 +65,38 @@ export function useSecureVerification(
   const [methods, setMethods] = useState<VerificationMethods>(defaultMethods)
   const [state, setState] = useState<InternalState>(initialState)
   const [open, setOpen] = useState(false)
+  const methodsRequestIdRef = useRef(0)
+  const flowIdRef = useRef(0)
+  const executionIdRef = useRef(0)
 
   const fetchVerificationMethods = useCallback(async () => {
+    const requestId = ++methodsRequestIdRef.current
     const result = await checkVerificationMethods()
+    if (requestId !== methodsRequestIdRef.current) return null
+
     setMethods(result)
     return result
   }, [])
 
   useEffect(() => {
-    fetchVerificationMethods()
-  }, [fetchVerificationMethods])
+    let cancelled = false
+    const requestId = ++methodsRequestIdRef.current
+
+    void checkVerificationMethods().then((result) => {
+      if (!cancelled && requestId === methodsRequestIdRef.current) {
+        setMethods(result)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      methodsRequestIdRef.current += 1
+    }
+  }, [])
 
   const reset = useCallback(() => {
+    flowIdRef.current += 1
+    executionIdRef.current += 1
     setState(initialState)
     setOpen(false)
   }, [])
@@ -84,10 +106,23 @@ export function useSecureVerification(
       apiCall: (proofToken?: string) => Promise<unknown>,
       config: StartVerificationOptions
     ) => {
+      const flowId = ++flowIdRef.current
+      executionIdRef.current += 1
       const { preferredMethod, scope, title, description } = config
-      const availableMethods = await fetchVerificationMethods()
+      let availableMethods: VerificationMethods | null | undefined =
+        config.availableMethods
+      if (availableMethods) {
+        methodsRequestIdRef.current += 1
+        setMethods(availableMethods)
+      } else {
+        availableMethods = await fetchVerificationMethods()
+      }
+
+      if (!availableMethods || flowId !== flowIdRef.current) return false
 
       if (!availableMethods.has2FA && !availableMethods.hasPasskey) {
+        setState(initialState)
+        setOpen(false)
         toast.error(
           i18next.t(
             'Please enable Two-factor Authentication or Passkey before proceeding'
@@ -118,14 +153,15 @@ export function useSecureVerification(
         }
       }
 
-      setState((prev) => ({
-        ...prev,
+      setState({
+        ...initialState,
         apiCall,
+        flowId,
         method: defaultMethod,
         scope,
         title,
         description,
-      }))
+      })
       setOpen(true)
       return true
     },
@@ -139,24 +175,40 @@ export function useSecureVerification(
         return
       }
 
+      const flowId = state.flowId
+      if (flowId !== flowIdRef.current) return
+
       const actualMethod = method ?? state.method
       if (!actualMethod) {
         toast.error(i18next.t('Select a verification method first'))
         return
       }
 
+      const executionId = ++executionIdRef.current
+      const apiCall = state.apiCall
+      const scope = state.scope
+      const verificationCode = code ?? state.code
       setState((prev) => ({ ...prev, loading: true }))
 
       try {
-        if (!state.scope) {
+        if (!scope) {
           throw new Error(i18next.t('Verification scope is missing'))
         }
-        const proof = await verify(
-          actualMethod,
-          state.scope,
-          code ?? state.code
-        )
-        const result = await state.apiCall(proof.proof_token)
+        const proof = await verify(actualMethod, scope, verificationCode)
+        if (
+          flowId !== flowIdRef.current ||
+          executionId !== executionIdRef.current
+        ) {
+          return
+        }
+
+        const result = await apiCall(proof.proof_token)
+        if (
+          flowId !== flowIdRef.current ||
+          executionId !== executionIdRef.current
+        ) {
+          return
+        }
 
         if (successMessage) {
           toast.success(successMessage)
@@ -170,6 +222,12 @@ export function useSecureVerification(
 
         return result
       } catch (error) {
+        if (
+          flowId !== flowIdRef.current ||
+          executionId !== executionIdRef.current
+        ) {
+          return
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -178,7 +236,12 @@ export function useSecureVerification(
         onError?.(error)
         throw error
       } finally {
-        setState((prev) => ({ ...prev, loading: false }))
+        if (
+          flowId === flowIdRef.current &&
+          executionId === executionIdRef.current
+        ) {
+          setState((prev) => ({ ...prev, loading: false }))
+        }
       }
     },
     [state, successMessage, onSuccess, onError, autoReset, reset]

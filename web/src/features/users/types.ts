@@ -25,14 +25,12 @@ import type { AdminPermissionMatrix } from '@/lib/admin-permissions'
 // ============================================================================
 
 /** User status: 1 = enabled, 2 = disabled, 3+ = other states */
-export const userStatusSchema = z.number()
-export type UserStatus = z.infer<typeof userStatusSchema>
+const userStatusSchema = z.number()
 
 /** User role: 1 = common user, 10 = admin, 100 = root */
-export const userRoleSchema = z.number()
-export type UserRole = z.infer<typeof userRoleSchema>
+const userRoleSchema = z.number()
 
-export const userSchema = z.object({
+const userSchema = z.object({
   id: z.number(),
   username: z.string(),
   display_name: z.string(),
@@ -65,7 +63,16 @@ export const userSchema = z.object({
 })
 export type User = z.infer<typeof userSchema>
 
-export const userListSchema = z.array(userSchema)
+/** Redacted built-in account-binding state returned to administrators. */
+export interface AdminUserBindingStatus {
+  email: boolean
+  github_id: boolean
+  discord_id: boolean
+  oidc_id: boolean
+  wechat_id: boolean
+  telegram_id: boolean
+  linux_do_id: boolean
+}
 
 // ============================================================================
 // API Request/Response Types
@@ -86,7 +93,7 @@ export type UserSortBy =
   | 'created_at'
   | 'last_login_at'
 
-export type UserSortOrder = 'asc' | 'desc'
+type UserSortOrder = 'asc' | 'desc'
 
 export interface GetUsersParams {
   p?: number

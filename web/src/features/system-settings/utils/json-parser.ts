@@ -16,9 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-export type JsonParseResult<T> =
-  | { success: true; data: T }
-  | { success: false; error: string }
+
 
 export interface SafeJsonParseOptions<T> {
   fallback?: T
@@ -52,7 +50,7 @@ function extractErrorPosition(
   // Format 1: "Unexpected token } in JSON at position 15"
   const positionMatch = message.match(/at position (\d+)/i)
   if (positionMatch) {
-    const position = parseInt(positionMatch[1], 10)
+    const position = Number.parseInt(positionMatch[1], 10)
     const { line, column } = getLineAndColumn(jsonString, position)
     return { line, column, position }
   }
@@ -61,8 +59,8 @@ function extractErrorPosition(
   const lineColMatch = message.match(/at line (\d+) column (\d+)/i)
   if (lineColMatch) {
     return {
-      line: parseInt(lineColMatch[1], 10),
-      column: parseInt(lineColMatch[2], 10),
+      line: Number.parseInt(lineColMatch[1], 10),
+      column: Number.parseInt(lineColMatch[2], 10),
     }
   }
 
@@ -73,10 +71,10 @@ function getLineAndColumn(
   text: string,
   position: number
 ): { line: number; column: number } {
-  const lines = text.substring(0, position).split('\n')
+  const lines = text.slice(0, position).split('\n')
   return {
     line: lines.length,
-    column: lines[lines.length - 1].length + 1,
+    column: (lines.at(-1)?.length ?? 0) + 1,
   }
 }
 
@@ -164,22 +162,4 @@ export function safeJsonParseWithValidation<T>(
   }
 
   return parsed
-}
-
-export function tryJsonParse<T = unknown>(
-  value: string | undefined | null
-): JsonParseResult<T> {
-  if (!value || value.trim() === '') {
-    return { success: false, error: 'Empty value' }
-  }
-
-  try {
-    const data = JSON.parse(value.trim()) as T
-    return { success: true, data }
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    }
-  }
 }

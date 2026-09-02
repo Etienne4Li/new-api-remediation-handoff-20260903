@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
 /**
  * Tells apart the two OAuth callbacks that land on the same `/oauth/:provider`
  * route: an account **bind**, which runs inside a popup we opened, and a plain
@@ -49,7 +48,7 @@ export interface OAuthSessionStorageOwner {
 }
 
 /** Minimal shape of `window.opener`. */
-export interface OAuthModeOpener {
+interface OAuthModeOpener {
   closed: boolean
 }
 

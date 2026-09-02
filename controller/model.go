@@ -207,7 +207,7 @@ func getModelListGroups(c *gin.Context) (modelListGroups, error) {
 }
 
 func ListModels(c *gin.Context, modelType int) {
-	acceptUnsetRatioModel := operation_setting.SelfUseModeEnabled
+	acceptUnsetRatioModel := operation_setting.IsSelfUseModeEnabled()
 	if !acceptUnsetRatioModel {
 		userId := c.GetInt("id")
 		if userId > 0 {
@@ -239,7 +239,11 @@ func ListModels(c *gin.Context, modelType int) {
 			tokenModelLimit = map[string]bool{}
 		}
 	}
-	models := service.GetGroupsEnabledModels(ownerGroups)
+	models, err := service.GetGroupsEnabledModelsWithError(ownerGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	for _, modelName := range models {
 		if modelLimitEnable {
 			matchingName := ratio_setting.FormatMatchingModelName(modelName)
@@ -321,9 +325,14 @@ func DashboardListModels(c *gin.Context) {
 }
 
 func EnabledListModels(c *gin.Context) {
+	models, err := model.GetEnabledModelsWithError()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(200, gin.H{
 		"success": true,
-		"data":    model.GetEnabledModels(),
+		"data":    models,
 	})
 }
 

@@ -93,14 +93,25 @@ func batchUpdate() {
 			continue
 		}
 		for key, value := range store {
+			if value == 0 {
+				continue
+			}
 			switch i {
 			case BatchUpdateTypeTokenQuota:
 				err := increaseTokenQuota(key, value)
 				if err != nil {
-					common.SysLog("failed to batch update token quota: " + err.Error())
+					// Keep the delta durable in the in-memory queue so a
+					// transient database failure (or an eventually restored
+					// token row) cannot silently lose accounting.
+					common.SysError(fmt.Sprintf("failed to batch update token quota: token_id=%d delta=%d error=%v", key, value, err))
+					addNewRecord(BatchUpdateTypeTokenQuota, key, value)
 				}
 			case BatchUpdateTypeChannelUsedQuota:
-				updateChannelUsedQuota(key, value)
+				err := updateChannelUsedQuota(key, value)
+				if err != nil {
+					common.SysError(fmt.Sprintf("failed to batch update channel used quota: channel_id=%d delta=%d error=%v", key, value, err))
+					addNewRecord(BatchUpdateTypeChannelUsedQuota, key, value)
+				}
 			}
 		}
 	}
@@ -120,7 +131,21 @@ func batchUpdate() {
 		userIDs[key] = struct{}{}
 	}
 	for key := range userIDs {
-		updateUserQuotaUsedQuotaAndRequestCount(key, userQuotaStore[key], usedQuotaStore[key], requestCountStore[key])
+		quota := userQuotaStore[key]
+		usedQuota := usedQuotaStore[key]
+		requestCount := requestCountStore[key]
+		if err := updateUserQuotaUsedQuotaAndRequestCount(key, quota, usedQuota, requestCount); err != nil {
+			common.SysError(fmt.Sprintf("failed to batch update user accounting: user_id=%d quota_delta=%d used_quota_delta=%d request_count_delta=%d error=%v", key, quota, usedQuota, requestCount, err))
+			if quota != 0 {
+				addNewRecord(BatchUpdateTypeUserQuota, key, quota)
+			}
+			if usedQuota != 0 {
+				addNewRecord(BatchUpdateTypeUsedQuota, key, usedQuota)
+			}
+			if requestCount != 0 {
+				addNewRecord(BatchUpdateTypeRequestCount, key, requestCount)
+			}
+		}
 	}
 	common.SysLog("batch update finished")
 }

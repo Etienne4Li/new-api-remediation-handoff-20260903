@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/stretchr/testify/require"
 )
@@ -41,20 +42,11 @@ func testConn(t *testing.T) net.Conn {
 
 func configureSSRFTestFetchSetting(t *testing.T) {
 	t.Helper()
-	fetchSetting := system_setting.GetFetchSetting()
-	original := *fetchSetting
+	original := system_setting.GetFetchSetting()
 	t.Cleanup(func() {
-		*fetchSetting = original
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"fetch_setting.enable_ssrf_protection": fmt.Sprintf("%t", original.EnableSSRFProtection), "fetch_setting.allow_private_ip": fmt.Sprintf("%t", original.AllowPrivateIp), "fetch_setting.domain_filter_mode": fmt.Sprintf("%t", original.DomainFilterMode), "fetch_setting.ip_filter_mode": fmt.Sprintf("%t", original.IpFilterMode), "fetch_setting.domain_list": "[]", "fetch_setting.ip_list": "[]", "fetch_setting.allowed_ports": `["80","443"]`, "fetch_setting.apply_ip_filter_for_domain": fmt.Sprintf("%t", original.ApplyIPFilterForDomain)})
 	})
-
-	fetchSetting.EnableSSRFProtection = true
-	fetchSetting.AllowPrivateIp = false
-	fetchSetting.DomainFilterMode = false
-	fetchSetting.IpFilterMode = false
-	fetchSetting.DomainList = nil
-	fetchSetting.IpList = nil
-	fetchSetting.AllowedPorts = []string{"80", "443"}
-	fetchSetting.ApplyIPFilterForDomain = true
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"fetch_setting.enable_ssrf_protection": "true", "fetch_setting.allow_private_ip": "false", "fetch_setting.domain_filter_mode": "false", "fetch_setting.ip_filter_mode": "false", "fetch_setting.domain_list": "[]", "fetch_setting.ip_list": "[]", "fetch_setting.allowed_ports": `["80","443"]`, "fetch_setting.apply_ip_filter_for_domain": "true"}))
 }
 
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
@@ -195,17 +187,16 @@ func TestProtectedFetchDialerSkipsResolvedIPCheckWhenDisabled(t *testing.T) {
 }
 
 func TestGetSSRFProtectedHTTPClientFallsBackToDefaultClientWhenProtectionDisabled(t *testing.T) {
-	fetchSetting := system_setting.GetFetchSetting()
-	originalFetchSetting := *fetchSetting
+	originalFetchSetting := *system_setting.GetFetchSetting()
 	originalHTTPClient := httpClient
 	originalProtectedClient := ssrfProtectedHTTPClient
 	t.Cleanup(func() {
-		*fetchSetting = originalFetchSetting
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"fetch_setting.enable_ssrf_protection": fmt.Sprintf("%t", originalFetchSetting.EnableSSRFProtection)})
 		httpClient = originalHTTPClient
 		ssrfProtectedHTTPClient = originalProtectedClient
 	})
 
-	fetchSetting.EnableSSRFProtection = false
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"fetch_setting.enable_ssrf_protection": "false"}))
 	expected := &http.Client{}
 	httpClient = expected
 	ssrfProtectedHTTPClient = &http.Client{}

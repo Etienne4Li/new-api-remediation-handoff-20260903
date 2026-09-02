@@ -26,6 +26,24 @@ var diskCacheConfig = DiskCacheConfig{
 }
 var diskCacheConfigMu sync.RWMutex
 
+const maxDiskCacheBytes = int64(^uint64(0) >> 1)
+
+// diskCacheMBToBytes converts an operator-provided MiB value without allowing
+// signed shifts to wrap.  Zero/negative values retain the historical
+// "disabled/always eligible" semantics of the individual setting, while an
+// overflowing positive value is clamped to the largest representable byte
+// count and therefore fails closed in availability checks.
+func diskCacheMBToBytes(megabytes int) int64 {
+	mb := int64(megabytes)
+	if mb <= 0 {
+		return 0
+	}
+	if mb > maxDiskCacheBytes>>20 {
+		return maxDiskCacheBytes
+	}
+	return mb << 20
+}
+
 // GetDiskCacheConfig 获取磁盘缓存配置
 func GetDiskCacheConfig() DiskCacheConfig {
 	diskCacheConfigMu.RLock()
@@ -51,14 +69,14 @@ func IsDiskCacheEnabled() bool {
 func GetDiskCacheThresholdBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.ThresholdMB) << 20
+	return diskCacheMBToBytes(diskCacheConfig.ThresholdMB)
 }
 
 // GetDiskCacheMaxSizeBytes 获取磁盘缓存最大大小（字节）
 func GetDiskCacheMaxSizeBytes() int64 {
 	diskCacheConfigMu.RLock()
 	defer diskCacheConfigMu.RUnlock()
-	return int64(diskCacheConfig.MaxSizeMB) << 20
+	return diskCacheMBToBytes(diskCacheConfig.MaxSizeMB)
 }
 
 // GetDiskCachePath 获取磁盘缓存目录
@@ -168,10 +186,21 @@ func SyncDiskCacheStats() {
 
 // IsDiskCacheAvailable 检查是否可以创建新的磁盘缓存
 func IsDiskCacheAvailable(requestSize int64) bool {
-	if !IsDiskCacheEnabled() {
+	if !IsDiskCacheEnabled() || requestSize < 0 {
 		return false
 	}
 	maxBytes := GetDiskCacheMaxSizeBytes()
+	if maxBytes <= 0 {
+		return false
+	}
 	currentUsage := atomic.LoadInt64(&diskCacheStats.CurrentDiskUsageBytes)
-	return currentUsage+requestSize <= maxBytes
+	// Avoid currentUsage+requestSize: both values are externally influenced
+	// (request sizes and persisted cache accounting), so their sum can wrap
+	// negative and incorrectly report space as available.  Treat a corrupt
+	// negative/over-limit usage counter as unavailable and compare by
+	// subtraction instead.
+	if currentUsage < 0 || currentUsage > maxBytes {
+		return false
+	}
+	return requestSize <= maxBytes-currentUsage
 }

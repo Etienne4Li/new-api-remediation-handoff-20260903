@@ -16,12 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
 
-import { formatTimestampToDate } from '@/lib/format'
 
-import { getNameRuleConfig, getQuotaTypeConfig } from '../constants'
-import type { NameRule, Model } from '../types'
+
+
+
+import type { Model } from '../types'
 
 // ============================================================================
 // Time Formatting
@@ -30,31 +30,30 @@ import type { NameRule, Model } from '../types'
 /**
  * Format timestamp to standard date string (YYYY-MM-DD HH:mm:ss)
  */
-export function formatTimestamp(timestamp: number): string {
-  if (!timestamp || timestamp === 0) return '-'
-  return formatTimestampToDate(timestamp)
-}
 
 /**
  * Format relative time
  */
-export function formatRelativeTime(timestamp: number): string {
-  if (!timestamp || timestamp === 0) return 'Never'
 
-  const now = Date.now()
-  const time = timestamp * 1000
-  const diff = now - time
+// ============================================================================
+// Tags Parsing
+// ============================================================================
 
-  const seconds = Math.floor(diff / 1000)
-  const minutes = Math.floor(seconds / 60)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
+/**
+ * Parse tags string to array
+ */
 
-  if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`
-  if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`
-  if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`
-  return `${seconds} second${seconds !== 1 ? 's' : ''} ago`
-}
+// ============================================================================
+// Time Formatting
+// ============================================================================
+
+/**
+ * Format timestamp to standard date string (YYYY-MM-DD HH:mm:ss)
+ */
+
+/**
+ * Format relative time
+ */
 
 // ============================================================================
 // Tags Parsing
@@ -74,9 +73,6 @@ export function parseModelTags(tags: string | undefined): string[] {
 /**
  * Format tags array to string
  */
-export function formatTagsString(tags: string[]): string {
-  return tags.join(',')
-}
 
 // ============================================================================
 // Endpoints Parsing
@@ -85,7 +81,7 @@ export function formatTagsString(tags: string[]): string {
 /**
  * Parse endpoints JSON string
  */
-export function parseEndpoints(
+function parseEndpoints(
   endpoints: string | undefined
 ): Record<string, unknown> | unknown[] | null {
   if (!endpoints || endpoints.trim() === '') return null
@@ -124,18 +120,10 @@ export function formatEndpointsDisplay(
 /**
  * Get name rule label
  */
-export function getNameRuleLabelByRule(rule: NameRule, t: TFunction): string {
-  const config = getNameRuleConfig(t)
-  return config[rule]?.label || '-'
-}
 
 /**
  * Get name rule config by rule
  */
-export function getNameRuleConfigByRule(rule: NameRule, t: TFunction) {
-  const config = getNameRuleConfig(t)
-  return config[rule] || config[0]
-}
 
 // ============================================================================
 // Quota Type Utils
@@ -144,14 +132,6 @@ export function getNameRuleConfigByRule(rule: NameRule, t: TFunction) {
 /**
  * Format quota types array
  */
-export function formatQuotaTypes(
-  quotaTypes: number[] | undefined,
-  t: TFunction
-): string {
-  if (!quotaTypes || quotaTypes.length === 0) return '-'
-  const config = getQuotaTypeConfig(t)
-  return quotaTypes.map((qt) => config[qt]?.label || String(qt)).join(', ')
-}
 
 // ============================================================================
 // Model Validation
@@ -160,23 +140,10 @@ export function formatQuotaTypes(
 /**
  * Validate model name
  */
-export function validateModelName(name: string): boolean {
-  return name.trim().length > 0
-}
 
 /**
  * Validate endpoints JSON
  */
-export function validateEndpointsJSON(endpoints: string): boolean {
-  if (!endpoints || endpoints.trim() === '') return true
-
-  try {
-    JSON.parse(endpoints)
-    return true
-  } catch {
-    return false
-  }
-}
 
 // ============================================================================
 // Model Status Utils
@@ -192,6 +159,3 @@ export function isModelEnabled(model: Model): boolean {
 /**
  * Check if model syncs with official
  */
-export function isModelSyncOfficial(model: Model): boolean {
-  return model.sync_official === 1
-}

@@ -2,7 +2,9 @@ package common
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -12,6 +14,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRelayInfoToStringSanitizesRequestAndBaseURL(t *testing.T) {
+	info := &RelayInfo{
+		RequestURLPath: "/v1/chat/completions?key=upstream-secret&model=gpt-test",
+		ChannelMeta: &ChannelMeta{
+			ChannelBaseUrl: "https://user:password@example.test/v1?api_key=base-secret",
+		},
+	}
+
+	got := info.ToString()
+	if strings.Contains(got, "upstream-secret") || strings.Contains(got, "base-secret") || strings.Contains(got, "password") {
+		t.Fatalf("RelayInfo.ToString leaked credential: %s", got)
+	}
+	if !strings.Contains(got, "key=hash%3A") {
+		t.Fatalf("expected request query metadata in output: %s", got)
+	}
+	if !strings.Contains(got, "BaseURL: \"https://example.test/v1?api_key=%2A%2A%2Amasked%2A%2A%2A\"") {
+		t.Fatalf("expected sanitized base URL in output: %s", got)
+	}
+}
 
 func TestRelayInfoGetFinalRequestRelayFormatPrefersExplicitFinal(t *testing.T) {
 	info := &RelayInfo{
@@ -43,6 +65,23 @@ func TestRelayInfoGetFinalRequestRelayFormatFallsBackToRelayFormat(t *testing.T)
 func TestRelayInfoGetFinalRequestRelayFormatNilReceiver(t *testing.T) {
 	var info *RelayInfo
 	require.Equal(t, types.RelayFormat(""), info.GetFinalRequestRelayFormat())
+}
+
+func TestInitChannelMetaClearsRuntimeHeaderOverridesBetweenAttempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &RelayInfo{
+		RuntimeHeadersOverride:    map[string]interface{}{"x-first-channel": "stale"},
+		UseRuntimeHeadersOverride: true,
+		ParamOverrideAudit:        []string{"stale first-channel override"},
+	}
+
+	info.InitChannelMeta(c)
+
+	assert.Nil(t, info.RuntimeHeadersOverride)
+	assert.False(t, info.UseRuntimeHeadersOverride)
+	assert.Nil(t, info.ParamOverrideAudit)
 }
 
 func TestRelayInfoMetaTypedNilReceiver(t *testing.T) {

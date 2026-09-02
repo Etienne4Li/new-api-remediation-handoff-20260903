@@ -1,0 +1,7 @@
+Realtime handler fixed in relay/channel/openai/relay_realtime.go.
+
+- Added synchronized realtimeUsageAccumulator for usage/localUsage/sumUsage; readers wait before final snapshots and socket close unblocks both readers.
+- Guarded RelayInfo mutable realtime fields with infoMu while counting/pre-consuming.
+- Added realtimeResponseUsage nil-safe extraction for response.done with missing response.
+- Added tests in relay/channel/openai/relay_realtime_usage_test.go for concurrent accumulation, nil response, and zero-total dimensions.
+- Validation: gofmt; go test ./relay/channel/openai -count=1; go test -race ./relay/channel/openai -run 'Realtime|realtime' -count=1.

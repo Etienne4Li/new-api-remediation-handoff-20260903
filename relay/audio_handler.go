@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -41,7 +42,7 @@ func AudioHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	ioReader, err := adaptor.ConvertAudioRequest(c, info, *request)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		return requestConversionError(err)
 	}
 
 	resp, err := adaptor.DoRequest(c, info, ioReader)
@@ -52,13 +53,27 @@ func AudioHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	var httpResp *http.Response
 	if resp != nil {
-		httpResp = resp.(*http.Response)
+		var contractErr *types.NewAPIError
+		httpResp, contractErr = requireHTTPResponse(resp)
+		if contractErr != nil {
+			return contractErr
+		}
 		if httpResp.StatusCode != http.StatusOK {
 			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
 			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 			return newAPIError
 		}
+	} else if !(info.RelayMode == relayconstant.RelayModeAudioSpeech && info.IsStream) {
+		// Volcengine's native streaming TTS opens its WebSocket from
+		// DoResponse and intentionally returns no HTTP response. Every other
+		// audio path must return a concrete response before billing.
+		return types.NewErrorWithStatusCode(
+			errors.New("adaptor returned empty HTTP response"),
+			types.ErrorCodeBadResponse,
+			http.StatusInternalServerError,
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
@@ -67,10 +82,15 @@ func AudioHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	if usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0 {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
+	if usageDto.CompletionTokenDetails.AudioTokens > 0 || usageDto.PromptTokensDetails.AudioTokens > 0 {
+		service.PostAudioConsumeQuota(c, info, usageDto, "")
 	} else {
-		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 
 	return nil

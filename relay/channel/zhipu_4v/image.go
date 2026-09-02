@@ -1,7 +1,6 @@
 package zhipu_4v
 
 import (
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -55,7 +54,7 @@ type openAIImageData struct {
 }
 
 func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
@@ -99,7 +98,7 @@ func zhipu4vImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		default:
 			_, downloaded, err := service.GetImageFromUrl(url)
 			if err != nil {
-				logger.LogError(c, "zhipu_image_get_b64_failed: "+err.Error())
+				logger.LogError(c, "zhipu_image_get_b64_failed error_meta="+common.SensitiveLogMeta(err.Error()))
 				continue
 			}
 			b64 = downloaded

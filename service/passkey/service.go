@@ -25,7 +25,7 @@ func BuildWebAuthn(r *http.Request) (*webauthn.WebAuthn, error) {
 
 	displayName := strings.TrimSpace(settings.RPDisplayName)
 	if displayName == "" {
-		displayName = common.SystemName
+		displayName = common.GetSystemName()
 	}
 
 	origins, err := resolveOrigins(r, settings)
@@ -74,6 +74,7 @@ func BuildWebAuthn(r *http.Request) (*webauthn.WebAuthn, error) {
 }
 
 func resolveOrigins(r *http.Request, settings *system_setting.PasskeySettings) ([]string, error) {
+	systemConfig := system_setting.GetRuntimeConfig()
 	originsStr := strings.TrimSpace(settings.Origins)
 	if originsStr != "" {
 		originList := strings.Split(originsStr, ",")
@@ -104,8 +105,8 @@ autoDetect:
 	host := r.Host
 
 	// 如果无法从请求获取Host，尝试从ServerAddress获取
-	if host == "" && system_setting.ServerAddress != "" {
-		if parsed, err := url.Parse(system_setting.ServerAddress); err == nil && parsed.Host != "" {
+	if host == "" && systemConfig.ServerAddress != "" {
+		if parsed, err := url.Parse(systemConfig.ServerAddress); err == nil && parsed.Host != "" {
 			host = parsed.Host
 			if scheme == "" && parsed.Scheme != "" {
 				scheme = parsed.Scheme
@@ -113,7 +114,7 @@ autoDetect:
 		}
 	}
 	if host == "" {
-		return nil, fmt.Errorf("无法确定 Passkey 的 Origin，请在系统设置或 Passkey 设置中指定。当前 Host: '%s', ServerAddress: '%s'", r.Host, system_setting.ServerAddress)
+		return nil, fmt.Errorf("无法确定 Passkey 的 Origin，请在系统设置或 Passkey 设置中指定。当前 Host: '%s', ServerAddress: '%s'", r.Host, systemConfig.ServerAddress)
 	}
 	if scheme == "" {
 		scheme = "https"

@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,6 +45,19 @@ type UserOAuthBindingResponse struct {
 	ProviderSlug   string `json:"provider_slug"`
 	ProviderIcon   string `json:"provider_icon"`
 	ProviderUserId string `json:"provider_user_id"`
+}
+
+// AdminUserOAuthBindingResponse intentionally omits provider_user_id.  An
+// external identity is a stable account identifier and should not be exposed
+// to administrators merely to render whether a binding exists.  The admin UI
+// only needs provider metadata and the bound/unbound state in order to offer
+// the unbind action.
+type AdminUserOAuthBindingResponse struct {
+	ProviderId   int    `json:"provider_id"`
+	ProviderName string `json:"provider_name"`
+	ProviderSlug string `json:"provider_slug"`
+	ProviderIcon string `json:"provider_icon"`
+	IsBound      bool   `json:"is_bound"`
 }
 
 func toCustomOAuthProviderResponse(p *model.CustomOAuthProvider) *CustomOAuthProviderResponse {
@@ -138,6 +152,8 @@ type FetchCustomOAuthDiscoveryRequest struct {
 	IssuerURL    string `json:"issuer_url"`
 }
 
+const maxCustomOAuthDiscoveryBodyBytes int64 = 1 << 20
+
 // FetchCustomOAuthDiscovery fetches OIDC discovery document via backend (root-only route)
 func FetchCustomOAuthDiscovery(c *gin.Context) {
 	var req FetchCustomOAuthDiscoveryRequest
@@ -165,6 +181,15 @@ func FetchCustomOAuthDiscovery(c *gin.Context) {
 		common.ApiErrorMsg(c, "Discovery URL 无效，仅支持 http/https")
 		return
 	}
+	// Discovery URLs are administrator-supplied but still untrusted network
+	// targets.  Route both the preflight check and the actual request through
+	// the shared SSRF policy so this endpoint cannot reach loopback, metadata,
+	// private-link, or other blocked addresses.  The protected client also
+	// re-checks redirects and the resolved IP immediately before dialing.
+	if err := service.ValidateSSRFProtectedFetchURL(targetURL); err != nil {
+		common.ApiErrorMsg(c, "Discovery URL 被安全策略阻止")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
@@ -176,13 +201,24 @@ func FetchCustomOAuthDiscovery(c *gin.Context) {
 	}
 	httpReq.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := service.GetSSRFProtectedHTTPClient()
+	if client == nil {
+		// The production bootstrap always initializes the protected client.  A
+		// nil value indicates an incomplete runtime setup; fail closed rather
+		// than falling back to an unprotected http.Client.
+		common.ApiErrorMsg(c, "Discovery 服务暂时不可用")
+		return
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		common.ApiErrorMsg(c, "获取 Discovery 配置失败: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
+	if resp.ContentLength > maxCustomOAuthDiscoveryBodyBytes {
+		common.ApiErrorMsg(c, "Discovery 配置响应过大")
+		return
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -194,8 +230,20 @@ func FetchCustomOAuthDiscovery(c *gin.Context) {
 		return
 	}
 
+	// Bound the body even when the server omits Content-Length or uses chunked
+	// transfer encoding; otherwise an admin-triggerable endpoint could be used
+	// as an unbounded memory sink.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCustomOAuthDiscoveryBodyBytes+1))
+	if readErr != nil {
+		common.ApiErrorMsg(c, "读取 Discovery 配置失败")
+		return
+	}
+	if int64(len(body)) > maxCustomOAuthDiscoveryBodyBytes {
+		common.ApiErrorMsg(c, "Discovery 配置响应过大")
+		return
+	}
 	var discovery map[string]any
-	if err = common.DecodeJson(resp.Body, &discovery); err != nil {
+	if err = common.Unmarshal(body, &discovery); err != nil {
 		common.ApiErrorMsg(c, "解析 Discovery 配置失败: "+err.Error())
 		return
 	}
@@ -465,6 +513,32 @@ func buildUserOAuthBindingsResponse(userId int) ([]UserOAuthBindingResponse, err
 	return response, nil
 }
 
+func buildAdminUserOAuthBindingsResponse(userId int) ([]AdminUserOAuthBindingResponse, error) {
+	bindings, err := model.GetUserOAuthBindingsByUserId(userId)
+	if err != nil {
+		return nil, err
+	}
+
+	response := make([]AdminUserOAuthBindingResponse, 0, len(bindings))
+	for _, binding := range bindings {
+		provider, err := model.GetCustomOAuthProviderById(binding.ProviderId)
+		if err != nil {
+			// Keep the same behavior as the self endpoint for providers removed
+			// out-of-band: do not expose an orphaned identity identifier.
+			continue
+		}
+		response = append(response, AdminUserOAuthBindingResponse{
+			ProviderId:   binding.ProviderId,
+			ProviderName: provider.Name,
+			ProviderSlug: provider.Slug,
+			ProviderIcon: provider.Icon,
+			IsBound:      true,
+		})
+	}
+
+	return response, nil
+}
+
 // GetUserOAuthBindings returns all OAuth bindings for the current user
 func GetUserOAuthBindings(c *gin.Context) {
 	userId := c.GetInt("id")
@@ -506,7 +580,7 @@ func GetUserOAuthBindingsByAdmin(c *gin.Context) {
 		return
 	}
 
-	response, err := buildUserOAuthBindingsResponse(userId)
+	response, err := buildAdminUserOAuthBindingsResponse(userId)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -517,6 +591,34 @@ func GetUserOAuthBindingsByAdmin(c *gin.Context) {
 		"message": "",
 		"data":    response,
 	})
+}
+
+// GetUserBindingStatusByAdmin returns redacted built-in binding state for the
+// administrator UI.  Provider account identifiers are intentionally never
+// included; the separate custom-binding endpoint above follows the same rule.
+func GetUserBindingStatusByAdmin(c *gin.Context) {
+	userId, err := strconv.Atoi(c.Param("id"))
+	if err != nil || userId <= 0 {
+		common.ApiErrorMsg(c, "invalid user id")
+		return
+	}
+
+	targetUser, err := model.GetUserByIdForAdmin(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !canManageTargetRole(c.GetInt("role"), targetUser.Role) {
+		common.ApiErrorMsg(c, "no permission")
+		return
+	}
+
+	status, err := model.GetUserBindingStatus(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, status)
 }
 
 // UnbindCustomOAuth unbinds a custom OAuth provider from the current user

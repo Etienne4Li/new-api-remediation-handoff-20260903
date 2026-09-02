@@ -2,8 +2,10 @@ package sora
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -82,6 +84,9 @@ func validateRemixRequest(c *gin.Context) *dto.TaskError {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return service.TaskErrorWrapperLocal(fmt.Errorf("field prompt is required"), "invalid_request", http.StatusBadRequest)
 	}
+	if taskErr := relaycommon.ValidateTaskDurationBounds(req); taskErr != nil {
+		return taskErr
+	}
 	// 存储原始请求到 context，与 ValidateMultipartDirect 路径保持一致
 	c.Set("task_request", req)
 	return nil
@@ -106,12 +111,18 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 		return nil
 	}
 
-	seconds, _ := strconv.Atoi(req.Seconds)
-	if seconds == 0 {
+	seconds, err := strconv.Atoi(strings.TrimSpace(req.Seconds))
+	if err != nil || seconds <= 0 {
 		seconds = req.Duration
 	}
 	if seconds <= 0 {
 		seconds = 4
+	}
+	// Keep this billing path defensive when called outside the normal request
+	// validator (e.g. retries or direct tests). The same bound is enforced by
+	// ValidateTaskDurationBounds before submission.
+	if seconds > relaycommon.MaxTaskDurationSeconds {
+		seconds = relaycommon.MaxTaskDurationSeconds
 	}
 
 	size := req.Size
@@ -157,6 +168,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if strings.HasPrefix(contentType, "application/json") {
 		var bodyMap map[string]interface{}
 		if err := common.Unmarshal(cachedBody, &bodyMap); err == nil {
+			stripSoraCallbackFields(bodyMap)
 			bodyMap["model"] = info.UpstreamModelName
 			if newBody, err := common.Marshal(bodyMap); err == nil {
 				return bytes.NewReader(newBody), nil
@@ -168,55 +180,144 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if strings.Contains(contentType, "multipart/form-data") {
 		formData, err := common.ParseMultipartFormReusable(c)
 		if err != nil {
-			return bytes.NewReader(cachedBody), nil
+			return nil, fmt.Errorf("parse multipart form failed: %w", err)
 		}
 		var buf bytes.Buffer
 		writer := multipart.NewWriter(&buf)
-		writer.WriteField("model", info.UpstreamModelName)
+		if err := writer.WriteField("model", info.UpstreamModelName); err != nil {
+			return nil, fmt.Errorf("write model field failed: %w", err)
+		}
 		for key, values := range formData.Value {
-			if key == "model" {
+			if key == "model" || isSoraCallbackField(key) {
 				continue
 			}
 			for _, v := range values {
 				writer.WriteField(key, v)
 			}
 		}
+		var totalFileBytes int64
 		for fieldName, fileHeaders := range formData.File {
+			// Sora currently accepts only the input_reference media field. Do
+			// not blindly proxy arbitrary multipart files or their caller-supplied
+			// headers into the upstream request.
+			if fieldName != "input_reference" {
+				return nil, fmt.Errorf("unsupported multipart file field %q", fieldName)
+			}
 			for _, fh := range fileHeaders {
+				if fh == nil {
+					return nil, errors.New("input_reference file is missing")
+				}
+				maxFileBytes := common.GetMaxFileDownloadBytes()
+				if fh.Size < 0 || fh.Size > maxFileBytes || totalFileBytes > maxFileBytes-fh.Size {
+					return nil, fmt.Errorf("input_reference file exceeds maximum allowed size of %d bytes", maxFileBytes)
+				}
 				f, err := fh.Open()
 				if err != nil {
-					continue
+					return nil, fmt.Errorf("open input_reference file failed: %w", err)
 				}
-				ct := fh.Header.Get("Content-Type")
-				if ct == "" || ct == "application/octet-stream" {
-					buf512 := make([]byte, 512)
-					n, _ := io.ReadFull(f, buf512)
-					ct = http.DetectContentType(buf512[:n])
-					// Re-open after sniffing so the full content is copied below
-					f.Close()
-					f, err = fh.Open()
-					if err != nil {
-						continue
+				fileBytes, readErr := common.ReadBodyLimited(f, fh.Size, maxFileBytes)
+				_ = f.Close()
+				if readErr != nil {
+					if errors.Is(readErr, common.ErrRequestBodyTooLarge) {
+						return nil, fmt.Errorf("input_reference file exceeds maximum allowed size of %d bytes", maxFileBytes)
 					}
+					return nil, fmt.Errorf("read input_reference file failed: %w", readErr)
 				}
+				ct, mimeErr := resolveSoraUploadMIME(fileBytes)
+				if mimeErr != nil {
+					return nil, mimeErr
+				}
+				totalFileBytes += int64(len(fileBytes))
+				filename := "input_reference." + soraMIMEExtension(ct)
 				h := make(textproto.MIMEHeader)
-				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, fh.Filename))
+				disposition := mime.FormatMediaType("form-data", map[string]string{
+					"name":     fieldName,
+					"filename": filename,
+				})
+				if disposition == "" {
+					return nil, errors.New("format multipart disposition failed")
+				}
+				h.Set("Content-Disposition", disposition)
 				h.Set("Content-Type", ct)
 				part, err := writer.CreatePart(h)
 				if err != nil {
-					f.Close()
-					continue
+					return nil, fmt.Errorf("create input_reference part failed: %w", err)
 				}
-				io.Copy(part, f)
-				f.Close()
+				if _, err := part.Write(fileBytes); err != nil {
+					return nil, fmt.Errorf("write input_reference part failed: %w", err)
+				}
 			}
 		}
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("close multipart writer failed: %w", err)
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		return &buf, nil
 	}
 
 	return common.NewReplayableBodyReader(storage), nil
+}
+
+// isSoraCallbackField recognizes callback URL aliases regardless of case or
+// whether the provider-facing name uses an underscore or hyphen separator.
+func isSoraCallbackField(key string) bool {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", "")
+	return strings.EqualFold(normalized, "callbackurl")
+}
+
+// stripSoraCallbackFields removes provider callback controls from arbitrary
+// JSON objects, including nested metadata, before the request is forwarded.
+func stripSoraCallbackFields(value any) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, child := range typed {
+			if isSoraCallbackField(key) {
+				delete(typed, key)
+				continue
+			}
+			stripSoraCallbackFields(child)
+		}
+	case []interface{}:
+		for _, child := range typed {
+			stripSoraCallbackFields(child)
+		}
+	}
+}
+
+// resolveSoraUploadMIME derives a safe media type from the uploaded bytes.
+// Sora input_reference accepts either an image or a video; declarations in the
+// multipart header and filename are intentionally ignored.
+func resolveSoraUploadMIME(data []byte) (string, error) {
+	if mimeType, err := service.ResolveImageMIME(data); err == nil {
+		return mimeType, nil
+	}
+	if mimeType := service.SniffVideoMIME(data); service.IsSafeVideoMIME(mimeType) {
+		return mimeType, nil
+	}
+	return "", fmt.Errorf("unsupported input_reference media type")
+}
+
+func soraMIMEExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "video/mp4":
+		return "mp4"
+	case "video/quicktime":
+		return "mov"
+	case "video/webm":
+		return "webm"
+	case "video/mpeg":
+		return "mpeg"
+	default:
+		return "media"
+	}
 }
 
 // DoRequest delegates to common helper.
@@ -226,7 +327,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -236,7 +337,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	// Parse Sora response
 	var dResp responseTask
 	if err := common.Unmarshal(responseBody, &dResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body_meta: %s", common.SensitiveLogBody(responseBody)), "unmarshal_response_body_failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -258,14 +359,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 // FetchTask fetch task status
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
 	}
+	escapedTaskID, err := taskcommon.EscapeTaskIDPathSegment(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task_id: %w", err)
+	}
 
-	uri := fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
+	uri := fmt.Sprintf("%s/v1/videos/%s", strings.TrimRight(baseUrl, "/"), escapedTaskID)
 
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +407,10 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 
 	taskResult := relaycommon.TaskInfo{
 		Code: 0,
+	}
+	taskResult.TaskID = resTask.ID
+	if taskResult.TaskID == "" {
+		taskResult.TaskID = resTask.TaskID
 	}
 
 	switch resTask.Status {

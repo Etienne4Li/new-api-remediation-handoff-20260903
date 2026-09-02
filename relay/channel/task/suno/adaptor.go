@@ -2,6 +2,7 @@ package suno
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -93,7 +94,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *dto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -105,7 +106,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 	if !sunoResponse.IsSuccess() {
-		taskErr = service.TaskErrorWrapper(fmt.Errorf("%s", sunoResponse.Message), sunoResponse.Code, http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("suno upstream task error: code=%s message_meta=%s", sunoResponse.Code, common.SensitiveLogMeta(sunoResponse.Message)), sunoResponse.Code, http.StatusInternalServerError)
 		return
 	}
 
@@ -129,15 +130,22 @@ func (a *TaskAdaptor) GetChannelName() string {
 }
 
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	requestUrl := fmt.Sprintf("%s/suno/fetch", baseUrl)
 	byteBody, err := common.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", requestUrl, bytes.NewBuffer(byteBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestUrl, bytes.NewBuffer(byteBody))
 	if err != nil {
-		common.SysLog(fmt.Sprintf("Get Task error: %v", err))
+		common.SysLog(fmt.Sprintf("Get Task request construction failed url_meta=%s error_meta=%s", common.SensitiveLogMeta(requestUrl), common.SensitiveLogMeta(err.Error())))
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")

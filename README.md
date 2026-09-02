@@ -122,6 +122,13 @@ nano docker-compose.yml
 docker-compose up -d
 ```
 
+> **生产部署提示：** `docker-compose.yml` 是兼容性的快速开始示例，包含
+> 开发用默认凭据，不能直接暴露到公网。生产环境请先阅读
+> [`docs/deployment/secure-compose.md`](docs/deployment/secure-compose.md)，使用
+> `docker-compose.secure.yml`：它要求锁定镜像 digest、Docker secrets、Redis
+> ACL/持久化/内存上限、内部数据网络、非 root 容器、健康检查和有界日志保留。
+> 启动前运行 `scripts/verify-secure-compose.sh`，并按文档配置反向代理的默认站点拒绝规则。
+
 <details>
 <summary><strong>Using Docker Commands</strong></summary>
 
@@ -315,17 +322,28 @@ docker run --name new-api -d --restart always \
 | Variable Name | Description | Default Value |
 |--------|------|--------|
 | `SESSION_SECRET` | Authentication signing secret; must be identical on every node | - |
+| `SESSION_SECRET_FILE` | File containing the authentication signing secret; takes precedence over `SESSION_SECRET` | - |
 | `SESSION_COOKIE_SECURE` | `false`/unset disables the refresh/logout OriginGuard for local HTTP dev proxies; `true` enables the Secure cookie and strict Origin checks | `false` |
 | `SESSION_COOKIE_TRUSTED_URL` | Required with Secure mode: comma-separated exact HTTPS Origins allowed to call refresh/logout; not a relay CORS allowlist | - |
-| `TRUSTED_PROXIES` | Unset/blank trusts loopback, RFC 1918 and IPv6 ULA with a startup warning; `none` trusts no proxies; an explicit proxy IP/CIDR list replaces the defaults | `127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` |
+| `CORS_ALLOWED_ORIGINS` | Exact browser API CORS origins, comma-separated; empty means same-origin only; wildcards, paths, and suffix matching are not accepted | - |
+| `CORS_ALLOW_CREDENTIALS` | Allow whitelisted origins to send cookies/HTTP credentials | `true` |
+| `SECURITY_HEADERS_HSTS` | Global HSTS switch; defaults on for non-localhost/IP hosts when unset | automatic |
+| `SECURITY_HEADERS_HSTS_MAX_AGE` | HSTS `max-age` in seconds | `31536000` |
+| `SECURITY_HEADERS_HSTS_INCLUDE_SUBDOMAINS` | Include subdomains in HSTS policy | `false` |
+| `SECURITY_HEADERS_HSTS_PRELOAD` | Add HSTS preload directive | `false` |
+| `TRUSTED_PROXIES` | Unset/blank uses the TCP peer only and emits a startup warning; `none` is the same strict mode; an explicit IP/CIDR list replaces the defaults (the edge must clear and rebuild `X-Forwarded-For`) | empty (direct-peer mode) |
 | `USER_SESSION_ACTIVE_LIMIT` | Maximum active login Sessions per user | `50` |
 | `USER_SESSION_ISSUANCE_LIMIT` | Maximum Sessions created per user within the issuance window, including revoked Sessions | `100` |
 | `USER_SESSION_ISSUANCE_WINDOW_SECONDS` | Per-user Session issuance window; clamped to the revoked retention period when configured higher | `86400` |
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | Days to retain revoked Session rows for audit and issuance accounting | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | Global Sessions created per hour that triggers an alert only; it never blocks login | `5000` |
-| `CRYPTO_SECRET` | HMAC secret for cache keys; nodes sharing Redis must use the same effective value | Defaults to `SESSION_SECRET` |
+| `CRYPTO_SECRET` | Durable root key for credentials encrypted at rest, fingerprints, and cache HMACs; all nodes sharing a database must use the same non-rotating value | Defaults to `SESSION_SECRET` |
+| `CRYPTO_SECRET_FILE` | File containing the durable credential/cache root key; takes precedence over `CRYPTO_SECRET` | - |
 | `SQL_DSN` | Database connection string | - |
+| `SQL_DSN_FILE` | File containing the database connection string; takes precedence over `SQL_DSN` (recommended for Docker/Kubernetes secrets) | - |
+| `LOG_SQL_DSN_FILE` | File containing the log database connection string; takes precedence over `LOG_SQL_DSN` | - |
 | `REDIS_CONN_STRING` | Redis connection string | - |
+| `REDIS_CONN_STRING_FILE` | File containing the Redis connection string; takes precedence over `REDIS_CONN_STRING` | - |
 | `RELAY_IDLE_CONN_TIMEOUT` | Idle keep-alive timeout for relay HTTP clients, seconds. Defaults to Go standard library behavior; set `0` to disable | `90` |
 | `STREAMING_TIMEOUT` | Streaming timeout (seconds) | `300` |
 | `STREAM_SCANNER_MAX_BUFFER_MB` | Max per-line buffer (MB) for the stream scanner; increase when upstream sends huge image/base64 payloads | `64` |
@@ -406,7 +424,7 @@ docker run --name new-api -d --restart always \
 
 > [!WARNING]
 > - All nodes must use the same primary database and the same `SESSION_SECRET`; otherwise Access Tokens, refresh sessions, and temporary authentication flows cannot be verified consistently.
-> - Nodes connected to the same Redis must also use the same `CRYPTO_SECRET`, or their cache-key digests will differ and shared entries cannot be reused consistently.
+> - Nodes sharing a database must keep the same `CRYPTO_SECRET`; it protects encrypted credentials and fingerprints in addition to cache-key digests. Do not replace it on an existing database without an explicit re-encryption migration.
 
 The database is authoritative for login Sessions and for the per-user active/issuance limits. Redis Session entries are short-lived caches whose TTL follows `SYNC_FREQUENCY` (60 seconds by default) and never exceeds the Session's remaining lifetime.
 

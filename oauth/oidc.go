@@ -2,13 +2,13 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -49,22 +49,32 @@ func (p *OIDCProvider) IsEnabled() bool {
 }
 
 func (p *OIDCProvider) ExchangeToken(ctx context.Context, code string, c *gin.Context) (*OAuthToken, error) {
+	return p.ExchangeTokenWithVerifier(ctx, code, "", c)
+}
+
+func (p *OIDCProvider) ExchangeTokenWithVerifier(ctx context.Context, code, codeVerifier string, c *gin.Context) (*OAuthToken, error) {
 	if code == "" {
 		return nil, NewOAuthError(i18n.MsgOAuthInvalidCode, nil)
 	}
 
-	logger.LogDebug(ctx, "[OAuth-OIDC] ExchangeToken: code=%s...", code[:min(len(code), 10)])
+	logger.LogDebug(ctx, "[OAuth-OIDC] ExchangeToken: code_meta=%s", common.SensitiveLogMeta(code))
 
 	settings := system_setting.GetOIDCSettings()
-	redirectUri := fmt.Sprintf("%s/oauth/oidc", system_setting.ServerAddress)
+	redirectUri := fmt.Sprintf("%s/oauth/oidc", system_setting.GetServerAddress())
+	if flowRedirectURI := RedirectURIFromContext(ctx); flowRedirectURI != "" {
+		redirectUri = flowRedirectURI
+	}
 	values := url.Values{}
 	values.Set("client_id", settings.ClientId)
 	values.Set("client_secret", settings.ClientSecret)
 	values.Set("code", code)
 	values.Set("grant_type", "authorization_code")
 	values.Set("redirect_uri", redirectUri)
+	if codeVerifier != "" {
+		values.Set("code_verifier", codeVerifier)
+	}
 
-	logger.LogDebug(ctx, "[OAuth-OIDC] ExchangeToken: token_endpoint=%s, redirect_uri=%s", settings.TokenEndpoint, redirectUri)
+	logger.LogDebug(ctx, "[OAuth-OIDC] ExchangeToken: token_endpoint_meta=%s, redirect_uri_meta=%s", common.SensitiveLogMeta(settings.TokenEndpoint), common.SensitiveLogMeta(redirectUri))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", settings.TokenEndpoint, strings.NewReader(values.Encode()))
 	if err != nil {
@@ -73,20 +83,18 @@ func (p *OIDCProvider) ExchangeToken(ctx context.Context, code string, c *gin.Co
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := newOAuthHTTPClient(5 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] ExchangeToken error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "OIDC"}, err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] ExchangeToken error_meta=%s", common.SensitiveLogMeta(err.Error())))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "OIDC"}, common.SensitiveLogMeta(err.Error()))
 	}
 	defer res.Body.Close()
 
 	logger.LogDebug(ctx, "[OAuth-OIDC] ExchangeToken response status: %d", res.StatusCode)
 
 	var oidcResponse oidcOAuthResponse
-	err = json.NewDecoder(res.Body).Decode(&oidcResponse)
+	err = decodeOAuthJSONResponse(res, &oidcResponse)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] ExchangeToken decode error: %s", err.Error()))
 		return nil, err
@@ -112,7 +120,7 @@ func (p *OIDCProvider) ExchangeToken(ctx context.Context, code string, c *gin.Co
 func (p *OIDCProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAuthUser, error) {
 	settings := system_setting.GetOIDCSettings()
 
-	logger.LogDebug(ctx, "[OAuth-OIDC] GetUserInfo: userinfo_endpoint=%s", settings.UserInfoEndpoint)
+	logger.LogDebug(ctx, "[OAuth-OIDC] GetUserInfo: userinfo_endpoint_meta=%s", common.SensitiveLogMeta(settings.UserInfoEndpoint))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", settings.UserInfoEndpoint, nil)
 	if err != nil {
@@ -120,13 +128,11 @@ func (p *OIDCProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAu
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := newOAuthHTTPClient(5 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] GetUserInfo error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "OIDC"}, err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] GetUserInfo error_meta=%s", common.SensitiveLogMeta(err.Error())))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "OIDC"}, common.SensitiveLogMeta(err.Error()))
 	}
 	defer res.Body.Close()
 
@@ -138,7 +144,7 @@ func (p *OIDCProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAu
 	}
 
 	var oidcUser oidcUser
-	err = json.NewDecoder(res.Body).Decode(&oidcUser)
+	err = decodeOAuthJSONResponse(res, &oidcUser)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-OIDC] GetUserInfo decode error: %s", err.Error()))
 		return nil, err

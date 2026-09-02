@@ -1,10 +1,9 @@
 package siliconflow
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -14,27 +13,27 @@ import (
 )
 
 func siliconflowRerankHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
 	var siliconflowResp SFRerankResponse
-	err = json.Unmarshal(responseBody, &siliconflowResp)
+	err = common.Unmarshal(responseBody, &siliconflowResp)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	usage := &dto.Usage{
-		PromptTokens:     siliconflowResp.Meta.Tokens.InputTokens,
-		CompletionTokens: siliconflowResp.Meta.Tokens.OutputTokens,
-		TotalTokens:      siliconflowResp.Meta.Tokens.InputTokens + siliconflowResp.Meta.Tokens.OutputTokens,
+		PromptTokens:     common.SaturatingAddNonNegativeInt(siliconflowResp.Meta.Tokens.InputTokens),
+		CompletionTokens: common.SaturatingAddNonNegativeInt(siliconflowResp.Meta.Tokens.OutputTokens),
 	}
+	usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	rerankResp := &dto.RerankResponse{
 		Results: siliconflowResp.Results,
 		Usage:   *usage,
 	}
 
-	jsonResponse, err := json.Marshal(rerankResp)
+	jsonResponse, err := common.Marshal(rerankResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}

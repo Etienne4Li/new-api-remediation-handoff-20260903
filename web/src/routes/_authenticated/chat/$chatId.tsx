@@ -17,13 +17,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Link, createFileRoute, redirect } from '@tanstack/react-router'
-import { Loader2, MessageCircleWarning } from 'lucide-react'
+import { MessageCircleWarning } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { useActiveChatKey } from '@/features/chat/hooks/use-active-chat-key'
 import { useChatPresets } from '@/features/chat/hooks/use-chat-presets'
 import {
   chatLinkRequiresApiKey,
@@ -51,27 +50,22 @@ function ChatRouteComponent() {
 
   const isWebLink = preset?.type === 'web'
 
-  const requiresActiveKey = useMemo(() => {
+  const requiresApiKey = useMemo(() => {
     if (!preset || !isWebLink) return false
     return chatLinkRequiresApiKey(preset.url ?? '')
   }, [isWebLink, preset])
 
-  const {
-    data: activeKey,
-    isPending,
-    isError,
-    error,
-  } = useActiveChatKey(Boolean(preset && requiresActiveKey))
-
   const iframeSrc = useMemo(() => {
     if (!preset || !isWebLink) return ''
-    if (requiresActiveKey && !activeKey) return ''
+    // Web presets that contain a key placeholder or literal credential are
+    // intentionally blocked by resolveChatUrl. This route never needs to
+    // fetch a long-lived token merely to render a third-party iframe.
+    if (requiresApiKey) return ''
     return resolveChatUrl({
       template: preset.url,
-      apiKey: requiresActiveKey ? activeKey : undefined,
       serverAddress,
     })
-  }, [activeKey, isWebLink, preset, requiresActiveKey, serverAddress])
+  }, [isWebLink, preset, requiresApiKey, serverAddress])
 
   if (!preset) {
     return (
@@ -112,33 +106,22 @@ function ChatRouteComponent() {
     )
   }
 
-  if (requiresActiveKey && isPending) {
-    return (
-      <div className='flex h-full flex-col items-center justify-center gap-4'>
-        <Loader2 className='text-muted-foreground h-8 w-8 animate-spin' />
-        <p className='text-muted-foreground text-sm'>
-          {t('Preparing your chat link…')}
-        </p>
-      </div>
-    )
-  }
-
-  if (requiresActiveKey && (isError || !activeKey || !iframeSrc)) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : 'Unable to generate chat link. Please check your API keys.'
+  if (requiresApiKey) {
     return (
       <div className='flex h-full flex-col items-center justify-center p-6'>
         <Alert variant='destructive' className='max-w-xl'>
           <AlertTitle>{t('Unable to open chat')}</AlertTitle>
-          <AlertDescription>{message}</AlertDescription>
+          <AlertDescription>
+            {t(
+              'For security, chat links that include an API key are disabled.'
+            )}
+          </AlertDescription>
         </Alert>
       </div>
     )
   }
 
-  if (!requiresActiveKey && !iframeSrc) {
+  if (!iframeSrc) {
     return (
       <div className='flex h-full flex-col items-center justify-center p-6'>
         <Alert variant='destructive' className='max-w-xl'>
@@ -158,7 +141,11 @@ function ChatRouteComponent() {
       src={iframeSrc}
       key={iframeSrc}
       className='h-full w-full border-0'
-      allow='camera; microphone'
+      referrerPolicy='no-referrer'
+      // Keep third-party pages in an opaque origin. In particular, do not pair
+      // allow-scripts with allow-same-origin: that combination lets a same-
+      // origin page remove its own sandbox and reach the console context.
+      sandbox='allow-forms allow-popups allow-popups-to-escape-sandbox allow-scripts'
       title={`Chat preset: ${preset.name}`}
     />
   )

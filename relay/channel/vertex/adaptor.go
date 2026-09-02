@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 
@@ -104,8 +105,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIAudio))
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
@@ -260,6 +260,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			Size:   "1024x1024",
 		}
 		if request.N != nil && *request.N > 0 {
+			if *request.N > dto.MaxImageN {
+				return nil, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxImageN)
+			}
 			imgReq.N = lo.ToPtr(uint(*request.N))
 		}
 		if request.Size != "" {
@@ -269,6 +272,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			var extra map[string]any
 			if err := common.Unmarshal(request.ExtraBody, &extra); err == nil {
 				if n, ok := extra["n"].(float64); ok && n > 0 {
+					if n > dto.MaxImageN || n != math.Trunc(n) {
+						return nil, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxImageN)
+					}
 					imgReq.N = lo.ToPtr(uint(n))
 				}
 				if size, ok := extra["size"].(string); ok {
@@ -319,17 +325,15 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, nil
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatEmbedding))
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	// TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

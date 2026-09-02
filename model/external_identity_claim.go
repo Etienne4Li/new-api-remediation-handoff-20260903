@@ -10,7 +10,42 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const ExternalIdentityProviderTelegram = "telegram"
+const (
+	ExternalIdentityProviderGitHub   = "github"
+	ExternalIdentityProviderDiscord  = "discord"
+	ExternalIdentityProviderOIDC     = "oidc"
+	ExternalIdentityProviderWeChat   = "wechat"
+	ExternalIdentityProviderTelegram = "telegram"
+	ExternalIdentityProviderLinuxDO  = "linuxdo"
+)
+
+// externalIdentityColumns is the compatibility map for built-in providers.
+// Keep the users-table column names in one place so every write path uses the
+// same durable claim key and startup backfill cannot silently omit a provider.
+var externalIdentityColumns = []struct {
+	provider string
+	column   string
+}{
+	{ExternalIdentityProviderGitHub, "github_id"},
+	{ExternalIdentityProviderDiscord, "discord_id"},
+	{ExternalIdentityProviderOIDC, "oidc_id"},
+	{ExternalIdentityProviderWeChat, "wechat_id"},
+	{ExternalIdentityProviderTelegram, "telegram_id"},
+	{ExternalIdentityProviderLinuxDO, "linux_do_id"},
+}
+
+// ExternalIdentityProviderForColumn returns the durable claim namespace for a
+// built-in provider binding column. Custom OAuth providers store their IDs in
+// user_oauth_bindings and therefore have no users-table column.
+func ExternalIdentityProviderForColumn(column string) (string, bool) {
+	column = strings.TrimSpace(column)
+	for _, identity := range externalIdentityColumns {
+		if identity.column == column {
+			return identity.provider, true
+		}
+	}
+	return "", false
+}
 
 var ErrExternalIdentityAlreadyClaimed = errors.New("external identity is already claimed")
 
@@ -83,19 +118,40 @@ func releaseAllExternalIdentitiesWithTx(tx *gorm.DB, userId int) error {
 	return tx.Where("user_id = ?", userId).Delete(&ExternalIdentityClaim{}).Error
 }
 
-// InitializeExternalIdentityClaims imports legacy Telegram bindings after the
-// claim table is migrated. Existing duplicate ownership fails migration rather
-// than preserving an ambiguous login identity.
+// InitializeExternalIdentityClaims imports legacy built-in provider bindings
+// after the claim table is migrated. Existing duplicate ownership fails
+// migration rather than preserving an ambiguous login identity.
 func InitializeExternalIdentityClaims() error {
+	selectColumns := []string{"id"}
+	identityPredicates := make([]string, 0, len(externalIdentityColumns))
+	for _, identity := range externalIdentityColumns {
+		selectColumns = append(selectColumns, identity.column)
+		// COALESCE handles legacy nullable columns consistently across all
+		// supported SQL dialects.
+		identityPredicates = append(identityPredicates, fmt.Sprintf("COALESCE(%s, '') <> ''", identity.column))
+	}
 	var users []User
-	if err := DB.Unscoped().Select("id", "telegram_id").
-		Where("telegram_id <> ?", "").Find(&users).Error; err != nil {
+	if err := DB.Unscoped().Select(selectColumns).
+		Where(strings.Join(identityPredicates, " OR ")).
+		Order("id ASC").Find(&users).Error; err != nil {
 		return err
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		for _, user := range users {
-			if err := ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderTelegram, user.TelegramId, user.Id); err != nil {
-				return fmt.Errorf("backfill Telegram identity for user %d: %w", user.Id, err)
+			values := map[string]string{
+				"github_id":   user.GitHubId,
+				"discord_id":  user.DiscordId,
+				"oidc_id":     user.OidcId,
+				"wechat_id":   user.WeChatId,
+				"telegram_id": user.TelegramId,
+				"linux_do_id": user.LinuxDOId,
+			}
+			for _, identity := range externalIdentityColumns {
+				if subject := strings.TrimSpace(values[identity.column]); subject != "" {
+					if err := ClaimExternalIdentityWithTx(tx, identity.provider, subject, user.Id); err != nil {
+						return fmt.Errorf("backfill %s identity for user %d: %w", identity.provider, user.Id, err)
+					}
+				}
 			}
 		}
 		return nil

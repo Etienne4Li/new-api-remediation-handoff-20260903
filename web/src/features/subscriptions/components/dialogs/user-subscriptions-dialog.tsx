@@ -154,9 +154,15 @@ export function UserSubscriptionsDialog(props: Props) {
   }, [props.user?.id, t])
 
   useEffect(() => {
-    if (props.open && props.user?.id) {
+    if (!props.open || !props.user?.id) return
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (cancelled) return
       setSelectedPlanId('')
-      loadData()
+      void loadData()
+    })
+    return () => {
+      cancelled = true
     }
   }, [props.open, props.user?.id, loadData])
 

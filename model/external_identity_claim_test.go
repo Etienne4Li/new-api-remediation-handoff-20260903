@@ -60,6 +60,25 @@ func TestClearTelegramBindingReleasesIdentityClaim(t *testing.T) {
 	assert.Zero(t, count)
 }
 
+func TestClearBuiltInBindingReleasesIdentityClaim(t *testing.T) {
+	truncateTables(t)
+
+	user := User{Username: "github-unbind", Password: "password", GitHubId: "github-unbind-id"}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, user.GitHubId, user.Id)
+	}))
+
+	require.NoError(t, user.ClearBinding("github"))
+	assert.Empty(t, user.GitHubId)
+
+	var count int64
+	require.NoError(t, DB.Model(&ExternalIdentityClaim{}).
+		Where("provider = ? AND user_id = ?", ExternalIdentityProviderGitHub, user.Id).
+		Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestInitializeExternalIdentityClaimsIsIdempotent(t *testing.T) {
 	truncateTables(t)
 
@@ -72,6 +91,49 @@ func TestInitializeExternalIdentityClaimsIsIdempotent(t *testing.T) {
 	require.NoError(t, DB.Where("provider = ? AND subject = ?", ExternalIdentityProviderTelegram, user.TelegramId).
 		First(&claim).Error)
 	assert.Equal(t, user.Id, claim.UserId)
+}
+
+func TestInitializeExternalIdentityClaimsBackfillsEveryBuiltInProvider(t *testing.T) {
+	truncateTables(t)
+
+	user := User{
+		Username:   "all-provider-identities",
+		Password:   "password",
+		GitHubId:   "github-id",
+		DiscordId:  "discord-id",
+		OidcId:     "oidc-id",
+		WeChatId:   "wechat-id",
+		TelegramId: "telegram-id",
+		LinuxDOId:  "linuxdo-id",
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, InitializeExternalIdentityClaims())
+
+	var claims []ExternalIdentityClaim
+	require.NoError(t, DB.Order("provider ASC").Find(&claims).Error)
+	require.Len(t, claims, 6)
+	want := map[string]string{
+		ExternalIdentityProviderGitHub:   "github-id",
+		ExternalIdentityProviderDiscord:  "discord-id",
+		ExternalIdentityProviderOIDC:     "oidc-id",
+		ExternalIdentityProviderWeChat:   "wechat-id",
+		ExternalIdentityProviderTelegram: "telegram-id",
+		ExternalIdentityProviderLinuxDO:  "linuxdo-id",
+	}
+	for _, claim := range claims {
+		assert.Equal(t, user.Id, claim.UserId)
+		assert.Equal(t, want[claim.Provider], claim.Subject)
+	}
+}
+
+func TestExternalIdentityProviderForColumn(t *testing.T) {
+	for _, identity := range externalIdentityColumns {
+		provider, ok := ExternalIdentityProviderForColumn(identity.column)
+		assert.True(t, ok)
+		assert.Equal(t, identity.provider, provider)
+	}
+	_, ok := ExternalIdentityProviderForColumn("provider_user_id")
+	assert.False(t, ok)
 }
 
 func TestInitializeExternalIdentityClaimsRejectsAmbiguousLegacyBindings(t *testing.T) {

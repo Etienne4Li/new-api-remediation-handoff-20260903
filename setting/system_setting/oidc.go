@@ -1,7 +1,9 @@
 package system_setting
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/setting/config"
 )
@@ -19,6 +21,9 @@ type OIDCSettings struct {
 
 // 默认配置
 var defaultOIDCSettings = OIDCSettings{}
+var oidcSettingsMu sync.RWMutex
+
+type oidcSettingsFields OIDCSettings
 
 func init() {
 	// 注册到全局配置管理器
@@ -26,7 +31,43 @@ func init() {
 }
 
 func GetOIDCSettings() *OIDCSettings {
-	return &defaultOIDCSettings
+	oidcSettingsMu.RLock()
+	defer oidcSettingsMu.RUnlock()
+	settings := defaultOIDCSettings
+	return &settings
+}
+
+func (s *OIDCSettings) ConfigSnapshot() interface{} {
+	if s == nil {
+		return OIDCSettings{}
+	}
+	oidcSettingsMu.RLock()
+	defer oidcSettingsMu.RUnlock()
+	return *s
+}
+
+func (s *OIDCSettings) ValidateConfigMap(values map[string]string) error {
+	if s == nil {
+		return config.ValidateConfigFromMap(&OIDCSettings{}, values)
+	}
+	oidcSettingsMu.RLock()
+	staged := oidcSettingsFields(*s)
+	oidcSettingsMu.RUnlock()
+	return config.ValidateConfigFromMap(&staged, values)
+}
+
+func (s *OIDCSettings) UpdateConfigMap(values map[string]string) error {
+	if s == nil {
+		return fmt.Errorf("oidc settings must not be nil")
+	}
+	oidcSettingsMu.Lock()
+	defer oidcSettingsMu.Unlock()
+	staged := oidcSettingsFields(*s)
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	*s = OIDCSettings(staged)
+	return nil
 }
 
 // GetEffectiveDisplayName returns the admin-configured display name, or the

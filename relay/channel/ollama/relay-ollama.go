@@ -2,7 +2,6 @@ package ollama
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -309,7 +308,7 @@ func requestOpenAI2Embeddings(r dto.EmbeddingRequest) *OllamaEmbeddingRequest {
 
 func ollamaEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	var oResp OllamaEmbeddingResponse
-	body, err := io.ReadAll(resp.Body)
+	body, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -318,7 +317,7 @@ func ollamaEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	if oResp.Error != "" {
-		return nil, types.NewOpenAIError(fmt.Errorf("ollama error: %s", oResp.Error), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		return nil, types.NewOpenAIError(fmt.Errorf("ollama upstream error: message_meta=%s", common.SensitiveLogMeta(oResp.Error)), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	data := make([]dto.OpenAIEmbeddingResponseItem, 0, len(oResp.Embeddings))
 	for i, emb := range oResp.Embeddings {
@@ -334,10 +333,13 @@ func ollamaEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 func FetchOllamaModels(baseURL, apiKey string) ([]OllamaModel, error) {
 	url := fmt.Sprintf("%s/api/tags", baseURL)
 
-	client := &http.Client{}
+	client, err := service.GetHttpClientWithProxy("")
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
+	}
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %v", err)
+		return nil, fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	// Ollama 通常不需要 Bearer token，但为了兼容性保留
@@ -347,24 +349,24 @@ func FetchOllamaModels(baseURL, apiKey string) ([]OllamaModel, error) {
 
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %v", err)
+		return nil, fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("服务器返回错误 %d: %s", response.StatusCode, string(body))
+		body, _ := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
+		return nil, fmt.Errorf("服务器返回错误 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 	}
 
 	var tagsResponse OllamaTagsResponse
-	body, err := io.ReadAll(response.Body)
+	body, err := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %v", err)
+		return nil, fmt.Errorf("读取响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	err = common.Unmarshal(body, &tagsResponse)
 	if err != nil {
-		return nil, fmt.Errorf("解析响应失败: %v", err)
+		return nil, fmt.Errorf("解析响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	return tagsResponse.Models, nil
@@ -381,15 +383,18 @@ func PullOllamaModel(baseURL, apiKey, modelName string) error {
 
 	requestBody, err := common.Marshal(pullRequest)
 	if err != nil {
-		return fmt.Errorf("序列化请求失败: %v", err)
+		return fmt.Errorf("序列化请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
-	client := &http.Client{
-		Timeout: 30 * 60 * 1000 * time.Millisecond, // 30分钟超时，支持大模型
+	baseClient, err := service.GetHttpClientWithProxy("")
+	if err != nil {
+		return fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
+	client := *baseClient
+	client.Timeout = 30 * 60 * 1000 * time.Millisecond // 30分钟超时，支持大模型
 	request, err := http.NewRequest("POST", url, strings.NewReader(string(requestBody)))
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	request.Header.Set("Content-Type", "application/json")
@@ -399,13 +404,13 @@ func PullOllamaModel(baseURL, apiKey, modelName string) error {
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("请求失败: %v", err)
+		return fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("拉取模型失败 %d: %s", response.StatusCode, string(body))
+		body, _ := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
+		return fmt.Errorf("拉取模型失败 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 	}
 
 	return nil
@@ -422,15 +427,18 @@ func PullOllamaModelStream(baseURL, apiKey, modelName string, progressCallback f
 
 	requestBody, err := common.Marshal(pullRequest)
 	if err != nil {
-		return fmt.Errorf("序列化请求失败: %v", err)
+		return fmt.Errorf("序列化请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
-	client := &http.Client{
-		Timeout: 60 * 60 * 1000 * time.Millisecond, // 1小时超时，支持超大模型
+	baseClient, err := service.GetHttpClientWithProxy("")
+	if err != nil {
+		return fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
+	client := *baseClient
+	client.Timeout = 60 * 60 * 1000 * time.Millisecond // 1小时超时，支持超大模型
 	request, err := http.NewRequest("POST", url, strings.NewReader(string(requestBody)))
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	request.Header.Set("Content-Type", "application/json")
@@ -440,13 +448,13 @@ func PullOllamaModelStream(baseURL, apiKey, modelName string, progressCallback f
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("请求失败: %v", err)
+		return fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("拉取模型失败 %d: %s", response.StatusCode, string(body))
+		body, _ := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
+		return fmt.Errorf("拉取模型失败 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 	}
 
 	// 读取流式响应
@@ -469,7 +477,7 @@ func PullOllamaModelStream(baseURL, apiKey, modelName string, progressCallback f
 
 		// 检查是否出现错误或完成
 		if strings.EqualFold(pullResponse.Status, "error") {
-			return fmt.Errorf("拉取模型失败: %s", strings.TrimSpace(line))
+			return fmt.Errorf("拉取模型失败: response_meta=%s", common.SensitiveLogBody([]byte(line)))
 		}
 		if strings.EqualFold(pullResponse.Status, "success") {
 			successful = true
@@ -478,7 +486,7 @@ func PullOllamaModelStream(baseURL, apiKey, modelName string, progressCallback f
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取流式响应失败: %v", err)
+		return fmt.Errorf("读取流式响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	if !successful {
@@ -498,13 +506,16 @@ func DeleteOllamaModel(baseURL, apiKey, modelName string) error {
 
 	requestBody, err := common.Marshal(deleteRequest)
 	if err != nil {
-		return fmt.Errorf("序列化请求失败: %v", err)
+		return fmt.Errorf("序列化请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
-	client := &http.Client{}
+	client, err := service.GetHttpClientWithProxy("")
+	if err != nil {
+		return fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
+	}
 	request, err := http.NewRequest("DELETE", url, strings.NewReader(string(requestBody)))
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	request.Header.Set("Content-Type", "application/json")
@@ -514,13 +525,13 @@ func DeleteOllamaModel(baseURL, apiKey, modelName string) error {
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("请求失败: %v", err)
+		return fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("删除模型失败 %d: %s", response.StatusCode, string(body))
+		body, _ := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
+		return fmt.Errorf("删除模型失败 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 	}
 
 	return nil
@@ -534,10 +545,15 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 
 	url := fmt.Sprintf("%s/api/version", trimmedBase)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	baseClient, err := service.GetHttpClientWithProxy("")
+	if err != nil {
+		return "", fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
+	}
+	client := *baseClient
+	client.Timeout = 10 * time.Second
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %v", err)
+		return "", fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	if apiKey != "" {
@@ -546,17 +562,17 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 
 	response, err := client.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("请求失败: %v", err)
+		return "", fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 	defer response.Body.Close()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
-		return "", fmt.Errorf("读取响应失败: %v", err)
+		return "", fmt.Errorf("读取响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("查询版本失败 %d: %s", response.StatusCode, string(body))
+		return "", fmt.Errorf("查询版本失败 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 	}
 
 	var versionResp struct {
@@ -564,7 +580,7 @@ func FetchOllamaVersion(baseURL, apiKey string) (string, error) {
 	}
 
 	if err := common.Unmarshal(body, &versionResp); err != nil {
-		return "", fmt.Errorf("解析响应失败: %v", err)
+		return "", fmt.Errorf("解析响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	if versionResp.Version == "" {

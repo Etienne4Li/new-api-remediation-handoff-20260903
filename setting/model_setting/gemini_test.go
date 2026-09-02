@@ -69,6 +69,34 @@ func TestGeminiSafetySettingsReadNormalization(t *testing.T) {
 	}
 }
 
+func TestSettingsGettersDoNotExposeMutableStorage(t *testing.T) {
+	claude := GetClaudeSettings()
+	claude.DefaultMaxTokens["default"] = 1
+	claude.HeadersSettings["model"] = map[string][]string{"x": {"secret"}}
+	if got := GetClaudeSettings().DefaultMaxTokens["default"]; got != 8192 {
+		t.Fatalf("claude map leaked: %d", got)
+	}
+	if _, ok := GetClaudeSettings().HeadersSettings["model"]; ok {
+		t.Fatal("claude headers leaked")
+	}
+
+	gemini := GetGeminiSettings()
+	gemini.VersionSettings["default"] = "bad"
+	gemini.SupportedImagineModels[0] = "bad"
+	if got := GetGeminiVersionSetting("default"); got == "bad" {
+		t.Fatal("gemini map leaked")
+	}
+	if IsGeminiModelSupportImagine("bad") {
+		t.Fatal("gemini slice leaked")
+	}
+
+	global := GetGlobalSettings()
+	global.ThinkingModelBlacklist[0] = "bad"
+	if ShouldPreserveThinkingSuffix("bad") {
+		t.Fatal("global slice leaked")
+	}
+}
+
 func TestValidateGeminiSafetySettings(t *testing.T) {
 	valid := []string{
 		`{}`,

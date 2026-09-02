@@ -29,6 +29,7 @@ import type {
   ManageUserAction,
   ManageUserQuotaPayload,
   ApiResponse,
+  AdminUserBindingStatus,
 } from './types'
 
 // ============================================================================
@@ -114,7 +115,7 @@ export async function updateUser(
  * Delete a single user (hard delete)
  */
 export async function deleteUser(id: number): Promise<ApiResponse> {
-  const res = await api.delete(`/api/user/${id}/`)
+  const res = await api.delete(`/api/user/${id}`)
   return res.data
 }
 
@@ -186,6 +187,17 @@ export async function getUserOAuthBindings(
   userId: number
 ): Promise<ApiResponse<CustomOAuthBinding[]>> {
   const res = await api.get(`/api/user/${userId}/oauth/bindings`)
+  return res.data
+}
+
+/**
+ * Get redacted built-in binding state for an administrator. Provider account
+ * identifiers are intentionally not returned by this endpoint.
+ */
+export async function getUserBindingStatus(
+  userId: number
+): Promise<ApiResponse<AdminUserBindingStatus>> {
+  const res = await api.get(`/api/user/${userId}/binding-status`)
   return res.data
 }
 

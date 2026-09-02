@@ -74,21 +74,33 @@ func (m *RWMap[K, V]) Len() int {
 }
 
 func LoadFromJsonString[K comparable, V any](m *RWMap[K, V], jsonStr string) error {
+	// Decode into an isolated map first.  The previous implementation cleared
+	// the live map before parsing, so a malformed option could erase a valid
+	// pricing/quota configuration even though the update was rejected.  Swap
+	// only after a successful decode to make updates fail-closed and atomic for
+	// readers.
+	decoded := make(map[K]V)
+	if err := common.Unmarshal([]byte(jsonStr), &decoded); err != nil {
+		return err
+	}
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.data = make(map[K]V)
-	return common.Unmarshal([]byte(jsonStr), &m.data)
+	m.data = decoded
+	m.mutex.Unlock()
+	return nil
 }
 
 func LoadFromJsonStringWithCallback[K comparable, V any](m *RWMap[K, V], jsonStr string, onSuccess func()) error {
+	decoded := make(map[K]V)
+	if err := common.Unmarshal([]byte(jsonStr), &decoded); err != nil {
+		return err
+	}
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.data = make(map[K]V)
-	err := common.Unmarshal([]byte(jsonStr), &m.data)
-	if err == nil && onSuccess != nil {
+	m.data = decoded
+	m.mutex.Unlock()
+	if onSuccess != nil {
 		onSuccess()
 	}
-	return err
+	return nil
 }
 
 func (m *RWMap[K, V]) MarshalJSONString() string {

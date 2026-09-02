@@ -17,12 +17,13 @@ import (
 // relay routes.
 func SessionCookieOriginGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !common.SessionCookieSecure {
+		cookieConfig := common.GetSessionCookieConfig()
+		if !cookieConfig.Secure {
 			c.Next()
 			return
 		}
 		origin, ok := requestBrowserOrigin(c.Request)
-		if !ok || !isAllowedSessionOrigin(c.Request, origin) {
+		if !ok || !isAllowedSessionOriginWithTrustedURLs(c.Request, origin, cookieConfig.TrustedURLs) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"success": false,
 				"code":    "AUTH_ORIGIN_FORBIDDEN",
@@ -58,7 +59,14 @@ func requestBrowserOrigin(request *http.Request) (string, bool) {
 	return origin, err == nil
 }
 
+// isAllowedSessionOrigin is retained for package-level callers and tests that
+// use the historical helper signature. It takes one coherent policy snapshot
+// before delegating to the request-local implementation used by the guard.
 func isAllowedSessionOrigin(request *http.Request, origin string) bool {
+	return isAllowedSessionOriginWithTrustedURLs(request, origin, common.GetSessionCookieConfig().TrustedURLs)
+}
+
+func isAllowedSessionOriginWithTrustedURLs(request *http.Request, origin string, trustedURLs []string) bool {
 	requestScheme := "http"
 	if request.TLS != nil {
 		requestScheme = "https"
@@ -67,7 +75,7 @@ func isAllowedSessionOrigin(request *http.Request, origin string) bool {
 	if err == nil && subtle.ConstantTimeCompare([]byte(origin), []byte(requestOrigin)) == 1 {
 		return true
 	}
-	for _, trustedOrigin := range common.SessionCookieTrustedURLs {
+	for _, trustedOrigin := range trustedURLs {
 		if subtle.ConstantTimeCompare([]byte(origin), []byte(trustedOrigin)) == 1 {
 			return true
 		}

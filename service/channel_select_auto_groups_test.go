@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -64,9 +65,8 @@ func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 	return db
 }
 
-func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, group, modelName string) {
+func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, group, modelName string, priority int64) {
 	t.Helper()
-	priority := int64(0)
 	weight := uint(100)
 	require.NoError(t, db.Create(&model.Channel{
 		Id:       id,
@@ -92,8 +92,8 @@ func createChannelSelectAutoGroupsChannel(t *testing.T, db *gorm.DB, id int, gro
 func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(t *testing.T) {
 	db := setupChannelSelectAutoGroupsTest(t)
 	const modelName = "auto-groups-runtime-model"
-	createChannelSelectAutoGroupsChannel(t, db, 2101, "vip", modelName)
-	createChannelSelectAutoGroupsChannel(t, db, 2102, "default", modelName)
+	createChannelSelectAutoGroupsChannel(t, db, 2101, "vip", modelName, 0)
+	createChannelSelectAutoGroupsChannel(t, db, 2102, "default", modelName, 0)
 	model.InitChannelCache()
 
 	gin.SetMode(gin.TestMode)
@@ -126,4 +126,98 @@ func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(
 	assert.Equal(t, 2102, second.Id)
 	assert.Equal(t, "default", selectedGroup)
 	assert.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+}
+
+func TestCacheGetRandomSatisfiedChannelExcludesFailedChannelOnRetry(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	const modelName = "retry-excludes-failed-channel"
+	createChannelSelectAutoGroupsChannel(t, db, 2201, "default", modelName, 10)
+	createChannelSelectAutoGroupsChannel(t, db, 2202, "default", modelName, 10)
+	createChannelSelectAutoGroupsChannel(t, db, 2203, "default", modelName, 0)
+	model.InitChannelCache()
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	retry := 0
+	param := &RetryParam{
+		Ctx:         ctx,
+		TokenGroup:  "default",
+		ModelName:   modelName,
+		RequestPath: "/v1/responses",
+		Retry:       &retry,
+	}
+
+	first, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.Equal(t, int64(10), first.GetPriority())
+
+	param.ExcludeChannel(first.Id, false)
+	param.IncreaseRetry()
+	second, _, err := CacheGetRandomSatisfiedChannel(param)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.NotEqual(t, first.Id, second.Id)
+	assert.Equal(t, int64(10), second.GetPriority())
+}
+
+func TestCacheGetRandomSatisfiedChannelPropagatesAutoGroupLookupError(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	common.MemoryCacheEnabled = false
+	// The service package's test main does not initialize model's quoted
+	// column names. InitLogDB performs that initialization while reusing this
+	// test database (and the environment override prevents opening an external
+	// log database if one is configured on the host).
+	originalLogDB := model.LOG_DB
+	originalLogDatabaseType := common.LogDatabaseType()
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitLogDB())
+	t.Cleanup(func() {
+		model.LOG_DB = originalLogDB
+		common.SetLogDatabaseType(originalLogDatabaseType)
+	})
+	const modelName = "auto-groups-capability-lookup-error"
+	createChannelSelectAutoGroupsChannel(t, db, 2301, "default", modelName, 0)
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"default"})
+	retry := 0
+	param := &RetryParam{
+		Ctx:         ctx,
+		TokenGroup:  "auto",
+		ModelName:   modelName,
+		RequestPath: "/v1/messages",
+		Retry:       &retry,
+	}
+
+	forcedErr := errors.New("forced auto-group capability lookup failure")
+	channelLookups := 0
+	const callbackName = "test:fail_auto_group_capability_lookup"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement != nil && strings.Trim(tx.Statement.Table, "`\"") == "channels" {
+			channelLookups++
+			if channelLookups == 1 {
+				tx.AddError(forcedErr)
+			}
+		}
+	}))
+	t.Cleanup(func() {
+		_ = db.Callback().Query().Remove(callbackName)
+	})
+
+	selected, selectedGroup, err := CacheGetRandomSatisfiedChannel(param)
+	require.ErrorIs(t, err, forcedErr)
+	require.Nil(t, selected)
+	assert.Equal(t, "auto", selectedGroup)
+	assert.Equal(t, 1, channelLookups)
+}
+
+func TestRetryParamKeepsMultiKeyChannelEligible(t *testing.T) {
+	param := &RetryParam{}
+
+	param.ExcludeChannel(2204, true)
+
+	assert.Empty(t, param.excludedChannelIDs)
 }

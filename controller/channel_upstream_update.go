@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,6 +32,7 @@ const (
 	channelUpstreamModelUpdateTaskDefaultIntervalMinutes  = 30
 	channelUpstreamModelUpdateTaskBatchSize               = 100
 	channelUpstreamModelUpdateMinCheckIntervalSeconds     = 300
+	maxChannelUpstreamModelUpdateMinCheckIntervalSeconds  = 30 * 24 * 60 * 60
 	channelUpstreamModelUpdateNotifySuppressWindowSeconds = 86400
 	channelUpstreamModelUpdateNotifyMaxChannelDetails     = 8
 	channelUpstreamModelUpdateNotifyMaxModelDetails       = 12
@@ -44,6 +44,8 @@ var channelUpstreamModelUpdateSelectFields = []string{
 	"name",
 	"type",
 	"key",
+	"key_ciphertext",
+	"key_hash",
 	"status",
 	"base_url",
 	"models",
@@ -252,14 +254,12 @@ func collectPendingUpstreamModelChanges(channel *model.Channel, settings dto.Cha
 }
 
 func getUpstreamModelUpdateMinCheckIntervalSeconds() int64 {
-	interval := int64(common.GetEnvOrDefault(
+	return int64(common.GetEnvOrDefaultBounded(
 		"CHANNEL_UPSTREAM_MODEL_UPDATE_MIN_CHECK_INTERVAL_SECONDS",
 		channelUpstreamModelUpdateMinCheckIntervalSeconds,
+		0,
+		maxChannelUpstreamModelUpdateMinCheckIntervalSeconds,
 	))
-	if interval < 0 {
-		return channelUpstreamModelUpdateMinCheckIntervalSeconds
-	}
-	return interval
 }
 
 func parseOpenAIModelIDs(body []byte) ([]string, error) {
@@ -357,7 +357,7 @@ func getFetchModelsResponseBody(method string, requestURL string, channel *model
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code: %d", response.StatusCode)
 	}
-	return io.ReadAll(response.Body)
+	return service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
 }
 
 func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {

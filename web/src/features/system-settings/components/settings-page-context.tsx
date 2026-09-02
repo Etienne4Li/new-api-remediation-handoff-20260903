@@ -22,7 +22,6 @@ import {
   useContext,
   type ComponentProps,
   type ReactNode,
-  type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
@@ -109,7 +108,6 @@ type SettingsPageFormActionsProps = {
   savingLabel?: string
   resetLabel?: string
   resetVariant?: ComponentProps<typeof Button>['variant']
-  saveButtonRef?: RefObject<HTMLButtonElement | null>
 }
 
 export function SettingsPageFormActions(props: SettingsPageFormActionsProps) {
@@ -133,7 +131,6 @@ export function SettingsPageFormActions(props: SettingsPageFormActionsProps) {
         </Button>
       )}
       <Button
-        ref={props.saveButtonRef}
         type='button'
         size='sm'
         onClick={props.onSave}

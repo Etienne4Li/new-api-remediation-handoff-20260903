@@ -113,7 +113,7 @@ export function TransferDialog({
     >
       <div className='space-y-4 py-3 sm:space-y-6 sm:py-4'>
         <div className='space-y-2'>
-          <Label className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>
+          <Label className='text-muted-foreground text-xs font-medium uppercase'>
             {t('Available Rewards')}
           </Label>
           <div className='text-2xl font-semibold'>
@@ -124,7 +124,7 @@ export function TransferDialog({
         <div className='space-y-3'>
           <Label
             htmlFor='transfer-amount'
-            className='text-muted-foreground text-xs font-medium tracking-wider uppercase'
+            className='text-muted-foreground text-xs font-medium uppercase'
           >
             {t('Transfer Amount')}
           </Label>

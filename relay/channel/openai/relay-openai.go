@@ -2,7 +2,6 @@ package openai
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -128,7 +127,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
-				common.SysLog("error handling stream format: " + err.Error())
+				common.SysLog("error handling stream format: error_meta=" + common.SensitiveLogMeta(err.Error()))
 				sr.Error(err)
 			}
 		}
@@ -141,7 +140,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			lastStreamData = data
 			collectStreamFunctionCallNames(data, seenStreamToolCalls, &streamFunctionCallNames)
 			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
-				logger.LogError(c, "error processing stream token data: "+err.Error())
+				logger.LogError(c, "error processing stream token data: error_meta="+common.SensitiveLogMeta(err.Error()))
 				sr.Error(err)
 			}
 		}
@@ -169,7 +168,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	shouldSendLastResp := true
 	if err := handleLastResponse(lastStreamData, &responseId, &createAt, &systemFingerprint, &model, &usage,
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
-		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
+		logger.LogError(c, fmt.Sprintf("error handling last response: error_meta=%s, lastStreamData_meta=%s", common.SensitiveLogMeta(err.Error()), common.SensitiveLogBody([]byte(lastStreamData))))
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
@@ -180,7 +179,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
-		usage.CompletionTokens += toolCount * 7
+		usage.CompletionTokens = common.SaturatingAddNonNegativeInt(
+			usage.CompletionTokens,
+			common.SaturatingMulNonNegativeInt(toolCount, 7),
+		)
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))
@@ -223,11 +225,11 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	defer service.CloseResponseBodyGracefully(resp)
 
 	var simpleResponse dto.OpenAITextResponse
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	logger.LogDebug(c, "upstream response body: %s", responseBody)
+	logger.LogDebug(c, "upstream response_meta=%s", common.SensitiveLogBody(responseBody))
 	// Unmarshal to simpleResponse
 	if info.ChannelType == constant.ChannelTypeOpenRouter && info.ChannelOtherSettings.IsOpenRouterEnterprise() {
 		// 尝试解析为 openrouter enterprise
@@ -239,7 +241,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		if enterpriseResponse.Success {
 			responseBody = enterpriseResponse.Data
 		} else {
-			logger.LogError(c, fmt.Sprintf("openrouter enterprise response success=false, data: %s", enterpriseResponse.Data))
+			logger.LogError(c, fmt.Sprintf("openrouter enterprise response success=false, data_meta=%s", common.SensitiveLogBody(enterpriseResponse.Data)))
 			return nil, types.NewOpenAIError(fmt.Errorf("openrouter response success=false"), types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 		}
 	}
@@ -273,17 +275,18 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 
 	usageModified := false
 	if simpleResponse.Usage.PromptTokens == 0 {
+		common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		completionTokens := simpleResponse.Usage.CompletionTokens
 		if completionTokens == 0 {
 			for _, choice := range simpleResponse.Choices {
 				ctkm := service.CountTextToken(choice.Message.StringContent()+choice.Message.GetReasoningContent(), info.UpstreamModelName)
-				completionTokens += ctkm
+				completionTokens = common.SaturatingAddNonNegativeInt(completionTokens, ctkm)
 			}
 		}
 		simpleResponse.Usage = dto.Usage{
 			PromptTokens:     info.GetEstimatePromptTokens(),
 			CompletionTokens: completionTokens,
-			TotalTokens:      info.GetEstimatePromptTokens() + completionTokens,
+			TotalTokens:      common.SaturatingAddNonNegativeInt(info.GetEstimatePromptTokens(), completionTokens),
 		}
 		usageModified = true
 	}

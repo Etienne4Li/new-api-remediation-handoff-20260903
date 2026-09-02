@@ -1,6 +1,11 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
@@ -35,6 +40,16 @@ type ChannelAffinitySetting struct {
 	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
 	Rules                 []ChannelAffinityRule `json:"rules"`
 }
+
+// Cache settings are administrator-controlled but are consumed on hot paths
+// that allocate memory and convert seconds to time.Duration. Keep the limits
+// generous for large installations while making malformed values harmless.
+const (
+	DefaultChannelAffinityMaxEntries = 100_000
+	MaxChannelAffinityMaxEntries     = 1_000_000
+	DefaultChannelAffinityTTLSeconds = 3600
+	MaxChannelAffinityTTLSeconds     = 30 * 24 * 60 * 60
+)
 
 // Keep Codex CLI passthrough aligned with upstream. Codex uses lower-case
 // header names, while HTTP matching here is case-insensitive.
@@ -113,8 +128,8 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	Enabled:               true,
 	SwitchOnSuccess:       true,
 	KeepOnChannelDisabled: false,
-	MaxEntries:            100_000,
-	DefaultTTLSeconds:     3600,
+	MaxEntries:            DefaultChannelAffinityMaxEntries,
+	DefaultTTLSeconds:     DefaultChannelAffinityTTLSeconds,
 	Rules: []ChannelAffinityRule{
 		{
 			Name:       "codex cli trace",
@@ -149,10 +164,171 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	},
 }
 
+var channelAffinitySettingMu sync.RWMutex
+
+type channelAffinitySettingFields ChannelAffinitySetting
+
 func init() {
 	config.GlobalConfig.Register("channel_affinity_setting", &channelAffinitySetting)
 }
 
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
+	channelAffinitySettingMu.RLock()
+	defer channelAffinitySettingMu.RUnlock()
 	return &channelAffinitySetting
+}
+
+func normalizeChannelAffinitySetting(source ChannelAffinitySetting) ChannelAffinitySetting {
+	if source.MaxEntries < 0 || source.MaxEntries > MaxChannelAffinityMaxEntries {
+		source.MaxEntries = DefaultChannelAffinityMaxEntries
+	}
+	if source.DefaultTTLSeconds < 0 || source.DefaultTTLSeconds > MaxChannelAffinityTTLSeconds {
+		source.DefaultTTLSeconds = DefaultChannelAffinityTTLSeconds
+	}
+	for i := range source.Rules {
+		if source.Rules[i].TTLSeconds < 0 || source.Rules[i].TTLSeconds > MaxChannelAffinityTTLSeconds {
+			// Zero means "use the setting default" for a rule.
+			source.Rules[i].TTLSeconds = 0
+		}
+	}
+	return source
+}
+
+func validateChannelAffinitySetting(source ChannelAffinitySetting) error {
+	if source.MaxEntries < 0 || source.MaxEntries > MaxChannelAffinityMaxEntries {
+		return fmt.Errorf("max_entries must be between 0 and %d", MaxChannelAffinityMaxEntries)
+	}
+	if source.DefaultTTLSeconds < 0 || source.DefaultTTLSeconds > MaxChannelAffinityTTLSeconds {
+		return fmt.Errorf("default_ttl_seconds must be between 0 and %d", MaxChannelAffinityTTLSeconds)
+	}
+	for i, rule := range source.Rules {
+		if rule.TTLSeconds < 0 || rule.TTLSeconds > MaxChannelAffinityTTLSeconds {
+			return fmt.Errorf("rules[%d].ttl_seconds must be between 0 and %d", i, MaxChannelAffinityTTLSeconds)
+		}
+	}
+	return nil
+}
+
+// cloneChannelAffinitySetting deep-copies all slices/maps in affinity rules.
+// A shallow copy would still let a request race with an administrator
+// replacing a nested rule or parameter template.
+func cloneChannelAffinitySetting(source ChannelAffinitySetting) ChannelAffinitySetting {
+	clone := source
+	if source.Rules != nil {
+		clone.Rules = make([]ChannelAffinityRule, len(source.Rules))
+		for i, rule := range source.Rules {
+			clone.Rules[i] = cloneChannelAffinityRule(rule)
+		}
+	}
+	return clone
+}
+
+func cloneChannelAffinityRule(source ChannelAffinityRule) ChannelAffinityRule {
+	clone := source
+	clone.ModelRegex = append([]string(nil), source.ModelRegex...)
+	clone.PathRegex = append([]string(nil), source.PathRegex...)
+	clone.UserAgentInclude = append([]string(nil), source.UserAgentInclude...)
+	clone.KeySources = append([]ChannelAffinityKeySource(nil), source.KeySources...)
+	if source.ParamOverrideTemplate != nil {
+		clone.ParamOverrideTemplate = cloneInterfaceMap(source.ParamOverrideTemplate)
+	}
+	return clone
+}
+
+// cloneInterfaceMap recursively copies JSON-like maps/slices used by
+// ParamOverrideTemplate. Values are otherwise immutable scalars.
+func cloneInterfaceMap(source map[string]interface{}) map[string]interface{} {
+	clone := make(map[string]interface{}, len(source))
+	for key, value := range source {
+		switch typed := value.(type) {
+		case map[string]interface{}:
+			clone[key] = cloneInterfaceMap(typed)
+		case []interface{}:
+			clone[key] = cloneInterfaceSlice(typed)
+		case []string:
+			clone[key] = append([]string(nil), typed...)
+		case []map[string]interface{}:
+			items := make([]map[string]interface{}, len(typed))
+			for i, item := range typed {
+				items[i] = cloneInterfaceMap(item)
+			}
+			clone[key] = items
+		case map[string]string:
+			items := make(map[string]string, len(typed))
+			for nestedKey, nestedValue := range typed {
+				items[nestedKey] = nestedValue
+			}
+			clone[key] = items
+		default:
+			clone[key] = value
+		}
+	}
+	return clone
+}
+
+func cloneInterfaceSlice(source []interface{}) []interface{} {
+	clone := make([]interface{}, len(source))
+	for i, value := range source {
+		switch typed := value.(type) {
+		case map[string]interface{}:
+			clone[i] = cloneInterfaceMap(typed)
+		case []interface{}:
+			clone[i] = cloneInterfaceSlice(typed)
+		case []string:
+			clone[i] = append([]string(nil), typed...)
+		default:
+			clone[i] = value
+		}
+	}
+	return clone
+}
+
+// GetChannelAffinitySettingSnapshot returns a detached deep copy for request
+// processing. It prevents nested rule data from changing mid-request.
+func GetChannelAffinitySettingSnapshot() ChannelAffinitySetting {
+	channelAffinitySettingMu.RLock()
+	defer channelAffinitySettingMu.RUnlock()
+	return normalizeChannelAffinitySetting(cloneChannelAffinitySetting(channelAffinitySetting))
+}
+
+// UpdateChannelAffinitySetting atomically publishes all changed fields.
+func UpdateChannelAffinitySetting(update func(*ChannelAffinitySetting)) {
+	if update == nil {
+		return
+	}
+	channelAffinitySettingMu.Lock()
+	defer channelAffinitySettingMu.Unlock()
+	next := cloneChannelAffinitySetting(channelAffinitySetting)
+	update(&next)
+	channelAffinitySetting = normalizeChannelAffinitySetting(cloneChannelAffinitySetting(next))
+}
+
+func (s *ChannelAffinitySetting) ConfigSnapshot() interface{} {
+	channelAffinitySettingMu.RLock()
+	defer channelAffinitySettingMu.RUnlock()
+	return normalizeChannelAffinitySetting(cloneChannelAffinitySetting(channelAffinitySetting))
+}
+
+func (s *ChannelAffinitySetting) ValidateConfigMap(values map[string]string) error {
+	channelAffinitySettingMu.RLock()
+	staged := channelAffinitySettingFields(cloneChannelAffinitySetting(channelAffinitySetting))
+	channelAffinitySettingMu.RUnlock()
+	if err := config.ValidateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	return validateChannelAffinitySetting(ChannelAffinitySetting(staged))
+}
+
+func (s *ChannelAffinitySetting) UpdateConfigMap(values map[string]string) error {
+	channelAffinitySettingMu.Lock()
+	defer channelAffinitySettingMu.Unlock()
+	staged := channelAffinitySettingFields(cloneChannelAffinitySetting(channelAffinitySetting))
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	if err := validateChannelAffinitySetting(ChannelAffinitySetting(staged)); err != nil {
+		return err
+	}
+	channelAffinitySetting = cloneChannelAffinitySetting(ChannelAffinitySetting(staged))
+	return nil
 }

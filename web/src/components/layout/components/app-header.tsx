@@ -16,16 +16,24 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Link } from '@tanstack/react-router'
+import { WalletCards } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+
 import { ConfigDrawer } from '@/components/config-drawer'
 import { LanguageSwitcher } from '@/components/language-switcher'
 import { NotificationPopover } from '@/components/notification-popover'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
+import { Button } from '@/components/ui/button'
 import { useNotifications } from '@/hooks/use-notifications'
+import { useStatus } from '@/hooks/use-status'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
+import { formatQuota } from '@/lib/format'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { defaultTopNavLinks } from '../config/top-nav.config'
-import { type TopNavLink } from '../types'
+import type { TopNavLink } from '../types'
 import { Header } from './header'
 import { SystemBrand } from './system-brand'
 import { TopNav } from './top-nav'
@@ -64,16 +72,21 @@ type AppHeaderProps = {
    */
   showTopNav?: boolean
   /**
-   * Left content, overrides TopNav if provided
+   * Optional content displayed after the brand
    */
   leftContent?: React.ReactNode
   /**
    * Whether to show search box
-   * @default true
+   * @default false
    */
   showSearch?: boolean
   /**
-   * Custom right content, overrides default right content if provided
+   * Whether to show the authenticated account balance
+   * @default true
+   */
+  showBalance?: boolean
+  /**
+   * Custom right content, overrides the default navigation and account actions
    */
   rightContent?: React.ReactNode
   /**
@@ -97,54 +110,79 @@ export function AppHeader({
   navLinks = defaultTopNavLinks,
   showTopNav = true,
   leftContent,
-  showSearch = true,
+  showSearch = false,
+  showBalance = true,
   rightContent,
   showNotifications = true,
   showConfigDrawer = true,
   showProfileDropdown = true,
 }: AppHeaderProps) {
+  const { t } = useTranslation()
+  const user = useAuthStore((state) => state.auth.user)
   // Prioritize dynamically generated links from backend
   const dynamicLinks = useTopNavLinks()
-  const links = dynamicLinks.length > 0 ? dynamicLinks : navLinks
+  const { status: statusSnapshot } = useStatus()
+  const links =
+    dynamicLinks.length > 0 || statusSnapshot !== null ? dynamicLinks : navLinks
 
   // Notifications hook
   const notifications = useNotifications()
 
   return (
-    <>
-      <Header>
-        <SystemBrand variant='inline' />
+    <Header showSidebarTrigger={false}>
+      <SystemBrand variant='inline' />
 
-        {leftContent ? (
-          <div className='ms-2 flex items-center'>{leftContent}</div>
-        ) : null}
+      {leftContent ? (
+        <div className='ms-2 flex min-w-0 items-center'>{leftContent}</div>
+      ) : null}
 
-        {rightContent ?? (
-          <div className='ms-auto flex items-center gap-1 sm:gap-2'>
-            {showTopNav && (
-              <div className='me-1 hidden lg:block'>
-                <TopNav links={links} />
-              </div>
-            )}
-            {showSearch && <Search />}
-            {showNotifications && (
-              <NotificationPopover
-                open={notifications.popoverOpen}
-                onOpenChange={notifications.setPopoverOpen}
-                unreadCount={notifications.unreadCount}
-                activeTab={notifications.activeTab}
-                onTabChange={notifications.setActiveTab}
-                notice={notifications.notice}
-                announcements={notifications.announcements}
-                loading={notifications.loading}
+      {rightContent ?? (
+        <div className='ms-auto flex min-w-0 items-center justify-end gap-0.5 sm:gap-2'>
+          {showTopNav && links.length > 0 && (
+            <div className='me-0 min-w-0 lg:me-1'>
+              <TopNav links={links} />
+            </div>
+          )}
+          {showSearch && (
+            <Search className='size-8 flex-none justify-center p-0 sm:w-44 sm:justify-start sm:pe-12 md:flex-none lg:w-56 xl:w-72 [&>span]:hidden sm:[&>span]:inline' />
+          )}
+          {showBalance && user && (
+            <Button
+              variant='outline'
+              size='sm'
+              className='h-8 gap-1.5 px-2 sm:px-2.5'
+              aria-label={`${t('Balance')}: ${formatQuota(Number(user.quota ?? 0))}`}
+              render={<Link to='/wallet' />}
+            >
+              <WalletCards
+                className='text-muted-foreground size-3.5 shrink-0'
+                aria-hidden='true'
               />
-            )}
+              <span className='font-mono text-xs font-semibold tabular-nums'>
+                {formatQuota(Number(user.quota ?? 0))}
+              </span>
+            </Button>
+          )}
+          {showNotifications && (
+            <NotificationPopover
+              open={notifications.popoverOpen}
+              onOpenChange={notifications.setPopoverOpen}
+              unreadCount={notifications.unreadCount}
+              activeTab={notifications.activeTab}
+              onTabChange={notifications.setActiveTab}
+              notice={notifications.notice}
+              announcements={notifications.announcements}
+              loading={notifications.loading}
+              className='size-8'
+            />
+          )}
+          <div className='hidden sm:block'>
             <LanguageSwitcher />
-            {showConfigDrawer && <ConfigDrawer />}
-            {showProfileDropdown && <ProfileDropdown />}
           </div>
-        )}
-      </Header>
-    </>
+          {showConfigDrawer && <ConfigDrawer />}
+          {showProfileDropdown && <ProfileDropdown />}
+        </div>
+      )}
+    </Header>
   )
 }

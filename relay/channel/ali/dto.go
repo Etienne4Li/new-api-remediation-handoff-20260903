@@ -3,6 +3,7 @@ package ali
 import (
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -112,7 +113,7 @@ func (o *AliOutput) ChoicesToOpenAIImageDate(c *gin.Context, responseFormat stri
 						if responseFormat == "b64_json" {
 							_, b64, err := service.GetImageFromUrl(content.Image)
 							if err != nil {
-								logger.LogError(c, "get_image_data_failed: "+err.Error())
+								logger.LogError(c, "get_image_data_failed error_meta="+common.SensitiveLogMeta(err.Error()))
 								continue
 							}
 							b64Json = b64
@@ -140,7 +141,7 @@ func (o *AliOutput) ResultToOpenAIImageDate(c *gin.Context, responseFormat strin
 		if responseFormat == "b64_json" {
 			_, b64, err := service.GetImageFromUrl(data.Url)
 			if err != nil {
-				logger.LogError(c, "get_image_data_failed: "+err.Error())
+				logger.LogError(c, "get_image_data_failed error_meta="+common.SensitiveLogMeta(err.Error()))
 				continue
 			}
 			b64Json = b64

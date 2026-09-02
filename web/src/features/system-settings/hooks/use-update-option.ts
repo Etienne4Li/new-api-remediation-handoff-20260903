@@ -20,6 +20,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { clearCachedStatus } from '@/lib/status-cache'
+
 import { updateSystemOption } from '../api'
 import type { UpdateOptionRequest } from '../types'
 
@@ -37,6 +39,7 @@ const STATUS_RELATED_KEYS = new Set([
   'general_setting.custom_currency_symbol',
   'general_setting.custom_currency_exchange_rate',
   'oidc.display_name',
+  'Chats',
 ])
 
 export function useUpdateOption() {
@@ -52,11 +55,7 @@ export function useUpdateOption() {
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.has(variables.key)) {
           queryClient.invalidateQueries({ queryKey: ['status'] })
-          try {
-            window.localStorage.removeItem('status')
-          } catch {
-            /* empty */
-          }
+          clearCachedStatus()
         }
 
         toast.success(i18next.t('Setting updated successfully'))

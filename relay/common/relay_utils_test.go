@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	newapicommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -54,6 +55,13 @@ func TestSanitizeURLForLogKeepsURLWithoutSensitiveQuery(t *testing.T) {
 	got := SanitizeURLForLog(rawURL)
 
 	assert.Equal(t, rawURL, got)
+}
+
+func TestSanitizeURLForLogStripsUserinfoAndRejectsMalformedURLs(t *testing.T) {
+	got := SanitizeURLForLog("https://user:password@example.test/v1/chat")
+	assert.Equal(t, "https://example.test/v1/chat", got)
+
+	assert.Equal(t, "<invalid-url>", SanitizeURLForLog("https://[malformed"))
 }
 
 func TestValidateMultipartDirectNormalizesImageField(t *testing.T) {
@@ -115,6 +123,16 @@ func TestTaskDurationBounds(t *testing.T) {
 			name: "normal duration is accepted",
 			body: `{"model":"sora-2","prompt":"a cat","seconds":"8"}`,
 		},
+		{
+			name:    "conflicting oversized seconds is rejected",
+			body:    `{"model":"sora-2","prompt":"a cat","duration":5,"seconds":"9999999999"}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed seconds is rejected",
+			body:    `{"model":"sora-2","prompt":"a cat","seconds":"not-a-number"}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -139,4 +157,39 @@ func TestTaskDurationBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTaskSubmitRequestRejectsMalformedDurationAndAcceptsNumericSeconds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{
+		`{"model":"sora-2","prompt":"a cat","duration":"not-a-number"}`,
+		`{"model":"sora-2","prompt":"a cat","duration":1.5}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = request
+		info := &RelayInfo{TaskRelayInfo: &TaskRelayInfo{}}
+		taskErr := ValidateBasicTaskRequest(ctx, info, constant.TaskActionGenerate)
+		require.NotNil(t, taskErr)
+		require.Equal(t, "invalid_seconds", taskErr.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"sora-2","prompt":"a cat","seconds":8}`))
+	request.Header.Set("Content-Type", "application/json")
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = request
+	info := &RelayInfo{TaskRelayInfo: &TaskRelayInfo{}}
+	require.Nil(t, ValidateBasicTaskRequest(ctx, info, constant.TaskActionGenerate))
+	stored, err := GetTaskRequest(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "8", stored.Seconds)
+}
+
+func TestTaskSubmitRequestDecodeResetsOmittedFields(t *testing.T) {
+	var req TaskSubmitReq
+	require.NoError(t, newapicommon.Unmarshal([]byte(`{"model":"first","prompt":"one","duration":8}`), &req))
+	require.NoError(t, newapicommon.Unmarshal([]byte(`{"prompt":"two"}`), &req))
+	require.Equal(t, "", req.Model)
+	require.Zero(t, req.Duration)
 }

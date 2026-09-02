@@ -333,6 +333,49 @@ func TestUpdateUserBindColumnRejectsNonWhitelistedColumns(t *testing.T) {
 	assert.Error(t, UpdateUserBindColumn(0, "github_id", "x"))
 }
 
+func TestUpdateGitHubIdMaintainsExternalIdentityClaim(t *testing.T) {
+	truncateTables(t)
+
+	user := User{Username: "github-update", Password: "password", GitHubId: "github-old"}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, user.GitHubId, user.Id)
+	}))
+
+	require.NoError(t, user.UpdateGitHubId("github-new"))
+	assert.Equal(t, "github-new", user.GitHubId)
+
+	var oldCount, newCount int64
+	require.NoError(t, DB.Model(&ExternalIdentityClaim{}).
+		Where("provider = ? AND subject = ?", ExternalIdentityProviderGitHub, "github-old").Count(&oldCount).Error)
+	require.NoError(t, DB.Model(&ExternalIdentityClaim{}).
+		Where("provider = ? AND subject = ? AND user_id = ?", ExternalIdentityProviderGitHub, "github-new", user.Id).Count(&newCount).Error)
+	assert.Zero(t, oldCount)
+	assert.EqualValues(t, 1, newCount)
+}
+
+func TestUpdateGitHubIdRejectsClaimOwnedByAnotherUser(t *testing.T) {
+	truncateTables(t)
+
+	first := User{Username: "github-update-first", Password: "password", GitHubId: "github-first", AffCode: "github-update-first"}
+	second := User{Username: "github-update-second", Password: "password", GitHubId: "github-second", AffCode: "github-update-second"}
+	require.NoError(t, DB.Create(&first).Error)
+	require.NoError(t, DB.Create(&second).Error)
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, first.GitHubId, first.Id)
+	}))
+	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
+		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, second.GitHubId, second.Id)
+	}))
+
+	err := second.UpdateGitHubId(first.GitHubId)
+	assert.ErrorIs(t, err, ErrExternalIdentityAlreadyClaimed)
+
+	var reloaded User
+	require.NoError(t, DB.First(&reloaded, second.Id).Error)
+	assert.Equal(t, "github-second", reloaded.GitHubId)
+}
+
 func TestValidateAndFillRejectsPasswordlessUser(t *testing.T) {
 	setupUserUpdateTestState(t)
 

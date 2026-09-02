@@ -157,6 +157,15 @@ func newDiskStorage(data []byte, cachePath string) (*diskStorage, error) {
 }
 
 func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string) (*diskStorage, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("request body reader is nil")
+	}
+	if maxBytes <= 0 {
+		return nil, ErrRequestBodyTooLarge
+	}
+	if maxBytes >= maxInt64RequestLimit {
+		maxBytes = maxInt64RequestLimit - 1
+	}
 	// 使用统一的缓存目录管理
 	filePath, file, err := CreateDiskCacheFile(DiskCacheTypeBody)
 	if err != nil {
@@ -305,6 +314,18 @@ func CreateBodyStorage(data []byte) (BodyStorage, error) {
 
 // CreateBodyStorageFromReader 从 Reader 创建存储（用于大请求的流式处理）
 func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes int64) (BodyStorage, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("request body reader is nil")
+	}
+	if maxBytes <= 0 {
+		maxBytes = GetMaxRequestBodyBytes()
+	}
+	if maxBytes >= maxInt64RequestLimit {
+		maxBytes = maxInt64RequestLimit - 1
+	}
+	if contentLength > maxBytes {
+		return nil, ErrRequestBodyTooLarge
+	}
 	threshold := GetDiskCacheThresholdBytes()
 
 	// 如果启用了磁盘缓存且内容长度超过阈值，直接使用磁盘存储

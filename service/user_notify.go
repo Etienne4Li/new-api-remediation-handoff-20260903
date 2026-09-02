@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,11 +12,25 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"gorm.io/gorm"
 )
 
 func NotifyRootUser(t string, subject string, content string) {
-	user := model.GetRootUser().ToBaseUser()
-	err := NotifyUser(user.Id, user.Email, user.GetSetting(), dto.NewNotify(t, subject, content, nil))
+	root, err := model.GetRootUserWithError()
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.SysLog("failed to notify root user: no root user exists")
+		} else {
+			common.SysLog(fmt.Sprintf("failed to load root user for notification: %s", err.Error()))
+		}
+		return
+	}
+	if root == nil {
+		common.SysLog("failed to notify root user: query returned nil root user")
+		return
+	}
+	user := root.ToBaseUser()
+	err = NotifyUser(user.Id, user.Email, user.GetSetting(), dto.NewNotify(t, subject, content, nil))
 	if err != nil {
 		common.SysLog(fmt.Sprintf("failed to notify root user: %s", err.Error()))
 	}
@@ -115,6 +130,12 @@ func sendEmailNotify(userEmail string, data dto.Notify) error {
 }
 
 func sendBarkNotify(barkURL string, data dto.Notify) error {
+	systemConfig := system_setting.GetRuntimeConfig()
+	normalizedURL, err := NormalizeNotificationURL(barkURL)
+	if err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
+	barkURL = normalizedURL
 	// 处理占位符
 	content := data.Content
 	for _, value := range data.Values {
@@ -124,17 +145,18 @@ func sendBarkNotify(barkURL string, data dto.Notify) error {
 	// 替换模板变量
 	finalURL := strings.ReplaceAll(barkURL, "{{title}}", url.QueryEscape(data.Title))
 	finalURL = strings.ReplaceAll(finalURL, "{{content}}", url.QueryEscape(content))
+	if finalURL, err = NormalizeNotificationURL(finalURL); err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
 
 	// 发送GET请求到Bark
 	var req *http.Request
 	var resp *http.Response
-	var err error
-
-	if system_setting.EnableWorker() {
+	if systemConfig.WorkerURL != "" {
 		// 使用worker发送请求
 		workerReq := &WorkerRequest{
 			URL:    finalURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    systemConfig.WorkerValidKey,
 			Method: http.MethodGet,
 			Headers: map[string]string{
 				"User-Agent": "OneAPI-Bark-Notify/1.0",
@@ -184,6 +206,16 @@ func sendBarkNotify(barkURL string, data dto.Notify) error {
 }
 
 func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data dto.Notify) error {
+	systemConfig := system_setting.GetRuntimeConfig()
+	normalizedURL, err := NormalizeNotificationURL(gotifyUrl)
+	if err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
+	gotifyUrl = normalizedURL
+	gotifyToken, err = NormalizeNotificationCredential(gotifyToken, MaxNotificationTokenLength)
+	if err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
 	// 处理占位符
 	content := data.Content
 	for _, value := range data.Values {
@@ -193,6 +225,9 @@ func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data d
 	// 构建完整的 Gotify API URL
 	// 确保 URL 以 /message 结尾
 	finalURL := strings.TrimSuffix(gotifyUrl, "/") + "/message?token=" + url.QueryEscape(gotifyToken)
+	if finalURL, err = NormalizeNotificationURL(finalURL); err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
 
 	// Gotify优先级范围0-10，如果超出范围则使用默认值5
 	if priority < 0 || priority > 10 {
@@ -221,11 +256,11 @@ func sendGotifyNotify(gotifyUrl string, gotifyToken string, priority int, data d
 	var req *http.Request
 	var resp *http.Response
 
-	if system_setting.EnableWorker() {
+	if systemConfig.WorkerURL != "" {
 		// 使用worker发送请求
 		workerReq := &WorkerRequest{
 			URL:    finalURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    systemConfig.WorkerValidKey,
 			Method: http.MethodPost,
 			Headers: map[string]string{
 				"Content-Type": "application/json; charset=utf-8",

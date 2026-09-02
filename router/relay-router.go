@@ -24,7 +24,8 @@ func SetRelayRouter(router *gin.Engine) {
 			switch {
 			case c.GetHeader("x-api-key") != "" && c.GetHeader("anthropic-version") != "":
 				controller.ListModels(c, constant.ChannelTypeAnthropic)
-			case c.GetHeader("x-goog-api-key") != "" || c.Query("key") != "": // 单独的适配
+			case c.GetHeader("x-goog-api-key") != "" ||
+				(middleware.GeminiQueryKeyAuthEnabled() && c.Query("key") != ""): // Gemini compatibility
 				controller.ListModels(c, constant.ChannelTypeGemini)
 			default:
 				controller.ListModels(c, constant.ChannelTypeOpenAI)
@@ -206,7 +207,15 @@ func SetRelayRouter(router *gin.Engine) {
 }
 
 func registerMjRouterGroup(relayMjRouter *gin.RouterGroup) {
-	relayMjRouter.GET("/image/:id", relay.RelayMidjourneyImage)
+	// The image proxy is an authenticated, owner-scoped endpoint. Keep it out
+	// of the normal Midjourney distributor chain (there is no model in an
+	// image request), but attach TokenAuth at route registration time. Gin does
+	// not apply a group middleware retroactively to routes registered before
+	// the middleware is added; that ordering previously left this endpoint
+	// anonymously reachable.
+	relayMjRouter.GET("/image/:id", middleware.TokenOrUserAuth(), relay.RelayMidjourneyImage)
+	relayMjRouter.GET("/video/:id", middleware.TokenOrUserAuth(), relay.RelayMidjourneyVideo)
+	relayMjRouter.GET("/video/:id/:index", middleware.TokenOrUserAuth(), relay.RelayMidjourneyVideo)
 	relayMjRouter.Use(middleware.TokenAuth(), middleware.Distribute())
 	{
 		relayMjRouter.POST("/submit/action", controller.RelayMidjourney)

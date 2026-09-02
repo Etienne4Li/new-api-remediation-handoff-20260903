@@ -60,7 +60,7 @@ func handleClaudeFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo) error {
 	var streamResponse dto.ChatCompletionsStreamResponse
 	if err := common.Unmarshal(common.StringToByteSlice(data), &streamResponse); err != nil {
-		logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
+		logger.LogError(c, "failed to unmarshal stream response: error_meta="+common.SensitiveLogMeta(err.Error()))
 		return err
 	}
 
@@ -80,7 +80,7 @@ func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 
 	geminiResponseStr, err := common.Marshal(geminiResponse)
 	if err != nil {
-		logger.LogError(c, "failed to marshal gemini response: "+err.Error())
+		logger.LogError(c, "failed to marshal gemini response: error_meta="+common.SensitiveLogMeta(err.Error()))
 		return err
 	}
 
@@ -175,7 +175,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 	case types.RelayFormatClaude:
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
@@ -183,7 +183,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 
 		result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatClaude, &streamResponse)
 		if err != nil {
-			common.SysLog("error converting Claude stream response: " + err.Error())
+			common.SysLog("error converting Claude stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 		claudeResponses, ok := result.Value.([]*dto.ClaudeResponse)
@@ -199,7 +199,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 	case types.RelayFormatGemini:
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
@@ -210,7 +210,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 
 		result, err := relayconvert.ConvertStreamResponse(c, info, types.RelayFormatGemini, &streamResponse)
 		if err != nil {
-			common.SysLog("error converting Gemini stream response: " + err.Error())
+			common.SysLog("error converting Gemini stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 		geminiResponse, ok := result.Value.(*dto.GeminiChatResponse)
@@ -226,7 +226,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 
 		geminiResponseStr, err := common.Marshal(geminiResponse)
 		if err != nil {
-			common.SysLog("error marshalling gemini response: " + err.Error())
+			common.SysLog("error marshalling gemini response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			return
 		}
 
@@ -236,9 +236,9 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 	}
 }
 
-func sendResponsesStreamData(c *gin.Context, streamResponse dto.ResponsesStreamResponse, data string) {
+func sendResponsesStreamData(c *gin.Context, streamResponse dto.ResponsesStreamResponse, data string) error {
 	if data == "" {
-		return
+		return nil
 	}
-	_ = helper.ResponseChunkData(c, streamResponse, data)
+	return helper.ResponseChunkData(c, streamResponse, data)
 }

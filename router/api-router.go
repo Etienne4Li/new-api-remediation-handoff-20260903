@@ -14,6 +14,12 @@ import (
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
+	// Apply request decompression and the post-decompression byte cap to API
+	// handlers as well as relay handlers.  SetRelayRouter installs this
+	// middleware on the engine later, but Gin snapshots engine middleware when
+	// routes are registered; relying on that ordering left these /api routes'
+	// DecodeJson calls able to consume an unbounded body.
+	apiRouter.Use(middleware.DecompressRequestMiddleware())
 	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
 	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
@@ -21,7 +27,7 @@ func SetApiRouter(router *gin.Engine) {
 	{
 		apiRouter.GET("/setup", controller.GetSetup)
 		apiRouter.POST("/setup", anonymousRequestBodyLimit, controller.PostSetup)
-		apiRouter.GET("/status", controller.GetStatus)
+		apiRouter.GET("/status", middleware.DisableCache(), controller.GetStatus)
 		apiRouter.GET("/uptime/status", controller.GetUptimeKumaStatus)
 		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
 		apiRouter.GET("/status/test", middleware.AdminAuth(), controller.TestStatus)
@@ -43,7 +49,7 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
 		// OAuth routes - specific routes must come before :provider wildcard
-		apiRouter.POST("/oauth/state", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
+		apiRouter.POST("/oauth/state", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), anonymousRequestBodyLimit, controller.GenerateOAuthCode)
 		apiRouter.POST("/oauth/email/bind", middleware.UserAuth(), middleware.CriticalRateLimit(), controller.EmailBind)
 		// Non-standard OAuth (WeChat, Telegram) - keep original routes
 		apiRouter.GET("/oauth/wechat", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.WeChatAuth)
@@ -77,7 +83,10 @@ func SetApiRouter(router *gin.Engine) {
 			//userRoute.POST("/tokenlog", middleware.CriticalRateLimit(), controller.TokenLog)
 			userRoute.POST("/epay/notify", anonymousRequestBodyLimit, controller.EpayNotify)
 			userRoute.GET("/epay/notify", controller.EpayNotify)
-			userRoute.GET("/groups", controller.GetUserGroups)
+			// The response is user-specific (it includes the groups and ratios
+			// available to the authenticated account); the legacy route must not
+			// be publicly callable with an implicit user id of zero.
+			userRoute.GET("/groups", middleware.UserAuth(), controller.GetUserGroups)
 
 			selfRoute := userRoute.Group("/")
 			selfRoute.Use(middleware.UserAuth())
@@ -135,8 +144,10 @@ func SetApiRouter(router *gin.Engine) {
 				adminRoute.GET("/", controller.GetAllUsers)
 				adminRoute.GET("/topup", controller.GetAllTopUps)
 				adminRoute.POST("/topup/complete", controller.AdminCompleteTopUp)
+				adminRoute.POST("/topup/:trade_no/retry-paid-uncredited", controller.AdminRetryPaidUncreditedTopUp)
 				adminRoute.GET("/search", controller.SearchUsers)
 				adminRoute.GET("/:id/oauth/bindings", controller.GetUserOAuthBindingsByAdmin)
+				adminRoute.GET("/:id/binding-status", controller.GetUserBindingStatusByAdmin)
 				adminRoute.DELETE("/:id/oauth/bindings/:provider_id", controller.UnbindCustomOAuthByAdmin)
 				adminRoute.DELETE("/:id/bindings/:binding_type", controller.AdminClearUserBinding)
 				adminRoute.GET("/:id", controller.GetUser)
@@ -178,6 +189,7 @@ func SetApiRouter(router *gin.Engine) {
 			// User subscription management (admin)
 			subscriptionAdminRoute.GET("/users/:id/subscriptions", controller.AdminListUserSubscriptions)
 			subscriptionAdminRoute.POST("/users/:id/subscriptions", controller.AdminCreateUserSubscription)
+			subscriptionAdminRoute.POST("/orders/:trade_no/retry-paid-uncredited", controller.AdminRetryPaidUncreditedSubscriptionOrder)
 			subscriptionAdminRoute.POST("/users/:id/subscriptions/reset", controller.AdminResetUserSubscriptionsByPlan)
 			subscriptionAdminRoute.POST("/user_subscriptions/:id/invalidate", controller.AdminInvalidateUserSubscription)
 			subscriptionAdminRoute.DELETE("/user_subscriptions/:id", controller.AdminDeleteUserSubscription)
@@ -197,7 +209,10 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
 			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
 			optionRoute.POST("/rest_model_ratio", controller.ResetModelRatio)
+			// Catalog credentials are sent in a POST body; keeping the GET route
+			// allows persisted-credential reads without putting private keys in URLs.
 			optionRoute.GET("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)
+			optionRoute.POST("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)
 			optionRoute.POST("/waffo-pancake/pair", controller.CreateWaffoPancakePair)
 			optionRoute.POST("/waffo-pancake/save", controller.SaveWaffoPancake)
 			optionRoute.POST("/waffo-pancake/subscription-product", controller.CreateWaffoPancakeSubscriptionProduct)
@@ -251,11 +266,27 @@ func SetApiRouter(router *gin.Engine) {
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{
+			balanceUsageRoute := usageRoute.Group("/balance")
+			balanceUsageRoute.Use(middleware.TokenAuthReadOnly())
+			{
+				balanceUsageRoute.GET("/", controller.GetAccountBalance)
+			}
+
 			tokenUsageRoute := usageRoute.Group("/token")
 			tokenUsageRoute.Use(middleware.TokenAuthReadOnly())
 			{
 				tokenUsageRoute.GET("/", controller.GetTokenUsage)
 			}
+		}
+
+		ticketRoute := apiRouter.Group("/ticket")
+		ticketRoute.Use(middleware.UserAuth())
+		{
+			ticketRoute.GET("/", controller.ListSupportTickets)
+			ticketRoute.GET("/:id", controller.GetSupportTicket)
+			ticketRoute.POST("/", middleware.UserCriticalRateLimit("ticket-create"), controller.CreateSupportTicket)
+			ticketRoute.POST("/:id/messages", middleware.UserCriticalRateLimit("ticket-reply"), controller.AddSupportTicketMessage)
+			ticketRoute.PATCH("/:id/status", middleware.UserCriticalRateLimit("ticket-status"), controller.UpdateSupportTicketStatus)
 		}
 
 		redemptionRoute := apiRouter.Group("/redemption")
@@ -357,7 +388,7 @@ func SetApiRouter(router *gin.Engine) {
 
 		// Deployments (model deployment management)
 		deploymentsRoute := apiRouter.Group("/deployments")
-		deploymentsRoute.Use(middleware.AdminAuth())
+		deploymentsRoute.Use(middleware.RootAuth())
 		{
 			deploymentsRoute.GET("/settings", controller.GetModelDeploymentSettings)
 			deploymentsRoute.POST("/settings/test-connection", controller.TestIoNetConnection)

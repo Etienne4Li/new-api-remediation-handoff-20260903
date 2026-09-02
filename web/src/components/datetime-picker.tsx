@@ -48,6 +48,12 @@ interface DateTimePickerProps {
   className?: string
 }
 
+function formatTime(date: Date): string {
+  const hours = date.getHours().toString().padStart(2, '0')
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+  return `${hours}:${minutes}`
+}
+
 export function DateTimePicker({
   value,
   onChange,
@@ -62,17 +68,19 @@ export function DateTimePicker({
   const [open, setOpen] = React.useState(false)
   const [date, setDate] = React.useState<Date | undefined>(value)
   const [month, setMonth] = React.useState<Date | undefined>(value)
-  const [time, setTime] = React.useState<string>('00:00')
+  const [time, setTime] = React.useState<string>(() =>
+    value ? formatTime(value) : '00:00'
+  )
+  const [previousValue, setPreviousValue] = React.useState(value)
 
-  React.useEffect(() => {
+  if (value !== previousValue) {
+    setPreviousValue(value)
     setDate(value)
     setMonth(value)
     if (value) {
-      const hours = value.getHours().toString().padStart(2, '0')
-      const minutes = value.getMinutes().toString().padStart(2, '0')
-      setTime(`${hours}:${minutes}`)
+      setTime(formatTime(value))
     }
-  }, [value])
+  }
 
   const handleDateSelect = (selectedDate: Date | undefined) => {
     if (selectedDate) {

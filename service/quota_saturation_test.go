@@ -3,15 +3,19 @@ package service
 import (
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,6 +69,53 @@ func TestCalcOpenRouterCacheCreateTokensDoesNotWrap(t *testing.T) {
 		CompletionRatio:    1,
 	})
 	require.Equal(t, -1, got)
+}
+
+func TestCalcOpenRouterCacheCreateTokensRejectsNonNumericCost(t *testing.T) {
+	priceData := hosttypes.PriceData{
+		ModelRatio:         1,
+		CacheCreationRatio: 2,
+		CacheRatio:         1,
+		CompletionRatio:    1,
+	}
+	for name, cost := range map[string]any{
+		"nil":      nil,
+		"object":   map[string]any{"value": 1},
+		"array":    []any{1},
+		"invalid":  "not-a-number",
+		"negative": -1.0,
+		"zero":     0.0,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, -1, CalcOpenRouterCacheCreateTokens(dto.Usage{Cost: cost}, priceData))
+		})
+	}
+}
+
+func TestCalculateTextQuotaSummaryIgnoresMalformedOpenRouterCost(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenRouter},
+		OriginModelName: "claude-malformed-cost",
+		PriceData: hosttypes.PriceData{
+			ModelRatio:         1,
+			CompletionRatio:    1,
+			CacheRatio:         0.5,
+			CacheCreationRatio: 2,
+			GroupRatioInfo:     hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		StartTime: time.Now(),
+	}
+	assert.NotPanics(t, func() {
+		summary := calculateTextQuotaSummary(ctx, info, &dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 10,
+			UsageSemantic:    dto.BillingUsageSemanticAnthropic,
+			Cost:             map[string]any{"amount": 1},
+		})
+		assert.Equal(t, 100, summary.PromptTokens)
+	})
 }
 
 // TestAttachQuotaSaturationPreservesExistingAdminInfo verifies the marker is

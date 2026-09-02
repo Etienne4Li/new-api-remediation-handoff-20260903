@@ -2,10 +2,38 @@ package oauth
 
 import (
 	"context"
+	"strings"
 
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 )
+
+// redirectURIContextKey keeps the callback URI selected when an OAuth flow is
+// started attached to the request that exchanges the authorization code.  It
+// avoids making the Provider interface breaking while still allowing
+// deployments with a separately hosted frontend to use their actual origin.
+type redirectURIContextKey struct{}
+
+// WithRedirectURI returns a context carrying the exact callback URI recorded
+// for an OAuth flow.  Empty values are ignored so legacy callers retain each
+// provider's historical fallback behavior.
+func WithRedirectURI(ctx context.Context, redirectURI string) context.Context {
+	if ctx == nil || strings.TrimSpace(redirectURI) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, redirectURIContextKey{}, strings.TrimSpace(redirectURI))
+}
+
+// RedirectURIFromContext returns a flow-bound callback URI, if one was
+// supplied by the controller.  Providers must treat an empty result as a
+// request to use their legacy configured callback.
+func RedirectURIFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(redirectURIContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
 
 // Provider defines the interface for OAuth providers
 type Provider interface {
@@ -15,8 +43,9 @@ type Provider interface {
 	// IsEnabled returns whether this OAuth provider is enabled
 	IsEnabled() bool
 
-	// ExchangeToken exchanges the authorization code for an access token
-	// The gin.Context is passed for providers that need request info (e.g., for redirect_uri)
+	// ExchangeToken exchanges the authorization code for an access token. The
+	// gin.Context is passed for providers that need request info (e.g., for
+	// redirect_uri).
 	ExchangeToken(ctx context.Context, code string, c *gin.Context) (*OAuthToken, error)
 
 	// GetUserInfo retrieves user information using the access token
@@ -39,4 +68,11 @@ type Provider interface {
 	// writing back a full user snapshot. Providers that persist bindings elsewhere
 	// (e.g. the user_oauth_bindings table) return an empty string.
 	ProviderUserIDColumn() string
+}
+
+// PKCEProvider is an optional extension implemented by providers that accept
+// RFC 7636 verifiers. Keeping it separate from Provider preserves source
+// compatibility for external/custom provider implementations.
+type PKCEProvider interface {
+	ExchangeTokenWithVerifier(ctx context.Context, code, codeVerifier string, c *gin.Context) (*OAuthToken, error)
 }

@@ -69,7 +69,7 @@ func (r *GeminiChatRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	var maxTokens int
 
 	if r.GenerationConfig.MaxOutputTokens != nil && *r.GenerationConfig.MaxOutputTokens > 0 {
-		maxTokens = int(*r.GenerationConfig.MaxOutputTokens)
+		maxTokens = types.SaturatingUintToInt(*r.GenerationConfig.MaxOutputTokens)
 	}
 
 	var inputTexts []string

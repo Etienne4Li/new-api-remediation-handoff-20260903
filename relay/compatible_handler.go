@@ -101,14 +101,14 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 		if common.DebugEnabled {
 			if debugBytes, bErr := storage.Bytes(); bErr == nil {
-				logger.LogDebug(c, "requestBody: %s", debugBytes)
+				logger.LogDebug(c, "requestBody_meta=%s", common.SensitiveLogBody(debugBytes))
 			}
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			return requestConversionError(err)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
@@ -173,7 +173,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			}
 		}
 
-		logger.LogDebug(c, "text request body: %s", jsonData)
+		logger.LogDebug(c, "text request body_meta=%s", common.SensitiveLogBody(jsonData))
 
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
@@ -184,23 +184,23 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		requestBody = body
 	}
 
-	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
-		if httpResp.StatusCode != http.StatusOK {
-			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
-			return newApiErr
-		}
+	info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+	if httpResp.StatusCode != http.StatusOK {
+		newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		// reset status code 重置状态码
+		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+		return newApiErr
 	}
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
@@ -209,14 +209,19 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return newApiErr
 	}
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
 
-	var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
+	var containAudioTokens = usageDto.CompletionTokenDetails.AudioTokens > 0 || usageDto.PromptTokensDetails.AudioTokens > 0
 	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
 
 	if containAudioTokens && containsAudioRatios {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
+		service.PostAudioConsumeQuota(c, info, usageDto, "")
 	} else {
-		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
 }

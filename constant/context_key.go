@@ -54,6 +54,30 @@ const (
 	ContextKeyUserName    ContextKey = "username"
 
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
+	// ContextKeyResponsesUsageAuthoritative marks a Responses stream for which
+	// the upstream supplied a complete, authoritative usage object. It is kept
+	// separate from ContextKeyLocalCountTokens because a local fallback may be
+	// needed for one missing dimension without replacing the dimensions that
+	// came from upstream.
+	ContextKeyResponsesUsageAuthoritative ContextKey = "responses_usage_authoritative"
+	// ContextKeyResponsesStreamIncomplete marks a Responses stream that ended
+	// without a complete protocol terminal sequence (or with an explicit
+	// incomplete/cancelled terminal event). StreamScannerHandler treats EOF and
+	// HandlerStop as normal for some legacy relay formats; Responses billing
+	// must retain this bit so an abrupt EOF cannot silently refund the full
+	// reservation.
+	ContextKeyResponsesStreamIncomplete ContextKey = "responses_stream_incomplete"
+	// ContextKeyResponsesStreamTerminalSeen records that the Responses adapter
+	// observed a protocol terminal event (response.completed/done or an
+	// explicit incomplete/cancelled event). It lets the billing layer
+	// distinguish a legitimate EOF after a terminal event from a truncated
+	// stream that only happened to reach the scanner's EOF path.
+	ContextKeyResponsesStreamTerminalSeen ContextKey = "responses_stream_terminal_seen"
+	// ContextKeyResponsesPartialUsage is set when a Responses stream returned
+	// an upstream/protocol error after exposing billable work.  The relay
+	// handler can use the accompanying usage value to settle that work before
+	// the outer error path attempts to refund the reservation.
+	ContextKeyResponsesPartialUsage ContextKey = "responses_partial_usage"
 
 	ContextKeySystemPromptOverride ContextKey = "system_prompt_override"
 

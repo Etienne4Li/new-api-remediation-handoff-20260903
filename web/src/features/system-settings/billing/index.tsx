@@ -75,6 +75,7 @@ const defaultBillingSettings: BillingSettings = {
   'payment_setting.compliance_confirmed_ip': '',
   StripeApiSecret: '',
   StripeWebhookSecret: '',
+  StripeAccountId: '',
   StripePriceId: '',
   StripeUnitPrice: 8.0,
   StripeMinTopUp: 1,

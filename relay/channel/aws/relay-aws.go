@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -299,10 +298,12 @@ streamLoop:
 					return respErr, nil
 				}
 			case *bedrockruntimeTypes.UnknownUnionMember:
-				fmt.Println("unknown tag:", v.Tag)
+				// The tag is provider-controlled; keep it out of logs in case a
+				// malformed response carries sensitive payload text.
+				common.SysLog("unknown AWS response union tag: tag_meta=" + common.SensitiveLogMeta(v.Tag))
 				return types.NewError(errors.New("unknown response type"), types.ErrorCodeInvalidRequest), nil
 			default:
-				fmt.Println("union is nil or unknown type")
+				common.SysLog("AWS response union is nil or unknown type")
 				return types.NewError(errors.New("nil or unknown response type"), types.ErrorCodeInvalidRequest), nil
 			}
 		}
@@ -341,7 +342,7 @@ func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) 
 		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal(awsResp.Body, &novaResp); err != nil {
+	if err := common.Unmarshal(awsResp.Body, &novaResp); err != nil {
 		return types.NewError(errors.Wrap(err, "unmarshal nova response"), types.ErrorCodeBadResponseBody), nil
 	}
 

@@ -85,12 +85,7 @@ func GetOptions(c *gin.Context) {
 			continue
 		}
 		value := common.Interface2String(v)
-		isSensitiveKey := strings.HasSuffix(k, "Token") ||
-			strings.HasSuffix(k, "Secret") ||
-			strings.HasSuffix(k, "Key") ||
-			strings.HasSuffix(k, "secret") ||
-			strings.HasSuffix(k, "api_key")
-		if isSensitiveKey {
+		if model.IsSensitiveOptionKey(k) {
 			continue
 		}
 		options = append(options, &model.Option{
@@ -141,6 +136,7 @@ func UpdateOption(c *gin.Context) {
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
 	}
+	securityConfig := common.GetSecurityRuntimeConfig()
 	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
 		if isPositiveOptionValue(option.Value.(string)) && !operation_setting.IsPaymentComplianceConfirmed() {
@@ -155,7 +151,7 @@ func UpdateOption(c *gin.Context) {
 	}
 	switch option.Key {
 	case "GitHubOAuthEnabled":
-		if option.Value == "true" && common.GitHubClientId == "" {
+		if option.Value == "true" && securityConfig.GitHubClientID == "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用 GitHub OAuth，请先填入 GitHub Client Id 以及 GitHub Client Secret！",
@@ -179,7 +175,7 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "LinuxDOOAuthEnabled":
-		if option.Value == "true" && common.LinuxDOClientId == "" {
+		if option.Value == "true" && securityConfig.LinuxDOClientID == "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用 LinuxDO OAuth，请先填入 LinuxDO Client Id 以及 LinuxDO Client Secret！",
@@ -187,7 +183,7 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "EmailDomainRestrictionEnabled":
-		if option.Value == "true" && len(common.EmailDomainWhitelist) == 0 {
+		if option.Value == "true" && len(securityConfig.EmailDomainWhitelist) == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用邮箱域名限制，请先填入限制的邮箱域名！",
@@ -195,7 +191,7 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "WeChatAuthEnabled":
-		if option.Value == "true" && common.WeChatServerAddress == "" {
+		if option.Value == "true" && securityConfig.WeChatServerAddress == "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用微信登录，请先填入微信登录相关配置信息！",
@@ -203,7 +199,7 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "TurnstileCheckEnabled":
-		if option.Value == "true" && common.TurnstileSiteKey == "" {
+		if option.Value == "true" && securityConfig.TurnstileSiteKey == "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用 Turnstile 校验，请先填入 Turnstile 校验相关配置信息！",
@@ -212,7 +208,7 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "TelegramOAuthEnabled":
-		if option.Value == "true" && common.TelegramBotToken == "" {
+		if option.Value == "true" && securityConfig.TelegramBotToken == "" {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
 				"message": "无法启用 Telegram OAuth，请先填入 Telegram Bot Token！",
@@ -232,7 +228,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -241,7 +237,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -250,7 +246,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -259,43 +255,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
-			})
-			return
-		}
-	case "ImageRatio":
-		err = ratio_setting.UpdateImageRatioByJSONString(option.Value.(string))
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "图片倍率设置失败: " + err.Error(),
-			})
-			return
-		}
-	case "AudioRatio":
-		err = ratio_setting.UpdateAudioRatioByJSONString(option.Value.(string))
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "音频倍率设置失败: " + err.Error(),
-			})
-			return
-		}
-	case "AudioCompletionRatio":
-		err = ratio_setting.UpdateAudioCompletionRatioByJSONString(option.Value.(string))
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "音频补全倍率设置失败: " + err.Error(),
-			})
-			return
-		}
-	case "CreateCacheRatio":
-		err = ratio_setting.UpdateCreateCacheRatioByJSONString(option.Value.(string))
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "缓存创建倍率设置失败: " + err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -304,7 +264,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -313,7 +273,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -322,7 +282,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -331,7 +291,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -340,7 +300,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -349,7 +309,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -358,7 +318,7 @@ func UpdateOption(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}

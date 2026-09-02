@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	rootcommon "github.com/QuantumNous/new-api/common"
 )
 
 type StreamEndReason string
@@ -101,7 +103,9 @@ func (s *StreamStatus) Summary() string {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "reason=%s", s.EndReason)
 	if s.EndError != nil {
-		fmt.Fprintf(b, " end_error=%q", s.EndError.Error())
+		// End errors can originate from an upstream response or URL. Summary is
+		// emitted to backend logs, so never include the raw error text.
+		fmt.Fprintf(b, " end_error_meta=%s", rootcommon.SensitiveLogMeta(s.EndError.Error()))
 	}
 	s.mu.Lock()
 	if s.ErrorCount > 0 {

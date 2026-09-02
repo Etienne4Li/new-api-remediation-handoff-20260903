@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -45,22 +45,34 @@ export function useOAuthLogin(
   const [isLoading, setIsLoading] = useState(false)
   const [isTelegramDialogOpen, setIsTelegramDialogOpen] = useState(false)
   const [isTelegramPending, setIsTelegramPending] = useState(false)
-  const [githubButtonText, setGithubButtonText] = useState('')
-  const [githubButtonDisabled, setGithubButtonDisabled] = useState(false)
-  const githubTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const [githubPhase, setGithubPhase] = useState<
+    'idle' | 'redirecting' | 'timed-out'
+  >('idle')
+  const githubTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const githubAbortControllerRef = useRef<AbortController | null>(null)
+
+  let githubButtonText = t('Continue with GitHub')
+  if (githubPhase === 'redirecting') {
+    githubButtonText = t('Redirecting to GitHub...')
+  } else if (githubPhase === 'timed-out') {
+    githubButtonText = t(
+      'Request timed out, please refresh and restart GitHub login'
+    )
+  }
+  const githubButtonDisabled = githubPhase !== 'idle'
 
   useEffect(() => {
-    setGithubButtonText(t('Continue with GitHub'))
-
     return () => {
       if (githubTimeoutRef.current) {
         clearTimeout(githubTimeoutRef.current)
       }
+      githubAbortControllerRef.current?.abort()
     }
-  }, [t])
+  }, [])
 
-  const resetSession = async () => {
-    const response = await logout()
+  const resetSession = async (signal?: AbortSignal) => {
+    const response = await logout(signal)
+    if (signal?.aborted) throw signal.reason
     if (!response.success) {
       throw new Error(response.message || t('Failed to sign out session'))
     }
@@ -69,38 +81,67 @@ export function useOAuthLogin(
 
   const handleGitHubLogin = async () => {
     if (!status?.github_client_id) return
-    if (githubButtonDisabled) return
+    if (githubPhase !== 'idle' || githubAbortControllerRef.current) return
+
+    const abortController = new AbortController()
+    githubAbortControllerRef.current = abortController
 
     setIsLoading(true)
-    setGithubButtonDisabled(true)
-    setGithubButtonText(t('Redirecting to GitHub...'))
+    setGithubPhase('redirecting')
 
     if (githubTimeoutRef.current) {
       clearTimeout(githubTimeoutRef.current)
     }
 
     githubTimeoutRef.current = setTimeout(() => {
+      if (githubAbortControllerRef.current !== abortController) return
+      githubTimeoutRef.current = null
+      abortController.abort()
       setIsLoading(false)
-      setGithubButtonText(
-        t('Request timed out, please refresh and restart GitHub login')
-      )
-      setGithubButtonDisabled(true)
+      setGithubPhase('timed-out')
     }, 20000)
 
     try {
-      await resetSession()
-      const state = await createOAuthFlow('github', 'login')
+      await resetSession(abortController.signal)
+      if (abortController.signal.aborted) return
+      const flow = await createOAuthFlow(
+        'github',
+        'login',
+        abortController.signal
+      )
+      if (abortController.signal.aborted) return
 
-      const url = buildGitHubOAuthUrl(status.github_client_id, state)
+      const url = buildGitHubOAuthUrl(
+        status.github_client_id,
+        flow.flow_token,
+        flow.code_challenge,
+        flow.redirect_uri
+      )
+      if (githubTimeoutRef.current) {
+        clearTimeout(githubTimeoutRef.current)
+        githubTimeoutRef.current = null
+      }
+      if (githubAbortControllerRef.current === abortController) {
+        githubAbortControllerRef.current = null
+      }
       window.open(url, '_self')
     } catch {
+      if (abortController.signal.aborted) {
+        if (githubAbortControllerRef.current === abortController) {
+          githubAbortControllerRef.current = null
+        }
+        return
+      }
       toast.error(t('Failed to start GitHub login'))
       if (githubTimeoutRef.current) {
         clearTimeout(githubTimeoutRef.current)
+        githubTimeoutRef.current = null
+      }
+      if (githubAbortControllerRef.current === abortController) {
+        githubAbortControllerRef.current = null
       }
       setIsLoading(false)
-      setGithubButtonText(t('Continue with GitHub'))
-      setGithubButtonDisabled(false)
+      setGithubPhase('idle')
     }
   }
 
@@ -110,9 +151,14 @@ export function useOAuthLogin(
     setIsLoading(true)
     try {
       await resetSession()
-      const state = await createOAuthFlow('discord', 'login')
+      const flow = await createOAuthFlow('discord', 'login')
 
-      const url = buildDiscordOAuthUrl(status.discord_client_id, state)
+      const url = buildDiscordOAuthUrl(
+        status.discord_client_id,
+        flow.flow_token,
+        flow.code_challenge,
+        flow.redirect_uri
+      )
       window.open(url, '_self')
     } catch {
       toast.error(t('Failed to start Discord login'))
@@ -127,12 +173,14 @@ export function useOAuthLogin(
     setIsLoading(true)
     try {
       await resetSession()
-      const state = await createOAuthFlow('oidc', 'login')
+      const flow = await createOAuthFlow('oidc', 'login')
 
       const url = buildOIDCOAuthUrl(
         status.oidc_authorization_endpoint,
         status.oidc_client_id,
-        state
+        flow.flow_token,
+        flow.code_challenge,
+        flow.redirect_uri
       )
       window.open(url, '_self')
     } catch {
@@ -148,9 +196,14 @@ export function useOAuthLogin(
     setIsLoading(true)
     try {
       await resetSession()
-      const state = await createOAuthFlow('linuxdo', 'login')
+      const flow = await createOAuthFlow('linuxdo', 'login')
 
-      const url = buildLinuxDOOAuthUrl(status.linuxdo_client_id, state)
+      const url = buildLinuxDOOAuthUrl(
+        status.linuxdo_client_id,
+        flow.flow_token,
+        flow.code_challenge,
+        flow.redirect_uri
+      )
       window.open(url, '_self')
     } catch {
       toast.error(t('Failed to start LinuxDO login'))
@@ -209,14 +262,17 @@ export function useOAuthLogin(
     setIsLoading(true)
     try {
       await resetSession()
-      const state = await createOAuthFlow(provider.slug, 'login')
+      const flow = await createOAuthFlow(provider.slug, 'login')
 
-      const redirectUri = `${window.location.origin}/oauth/${provider.slug}`
+      const redirectUri =
+        flow.redirect_uri || `${window.location.origin}/oauth/${provider.slug}`
       const url = new URL(provider.authorization_endpoint)
       url.searchParams.set('client_id', provider.client_id)
       url.searchParams.set('redirect_uri', redirectUri)
       url.searchParams.set('response_type', 'code')
-      url.searchParams.set('state', state)
+      url.searchParams.set('state', flow.flow_token)
+      url.searchParams.set('code_challenge', flow.code_challenge)
+      url.searchParams.set('code_challenge_method', 'S256')
       if (provider.scopes) {
         url.searchParams.set('scope', provider.scopes)
       }

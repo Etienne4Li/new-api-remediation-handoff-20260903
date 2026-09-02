@@ -46,7 +46,15 @@ export function RenameDeploymentDialog({
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   useEffect(() => {
-    if (open) setName(currentName || '')
+    if (!open) return
+    const nextName = currentName || ''
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) setName(nextName)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [open, currentName])
 
   const trimmed = name.trim()

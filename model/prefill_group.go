@@ -44,7 +44,7 @@ func (j *JSONValue) Scan(value interface{}) error {
 		return nil
 	default:
 		// 其他类型尝试序列化为 JSON
-		b, err := json.Marshal(v)
+		b, err := common.Marshal(v)
 		if err != nil {
 			return err
 		}
@@ -104,13 +104,35 @@ func IsPrefillGroupNameDuplicated(id int, name string) (bool, error) {
 
 // Update 更新组
 func (g *PrefillGroup) Update() error {
+	if g == nil || g.Id <= 0 {
+		return gorm.ErrRecordNotFound
+	}
 	g.UpdatedTime = common.GetTimestamp()
-	return DB.Save(g).Error
+	result := DB.Model(&PrefillGroup{}).Where("id = ?", g.Id).
+		Select("name", "type", "items", "description", "updated_time").
+		Updates(g)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // DeleteByID 根据 ID 删除组
 func DeletePrefillGroupByID(id int) error {
-	return DB.Delete(&PrefillGroup{}, id).Error
+	if id <= 0 {
+		return gorm.ErrRecordNotFound
+	}
+	result := DB.Delete(&PrefillGroup{}, id)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // GetAllPrefillGroups 获取全部组，可按类型过滤（为空则返回全部）

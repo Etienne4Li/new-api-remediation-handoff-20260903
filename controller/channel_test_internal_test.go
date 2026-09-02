@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestValidateChannelProxy(t *testing.T) {
@@ -87,6 +88,49 @@ func TestValidateChannelRequiresNewAPIBaseURL(t *testing.T) {
 	}
 }
 
+func TestValidateChannelRejectsCredentialsInBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		wantErr string
+	}{
+		{name: "default URL", baseURL: ""},
+		{name: "ordinary query", baseURL: "https://provider.example/v1?api-version=2024-02-01"},
+		{name: "local Ollama endpoint", baseURL: "http://localhost:11434/v1"},
+		{name: "GLM endpoint identifier", baseURL: "glm-coding-plan"},
+		{name: "Kimi endpoint identifier", baseURL: "kimi-coding-plan"},
+		{name: "Doubao endpoint identifier", baseURL: "doubao-coding-plan"},
+		{name: "userinfo", baseURL: "https://user:password@provider.example/v1", wantErr: "userinfo"},
+		{name: "API key query", baseURL: "https://provider.example/v1?api_key=secret", wantErr: "credential query"},
+		{name: "access token query", baseURL: "https://provider.example/v1?access_token=secret", wantErr: "credential query"},
+		{name: "Google API key query", baseURL: "https://provider.example/v1?X-Goog-API-Key=secret", wantErr: "credential query"},
+		{name: "fragment", baseURL: "https://provider.example/v1#token=secret", wantErr: "fragment"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateChannel(&model.Channel{
+				Type:    constant.ChannelTypeOpenAI,
+				BaseURL: &tt.baseURL,
+			}, false)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestValidateChannelRejectsWeightThatCanOverflowRouting(t *testing.T) {
+	weight := model.MaxChannelWeight + 1
+	err := validateChannel(&model.Channel{
+		Type:   constant.ChannelTypeOpenAI,
+		Weight: &weight,
+	}, false)
+	require.ErrorContains(t, err, "channel weight must be between")
+}
+
 func TestNewAPIChannelRegistration(t *testing.T) {
 	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeNewAPI)
 
@@ -150,6 +194,32 @@ func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 		Setting: &setting,
 	}
 	require.NoError(t, db.Create(origin).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", origin.Id)}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy", nil)
+
+	CopyChannel(ctx)
+
+	assert.Contains(t, recorder.Body.String(), "invalid channel settings")
+	var channelCount int64
+	require.NoError(t, db.Model(&model.Channel{}).Count(&channelCount).Error)
+	assert.Equal(t, int64(1), channelCount)
+}
+
+func TestCopyChannelRejectsCredentialBearingLegacyBaseURL(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	baseURL := "https://user:password@provider.example/v1?api_key=legacy-secret"
+	origin := &model.Channel{
+		Type:      constant.ChannelTypeOpenAI,
+		Name:      "legacy credential URL",
+		LegacyKey: "legacy-key",
+		Models:    "gpt-test",
+		Group:     "default",
+		BaseURL:   &baseURL,
+	}
+	require.NoError(t, db.Session(&gorm.Session{SkipHooks: true}).Create(origin).Error)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

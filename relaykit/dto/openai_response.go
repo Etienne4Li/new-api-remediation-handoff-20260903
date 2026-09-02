@@ -37,6 +37,28 @@ type OpenAITextResponseChoice struct {
 	FinishReason string `json:"finish_reason"`
 }
 
+// UnmarshalJSON captures the response-only images extension without changing
+// the shared Message request contract or its promoted helper methods.
+func (c *OpenAITextResponseChoice) UnmarshalJSON(data []byte) error {
+	type responseMessage struct {
+		Message
+		Images json.RawMessage `json:"images"`
+	}
+	var decoded struct {
+		Message      responseMessage `json:"message"`
+		Index        int             `json:"index"`
+		FinishReason string          `json:"finish_reason"`
+	}
+	if err := kitutil.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	c.Message = decoded.Message.Message
+	c.Message.Images = decoded.Message.Images
+	c.Index = decoded.Index
+	c.FinishReason = decoded.FinishReason
+	return nil
+}
+
 type OpenAITextResponse struct {
 	Id      string                     `json:"id"`
 	Model   string                     `json:"model"`
@@ -336,6 +358,14 @@ type ResponsesOutput struct {
 	CallId    string                   `json:"call_id,omitempty"`
 	Name      string                   `json:"name,omitempty"`
 	Arguments json.RawMessage          `json:"arguments,omitempty"`
+	// Input is used by custom_tool_call output items.  Keeping it alongside
+	// Arguments lets the Responses relay account for a completed custom tool
+	// call even when the provider did not emit input deltas.
+	Input string `json:"input,omitempty"`
+	// Code is emitted by code_interpreter_call output items on some compatible
+	// Responses providers.  It is an observable generated-output field, not a
+	// result payload, and may be used for conservative local token counting.
+	Code string `json:"code,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.
@@ -384,10 +414,29 @@ const (
 
 // ResponsesStreamResponse 用于处理 /v1/responses 流式响应
 type ResponsesStreamResponse struct {
-	Type     string                   `json:"type"`
+	Type string `json:"type"`
+	// Responses error events may carry an error object or code/message/param
+	// directly at the event level, rather than nesting it under response.
+	Code    any    `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Param   string `json:"param,omitempty"`
+	Error   any    `json:"error,omitempty"`
+	// A few OpenAI-compatible providers put usage directly on an error or
+	// terminal event instead of nesting it under response. Keep this optional
+	// so the relay can settle work exposed before response.failed/response.error
+	// without changing the official nested-response shape.
+	Usage    *Usage                   `json:"usage,omitempty"`
 	Response *OpenAIResponsesResponse `json:"response,omitempty"`
 	Delta    string                   `json:"delta,omitempty"`
-	Item     *ResponsesOutput         `json:"item,omitempty"`
+	// Text/Arguments/Input/Transcript/Code are populated by terminal
+	// per-item events (for example response.output_text.done and
+	// response.function_call_arguments.done).  They are intentionally kept
+	// separate from Delta because a done event may arrive without any deltas.
+	Text       string           `json:"text,omitempty"`
+	Arguments  string           `json:"arguments,omitempty"`
+	Input      string           `json:"input,omitempty"`
+	Transcript string           `json:"transcript,omitempty"`
+	Item       *ResponsesOutput `json:"item,omitempty"`
 	// - response.function_call_arguments.delta
 	// - response.function_call_arguments.done
 	OutputIndex  *int                           `json:"output_index,omitempty"`
@@ -395,6 +444,32 @@ type ResponsesStreamResponse struct {
 	SummaryIndex *int                           `json:"summary_index,omitempty"`
 	ItemID       string                         `json:"item_id,omitempty"`
 	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
+}
+
+// GetOpenAIError normalizes terminal Responses error events from both the
+// official protocol and compatible providers.
+func (r *ResponsesStreamResponse) GetOpenAIError() *types.OpenAIError {
+	if r == nil {
+		return nil
+	}
+	if r.Response != nil {
+		if openAIError := r.Response.GetOpenAIError(); openAIError != nil {
+			return openAIError
+		}
+	}
+	if openAIError := GetOpenAIError(r.Error); openAIError != nil &&
+		(openAIError.Message != "" || openAIError.Code != nil || openAIError.Type != "") {
+		return openAIError
+	}
+	if r.Message == "" && r.Code == nil && r.Param == "" {
+		return nil
+	}
+	return &types.OpenAIError{
+		Message: r.Message,
+		Type:    "upstream_error",
+		Param:   r.Param,
+		Code:    r.Code,
+	}
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构

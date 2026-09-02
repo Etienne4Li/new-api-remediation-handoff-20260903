@@ -5,10 +5,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -107,7 +105,7 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 		var tencentResponse TencentChatResponse
 		err := common.Unmarshal([]byte(data), &tencentResponse)
 		if err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			continue
 		}
 
@@ -118,12 +116,12 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 
 		err = helper.ObjectData(c, response)
 		if err != nil {
-			common.SysLog(err.Error())
+			common.SysLog("failed to send stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		common.SysLog("error reading stream: " + err.Error())
+		common.SysLog("error reading stream: error_meta=" + common.SensitiveLogMeta(err.Error()))
 	}
 
 	helper.Done(c)
@@ -135,12 +133,12 @@ func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *htt
 
 func tencentHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	var tencentSb TencentChatResponseSB
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
-	err = json.Unmarshal(responseBody, &tencentSb)
+	err = common.Unmarshal(responseBody, &tencentSb)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -193,7 +191,7 @@ func getTencentSign(req TencentChatRequest, adaptor *Adaptor, secId, secKey stri
 	canonicalHeaders := fmt.Sprintf("content-type:%s\nhost:%s\nx-tc-action:%s\n",
 		"application/json", host, strings.ToLower(adaptor.Action))
 	signedHeaders := "content-type;host;x-tc-action"
-	payload, _ := json.Marshal(req)
+	payload, _ := common.Marshal(req)
 	hashedRequestPayload := sha256hex(string(payload))
 	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
 		httpRequestMethod,

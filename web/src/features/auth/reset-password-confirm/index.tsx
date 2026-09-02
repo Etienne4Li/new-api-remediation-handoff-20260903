@@ -105,14 +105,23 @@ export function ResetPasswordConfirm({
     }
   }
 
+  let primaryActionLabel = t('auth.resetPasswordConfirm.confirm')
+  if (newPassword) {
+    primaryActionLabel = t('auth.resetPasswordConfirm.backToLogin')
+  } else if (isActive) {
+    primaryActionLabel = t('auth.resetPasswordConfirm.retry', {
+      seconds: secondsLeft,
+    })
+  }
+
   return (
     <AuthLayout>
-      <div className='w-full space-y-8'>
-        <div className='space-y-2'>
-          <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
+      <div className='w-full space-y-7'>
+        <div className='space-y-2.5'>
+          <h2 className='text-2xl font-semibold sm:text-3xl'>
             {t('Reset password')}
           </h2>
-          <p className='text-muted-foreground text-left text-sm sm:text-base'>
+          <p className='text-muted-foreground text-sm leading-6'>
             {newPassword
               ? t('auth.resetPasswordConfirm.success')
               : t('auth.resetPasswordConfirm.description')}
@@ -136,6 +145,7 @@ export function ResetPasswordConfirm({
               value={email || ''}
               disabled
               placeholder={t('Waiting for email...')}
+              className='h-11'
             />
           </div>
 
@@ -147,13 +157,15 @@ export function ResetPasswordConfirm({
                   id='password'
                   value={newPassword}
                   disabled
-                  className='font-mono'
+                  className='h-11 font-mono'
                 />
                 <Button
                   type='button'
                   size='icon'
                   variant='outline'
                   onClick={handleCopy}
+                  aria-label={t('Copy')}
+                  className='size-11'
                 >
                   {copied ? (
                     <CheckIcon className='h-4 w-4' />
@@ -169,7 +181,7 @@ export function ResetPasswordConfirm({
           )}
 
           <Button
-            className='w-full'
+            className='h-11 w-full'
             onClick={
               newPassword
                 ? () => navigate({ to: '/sign-in', replace: true })
@@ -179,13 +191,7 @@ export function ResetPasswordConfirm({
               newPassword ? false : loading || isActive || !isValidResetLink
             }
           >
-            {newPassword
-              ? t('auth.resetPasswordConfirm.backToLogin')
-              : isActive
-                ? t('auth.resetPasswordConfirm.retry', {
-                    seconds: secondsLeft,
-                  })
-                : t('auth.resetPasswordConfirm.confirm')}
+            {primaryActionLabel}
           </Button>
 
           {!newPassword && (

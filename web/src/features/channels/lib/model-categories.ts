@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
 type ModelCategoryRule = {
   name: string
   keywords?: readonly string[]
@@ -144,7 +143,7 @@ const MODEL_CATEGORY_RULES: readonly ModelCategoryRule[] = [
   { name: 'Jimeng', keywords: ['jimeng'] },
 ]
 
-export function getModelCategory(modelName: string): string {
+function getModelCategory(modelName: string): string {
   const normalizedName = modelName.trim().toLowerCase()
 
   for (const rule of MODEL_CATEGORY_RULES) {

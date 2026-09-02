@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -35,6 +36,9 @@ var defaultClaudeSettings = ClaudeSettings{
 
 // 全局实例
 var claudeSettings = defaultClaudeSettings
+var claudeSettingsMu sync.RWMutex
+
+type claudeSettingsFields ClaudeSettings
 
 func init() {
 	// 注册到全局配置管理器
@@ -43,11 +47,35 @@ func init() {
 
 // GetClaudeSettings 获取Claude配置
 func GetClaudeSettings() *ClaudeSettings {
-	// check default max tokens must have default key
-	if _, ok := claudeSettings.DefaultMaxTokens["default"]; !ok {
-		claudeSettings.DefaultMaxTokens["default"] = 8192
+	claudeSettingsMu.RLock()
+	defer claudeSettingsMu.RUnlock()
+	settings := claudeSettings
+	settings.HeadersSettings = cloneClaudeHeaders(claudeSettings.HeadersSettings)
+	settings.DefaultMaxTokens = cloneIntMap(claudeSettings.DefaultMaxTokens)
+	if _, ok := settings.DefaultMaxTokens["default"]; !ok {
+		settings.DefaultMaxTokens["default"] = 8192
 	}
-	return &claudeSettings
+	return &settings
+}
+
+func cloneIntMap(input map[string]int) map[string]int {
+	output := make(map[string]int, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneClaudeHeaders(input map[string]map[string][]string) map[string]map[string][]string {
+	output := make(map[string]map[string][]string, len(input))
+	for model, headers := range input {
+		copyHeaders := make(map[string][]string, len(headers))
+		for key, values := range headers {
+			copyHeaders[key] = append([]string(nil), values...)
+		}
+		output[model] = copyHeaders
+	}
+	return output
 }
 
 func (c *ClaudeSettings) WriteHeaders(originModel string, httpHeader *http.Header) {
@@ -88,6 +116,58 @@ func (c *ClaudeSettings) GetDefaultMaxTokens(model string) int {
 		return maxTokens
 	}
 	return c.DefaultMaxTokens["default"]
+}
+
+func (c *ClaudeSettings) ConfigSnapshot() interface{} {
+	if c == nil {
+		return ClaudeSettings{}
+	}
+	claudeSettingsMu.RLock()
+	defer claudeSettingsMu.RUnlock()
+	settings := *c
+	settings.HeadersSettings = cloneClaudeHeaders(c.HeadersSettings)
+	settings.DefaultMaxTokens = cloneIntMap(c.DefaultMaxTokens)
+	return settings
+}
+
+func (c *ClaudeSettings) ValidateConfigMap(values map[string]string) error {
+	if c == nil {
+		return config.ValidateConfigFromMap(&ClaudeSettings{}, values)
+	}
+	claudeSettingsMu.RLock()
+	staged := claudeSettingsFields(ClaudeSettings{
+		HeadersSettings:                       cloneClaudeHeaders(c.HeadersSettings),
+		DefaultMaxTokens:                      cloneIntMap(c.DefaultMaxTokens),
+		ThinkingAdapterEnabled:                c.ThinkingAdapterEnabled,
+		ThinkingAdapterBudgetTokensPercentage: c.ThinkingAdapterBudgetTokensPercentage,
+	})
+	claudeSettingsMu.RUnlock()
+	return config.ValidateConfigFromMap(&staged, values)
+}
+
+func (c *ClaudeSettings) UpdateConfigMap(values map[string]string) error {
+	if c == nil {
+		return fmt.Errorf("claude settings must not be nil")
+	}
+	claudeSettingsMu.Lock()
+	defer claudeSettingsMu.Unlock()
+	staged := claudeSettingsFields(ClaudeSettings{
+		HeadersSettings:                       cloneClaudeHeaders(c.HeadersSettings),
+		DefaultMaxTokens:                      cloneIntMap(c.DefaultMaxTokens),
+		ThinkingAdapterEnabled:                c.ThinkingAdapterEnabled,
+		ThinkingAdapterBudgetTokensPercentage: c.ThinkingAdapterBudgetTokensPercentage,
+	})
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	updated := ClaudeSettings(staged)
+	updated.HeadersSettings = cloneClaudeHeaders(staged.HeadersSettings)
+	updated.DefaultMaxTokens = cloneIntMap(staged.DefaultMaxTokens)
+	if _, ok := updated.DefaultMaxTokens["default"]; !ok {
+		updated.DefaultMaxTokens["default"] = 8192
+	}
+	*c = updated
+	return nil
 }
 
 // ValidateClaudeDefaultMaxTokens validates the JSON persisted by the option

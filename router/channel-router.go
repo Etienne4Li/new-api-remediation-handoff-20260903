@@ -18,7 +18,15 @@ type permissionRoute struct {
 
 func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	channelRoute := apiRouter.Group("/channel")
-	channelRoute.Use(middleware.AdminAuth())
+	// Channel management is a browser-facing admin API as well as a bearer
+	// API. Apply the exact-origin CORS policy before authentication so
+	// cross-origin preflights/requests cannot reach state-changing handlers
+	// unless their origin is explicitly configured.
+	channelRoute.Use(middleware.CORS(), middleware.AdminAuth())
+	// Gin only runs group middleware after a route has matched.  Register an
+	// OPTIONS catch-all so browser preflights are handled by CORS (and aborted
+	// before AdminAuth) instead of falling through to the global 404 handler.
+	channelRoute.OPTIONS("/*path", func(c *gin.Context) {})
 
 	channelRoute.POST("/:id/key",
 		middleware.RootAuth(),

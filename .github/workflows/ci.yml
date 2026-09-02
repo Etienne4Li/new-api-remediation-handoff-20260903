@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend vet, build, and test
+    name: Backend vet, build, test, and race
     if: github.event.action != 'closed' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -54,11 +54,34 @@ jobs:
         working-directory: relaykit
         run: go build ./...
 
+      - name: Validate hardened Compose policy
+        env:
+          NEW_API_IMAGE: calciumion/new-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          NEWAPI_REDIS_IMAGE: redis:7-alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          NEWAPI_POSTGRES_IMAGE: postgres:15-alpine@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+        run: |
+          set -euo pipefail
+          secret_dir="$(mktemp -d)"
+          trap 'rm -rf "$secret_dir"' EXIT
+          chmod 700 "$secret_dir"
+          for name in session_secret crypto_secret sql_dsn redis_conn_string redis_password postgres_password; do
+            printf 'ci-placeholder\n' > "$secret_dir/$name"
+            chmod 600 "$secret_dir/$name"
+          done
+          NEWAPI_SECRET_DIR="$secret_dir" bash scripts/verify-secure-compose.sh
+          NEWAPI_SECRET_DIR="$secret_dir" docker compose -f docker-compose.secure.yml config --quiet
+
+      - name: Test Docker attestation contracts
+        run: bash scripts/test-docker-attestations.sh
+
       - name: Test root and relaykit modules
         run: make test
 
+      - name: Race-test stateful backend packages
+        run: go test -race ./common ./model ./service ./controller ./relay ./router ./middleware -count=1
+
   frontend:
-    name: Frontend typecheck and test
+    name: Frontend audit, static checks, test, and build
     if: github.event.action != 'closed' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -81,8 +104,23 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Audit dependencies
+        run: bun audit --json
+
+      - name: Check formatting
+        run: bun run format:check
+
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Lint
+        run: bun run lint
+
+      - name: Check unused code and dependencies
+        run: bun run knip
+
       - name: Test
         run: bun run test
+
+      - name: Build and enforce bundle budget
+        run: bun run build

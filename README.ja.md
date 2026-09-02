@@ -319,13 +319,13 @@ docker run --name new-api -d --restart always \
 | `SESSION_SECRET` | 認証署名シークレット。すべてのノードで同じ値が必要 | - |
 | `SESSION_COOKIE_SECURE` | `false`/未設定ではローカル HTTP 開発プロキシ向けに refresh/logout の OriginGuard を無効化し、`true` では Secure Cookie と厳格な Origin 検証を有効化 | `false` |
 | `SESSION_COOKIE_TRUSTED_URL` | Secure モードでは必須。refresh/logout を許可する完全一致の HTTPS Origin をカンマ区切りで指定。relay CORS 設定ではありません | - |
-| `TRUSTED_PROXIES` | 未設定/空ではループバック、RFC 1918、IPv6 ULA を信頼して起動時に警告し、`none` ではすべて無効、明示的なプロキシ IP/CIDR リストは既定値を完全に置き換えます | `127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` |
+| `TRUSTED_PROXIES` | 未設定/空では TCP 直結元だけを使用して起動時に警告します。`none` も同じ厳格モードで、明示した IP/CIDR リストが既定値を置き換えます（エッジで `X-Forwarded-For` を消去して再構築してください） | 空（直結元モード） |
 | `USER_SESSION_ACTIVE_LIMIT` | 1 ユーザーあたりの有効なログイン Session 上限 | `50` |
 | `USER_SESSION_ISSUANCE_LIMIT` | カウント期間内に作成できる Session 数の上限（取り消し済みを含む） | `100` |
 | `USER_SESSION_ISSUANCE_WINDOW_SECONDS` | Session 発行のカウント期間（秒）。取り消し済み Session の保持期間を超える場合は自動的に制限 | `86400` |
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | 監査と発行数計算のため取り消し済み Session を保持する日数 | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | 1 時間あたりのグローバル Session 発行数の警告閾値。ログインは拒否しません | `5000` |
-| `CRYPTO_SECRET` | キャッシュキー用 HMAC シークレット。Redis を共有するノードでは同じ実効値が必要 | デフォルトは `SESSION_SECRET` |
+| `CRYPTO_SECRET` | 保存時暗号化された認証情報、フィンガープリント、キャッシュ HMAC の永続ルート鍵。DB を共有する全ノードで同じ値を維持し、既存 DB では直接ローテーションしないでください | デフォルトは `SESSION_SECRET` |
 | `SQL_DSN** | データベース接続文字列 | - |
 | `REDIS_CONN_STRING` | Redis接続文字列 | - |
 | `STREAMING_TIMEOUT` | ストリーミング応答のタイムアウト時間（秒） | `300` |
@@ -405,7 +405,7 @@ docker run --name new-api -d --restart always \
 
 > [!WARNING]
 > - すべてのノードで同じプライマリデータベースと同じ `SESSION_SECRET` を使用してください。異なる場合、Access Token、Refresh セッション、一時認証フローを一貫して検証できません。
-> - 同じ Redis に接続するノードでは同じ `CRYPTO_SECRET` も設定してください。異なる場合、キャッシュキーのダイジェストが一致せず、共有エントリを正しく再利用できません。
+> - 同じ DB を共有するノードでは同じ `CRYPTO_SECRET` を維持してください。この鍵はキャッシュキーだけでなく、保存時暗号化された認証情報とフィンガープリントも保護します。明示的な再暗号化移行なしに既存 DB の鍵を置き換えないでください。
 
 ログイン Session とユーザー単位の有効数／発行数制限では、データベースが信頼できる唯一の情報源です。Redis の Session エントリは短期キャッシュであり、TTL は `SYNC_FREQUENCY`（デフォルト 60 秒）に従い、Session の残り有効期間を超えません。
 

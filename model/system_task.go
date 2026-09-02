@@ -21,6 +21,11 @@ const (
 	SystemTaskTypeModelUpdate    = "model_update"
 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
+	// SystemTaskTypeRetentionCleanup is a scheduled, bounded maintenance job
+	// for terminal task rows. It is disabled unless RETENTION_CLEANUP_ENABLED is
+	// explicitly enabled, so deployments can choose a retention policy that
+	// satisfies their legal/audit requirements.
+	SystemTaskTypeRetentionCleanup = "retention_cleanup"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

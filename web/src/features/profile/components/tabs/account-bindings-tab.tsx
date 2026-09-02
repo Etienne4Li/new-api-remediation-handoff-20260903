@@ -156,7 +156,14 @@ export function AccountBindingsTab({
   }
 
   const startOAuthBinding = useCallback(
-    async (provider: string, buildUrl: (state: string) => string) => {
+    async (
+      provider: string,
+      buildUrl: (
+        state: string,
+        codeChallenge: string,
+        redirectURI?: string
+      ) => string
+    ) => {
       const previous = pendingOAuthBinding.current
       if (previous) {
         clearPendingOAuthBinding(previous)
@@ -179,7 +186,8 @@ export function AccountBindingsTab({
       )
       pendingOAuthBinding.current = pending
       try {
-        const state = await createOAuthFlow(provider, 'bind')
+        const flow = await createOAuthFlow(provider, 'bind')
+        const state = flow.flow_token
         if (pendingOAuthBinding.current !== pending || popup.closed) return
         // Stamp the popup while it is still same-origin (about:blank). Tying
         // the mark to this state prevents a stale popup from claiming a later
@@ -191,7 +199,9 @@ export function AccountBindingsTab({
           throw new Error('OAuth bind popup storage is unavailable')
         }
         pending.state = state
-        popup.location.replace(buildUrl(state))
+        popup.location.replace(
+          buildUrl(state, flow.code_challenge, flow.redirect_uri)
+        )
       } catch {
         const isCurrent = pendingOAuthBinding.current === pending
         clearPendingOAuthBinding(pending)
@@ -203,16 +213,22 @@ export function AccountBindingsTab({
   )
 
   const handleBindCustomOAuth = async (provider: CustomOAuthProviderInfo) => {
-    await startOAuthBinding(provider.slug, (state) => {
-      const redirectUri = `${window.location.origin}/oauth/${provider.slug}`
-      const url = new URL(provider.authorization_endpoint)
-      url.searchParams.set('client_id', provider.client_id)
-      url.searchParams.set('redirect_uri', redirectUri)
-      url.searchParams.set('response_type', 'code')
-      url.searchParams.set('state', state)
-      if (provider.scopes) url.searchParams.set('scope', provider.scopes)
-      return url.toString()
-    })
+    await startOAuthBinding(
+      provider.slug,
+      (state, codeChallenge, redirectURI) => {
+        const redirectUri =
+          redirectURI || `${window.location.origin}/oauth/${provider.slug}`
+        const url = new URL(provider.authorization_endpoint)
+        url.searchParams.set('client_id', provider.client_id)
+        url.searchParams.set('redirect_uri', redirectUri)
+        url.searchParams.set('response_type', 'code')
+        url.searchParams.set('state', state)
+        url.searchParams.set('code_challenge', codeChallenge)
+        url.searchParams.set('code_challenge_method', 'S256')
+        if (provider.scopes) url.searchParams.set('scope', provider.scopes)
+        return url.toString()
+      }
+    )
   }
 
   useEffect(() => {
@@ -331,8 +347,10 @@ export function AccountBindingsTab({
         onBind: () => {
           const clientId = status?.github_client_id
           if (clientId) {
-            void startOAuthBinding('github', (state) =>
-              buildGitHubOAuthUrl(clientId, state)
+            void startOAuthBinding(
+              'github',
+              (state, codeChallenge, redirectURI) =>
+                buildGitHubOAuthUrl(clientId, state, codeChallenge, redirectURI)
             )
           }
         },
@@ -351,8 +369,15 @@ export function AccountBindingsTab({
         onBind: () => {
           const clientId = status?.discord_client_id
           if (clientId) {
-            void startOAuthBinding('discord', (state) =>
-              buildDiscordOAuthUrl(clientId, state)
+            void startOAuthBinding(
+              'discord',
+              (state, codeChallenge, redirectURI) =>
+                buildDiscordOAuthUrl(
+                  clientId,
+                  state,
+                  codeChallenge,
+                  redirectURI
+                )
             )
           }
         },
@@ -372,8 +397,16 @@ export function AccountBindingsTab({
           const authorizationEndpoint = status?.oidc_authorization_endpoint
           const clientId = status?.oidc_client_id
           if (authorizationEndpoint && clientId) {
-            void startOAuthBinding('oidc', (state) =>
-              buildOIDCOAuthUrl(authorizationEndpoint, clientId, state)
+            void startOAuthBinding(
+              'oidc',
+              (state, codeChallenge, redirectURI) =>
+                buildOIDCOAuthUrl(
+                  authorizationEndpoint,
+                  clientId,
+                  state,
+                  codeChallenge,
+                  redirectURI
+                )
             )
           }
         },
@@ -405,8 +438,15 @@ export function AccountBindingsTab({
         onBind: () => {
           const clientId = status?.linuxdo_client_id
           if (clientId) {
-            void startOAuthBinding('linuxdo', (state) =>
-              buildLinuxDOOAuthUrl(clientId, state)
+            void startOAuthBinding(
+              'linuxdo',
+              (state, codeChallenge, redirectURI) =>
+                buildLinuxDOOAuthUrl(
+                  clientId,
+                  state,
+                  codeChallenge,
+                  redirectURI
+                )
             )
           }
         },

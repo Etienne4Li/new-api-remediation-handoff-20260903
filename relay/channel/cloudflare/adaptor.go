@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -21,13 +22,11 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatClaude))
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -91,15 +90,14 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 	requestBody := &bytes.Buffer{}
 
 	// 将上传的文件内容复制到临时文件
-	if _, err := io.Copy(requestBody, file); err != nil {
+	if _, err := common.CopyBodyLimited(requestBody, file, common.GetMaxFileDownloadBytes()); err != nil {
 		return nil, err
 	}
 	return requestBody, nil
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIImage))
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {

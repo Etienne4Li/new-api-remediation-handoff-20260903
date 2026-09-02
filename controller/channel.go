@@ -64,11 +64,99 @@ func parseStatusFilter(statusParam string) int {
 	}
 }
 
+// parseChannelBoolQuery rejects malformed explicit booleans instead of
+// silently selecting the false branch.  This matters for tag-mode and sorting
+// flags because a typo can otherwise switch a bounded query into a different
+// (and much more expensive) code path.
+func parseChannelBoolQuery(c *gin.Context, key string, defaultValue bool) (bool, bool) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return defaultValue, true
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		common.ApiErrorMsg(c, "参数错误")
+		return false, false
+	}
+	return value, true
+}
+
+func parseChannelTypeQuery(c *gin.Context) (int, bool) {
+	raw := strings.TrimSpace(c.Query("type"))
+	if raw == "" {
+		return -1, true
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		common.ApiErrorMsg(c, "参数错误")
+		return -1, false
+	}
+	return value, true
+}
+
+func validateChannelPaginationQuery(c *gin.Context) bool {
+	for _, key := range []string{"p", "page_size", "ps", "size"} {
+		raw, exists := c.GetQuery(key)
+		if !exists || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || value <= 0 {
+			common.ApiErrorMsg(c, "参数错误")
+			return false
+		}
+	}
+	return true
+}
+
 func clearChannelInfo(channel *model.Channel) {
+	if channel == nil {
+		return
+	}
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
 	}
+}
+
+// channelResponseForActor projects a channel onto the fields that the current
+// dashboard actor is allowed to read.  Channel keys always remain hidden here;
+// the dedicated key endpoint requires a fresh security proof.  Ordinary
+// ChannelRead administrators must not receive credential-bearing configuration
+// (proxy URLs, arbitrary header/parameter overrides, or advanced-route auth)
+// merely because GORM serializes the model's exported fields.
+func channelResponseForActor(c *gin.Context, channel *model.Channel) *model.Channel {
+	if channel == nil {
+		return nil
+	}
+	projected := *channel
+	projected.Key = ""
+	projected.Keys = nil
+	clearChannelInfo(&projected)
+
+	canReadSensitive := authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite)
+	if !canReadSensitive {
+		// These fields are either credentials themselves or arbitrary JSON that
+		// can carry credentials. Keep the response shape stable while replacing
+		// their contents with inert values expected by the frontend schema.
+		projected.BaseURL = nil
+		projected.Setting = nil
+		projected.ParamOverride = nil
+		projected.HeaderOverride = nil
+		projected.OtherSettings = "{}"
+		projected.OtherInfo = ""
+	}
+	return &projected
+}
+
+func channelKeyPreview(key string) string {
+	if strings.TrimSpace(key) == "" {
+		return ""
+	}
+	// A prefix is sufficient to identify a credential to an attacker and can
+	// be combined with provider-specific key formats. Use a stable one-way
+	// fingerprint instead so operators can still distinguish duplicate keys.
+	return "hash:" + common.SensitiveLogHash(key)
 }
 
 func applyChannelStatusFilter(query *gorm.DB, statusFilter int) *gorm.DB {
@@ -93,27 +181,33 @@ func buildChannelListQuery(group string, statusFilter int, typeFilter int) *gorm
 
 func GetChannelOps(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
-		"retry_times": common.RetryTimes,
+		"retry_times": common.GetRetryTimes(),
 	})
 }
 
 func GetAllChannels(c *gin.Context) {
+	if !validateChannelPaginationQuery(c) {
+		return
+	}
 	pageInfo := common.GetPageQuery(c)
 	channelData := make([]*model.Channel, 0)
-	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
+	idSort, ok := parseChannelBoolQuery(c, "id_sort", false)
+	if !ok {
+		return
+	}
 	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
-	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
+	enableTagMode, ok := parseChannelBoolQuery(c, "tag_mode", false)
+	if !ok {
+		return
+	}
 	groupFilter := model.NormalizeChannelGroupFilter(c.Query("group"))
 	statusParam := c.Query("status")
 	// statusFilter: -1 all, 1 enabled, 0 disabled (include auto & manual)
 	statusFilter := parseStatusFilter(statusParam)
 	// type filter
-	typeStr := c.Query("type")
-	typeFilter := -1
-	if typeStr != "" {
-		if t, err := strconv.Atoi(typeStr); err == nil {
-			typeFilter = t
-		}
+	typeFilter, ok := parseChannelTypeQuery(c)
+	if !ok {
+		return
 	}
 
 	var total int64
@@ -137,14 +231,16 @@ func GetAllChannels(c *gin.Context) {
 			}
 			var tagChannels []*model.Channel
 			err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter).Where("tag = ?", *tag)).
-				Omit("key").
+				Omit("key", "key_ciphertext", "key_hash").
 				Find(&tagChannels).Error
 			if err != nil {
 				common.SysError("failed to get channels by tag: " + err.Error())
 				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取标签渠道失败，请稍后重试"})
 				return
 			}
-			channelData = append(channelData, tagChannels...)
+			for _, channel := range tagChannels {
+				channelData = append(channelData, channelResponseForActor(c, channel))
+			}
 		}
 	} else {
 		if err := buildChannelListQuery(groupFilter, statusFilter, typeFilter).Count(&total).Error; err != nil {
@@ -156,7 +252,7 @@ func GetAllChannels(c *gin.Context) {
 		err := sortOptions.Apply(buildChannelListQuery(groupFilter, statusFilter, typeFilter)).
 			Limit(pageInfo.GetPageSize()).
 			Offset(pageInfo.GetStartIdx()).
-			Omit("key").
+			Omit("key", "key_ciphertext", "key_hash").
 			Find(&channelData).Error
 		if err != nil {
 			common.SysError("failed to get channels: " + err.Error())
@@ -165,8 +261,15 @@ func GetAllChannels(c *gin.Context) {
 		}
 	}
 
-	for _, datum := range channelData {
-		clearChannelInfo(datum)
+	// Tag-mode channels were projected while appending; project the regular
+	// query result here as well.  The helper returns detached values so no
+	// mutable DB/cache snapshot is changed by response cleanup.
+	if !enableTagMode {
+		projected := make([]*model.Channel, 0, len(channelData))
+		for _, datum := range channelData {
+			projected = append(projected, channelResponseForActor(c, datum))
+		}
+		channelData = projected
 	}
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
@@ -228,9 +331,13 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
 }
 
 func FetchUpstreamModels(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
+		if err != nil {
+			common.ApiError(c, err)
+		} else {
+			common.ApiErrorMsg(c, "无效的渠道ID")
+		}
 		return
 	}
 
@@ -244,7 +351,7 @@ func FetchUpstreamModels(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("获取模型列表失败: %s", err.Error()),
+			"message": common.MaskSensitiveInfo(fmt.Sprintf("获取模型列表失败: %s", err.Error())),
 		})
 		return
 	}
@@ -273,21 +380,30 @@ func FixChannelsAbilities(c *gin.Context) {
 }
 
 func SearchChannels(c *gin.Context) {
+	if !validateChannelPaginationQuery(c) {
+		return
+	}
 	keyword := c.Query("keyword")
 	group := c.Query("group")
 	modelKeyword := c.Query("model")
 	statusParam := c.Query("status")
 	statusFilter := parseStatusFilter(statusParam)
-	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
+	idSort, ok := parseChannelBoolQuery(c, "id_sort", false)
+	if !ok {
+		return
+	}
 	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
-	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
+	enableTagMode, ok := parseChannelBoolQuery(c, "tag_mode", false)
+	if !ok {
+		return
+	}
 	channelData := make([]*model.Channel, 0)
 	if enableTagMode {
 		tags, err := model.SearchTags(keyword, group, modelKeyword, idSort)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -295,16 +411,18 @@ func SearchChannels(c *gin.Context) {
 			if tag != nil && *tag != "" {
 				var tagChannels []*model.Channel
 				err := sortOptions.Apply(buildChannelListQuery(group, -1, -1).Where("tag = ?", *tag)).
-					Omit("key").
+					Omit("key", "key_ciphertext", "key_hash").
 					Find(&tagChannels).Error
 				if err != nil {
 					c.JSON(http.StatusOK, gin.H{
 						"success": false,
-						"message": err.Error(),
+						"message": common.MaskSensitiveInfo(err.Error()),
 					})
 					return
 				}
-				channelData = append(channelData, tagChannels...)
+				for _, channel := range tagChannels {
+					channelData = append(channelData, channelResponseForActor(c, channel))
+				}
 			}
 		}
 	} else {
@@ -312,7 +430,7 @@ func SearchChannels(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -339,12 +457,9 @@ func SearchChannels(c *gin.Context) {
 		typeCounts[int64(channel.Type)]++
 	}
 
-	typeParam := c.Query("type")
-	typeFilter := -1
-	if typeParam != "" {
-		if tp, err := strconv.Atoi(typeParam); err == nil {
-			typeFilter = tp
-		}
+	typeFilter, ok := parseChannelTypeQuery(c)
+	if !ok {
+		return
 	}
 
 	if typeFilter >= 0 {
@@ -357,13 +472,17 @@ func SearchChannels(c *gin.Context) {
 		channelData = filtered
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("p", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
+	page := 1
+	pageSize := 20
+	if raw := strings.TrimSpace(c.Query("p")); raw != "" {
+		page, _ = strconv.Atoi(raw) // validated by validateChannelPaginationQuery
 	}
-	if pageSize <= 0 {
-		pageSize = 20
+	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {
+		pageSize, _ = strconv.Atoi(raw) // validated by validateChannelPaginationQuery
+	} else if raw := strings.TrimSpace(c.Query("ps")); raw != "" {
+		pageSize, _ = strconv.Atoi(raw)
+	} else if raw := strings.TrimSpace(c.Query("size")); raw != "" {
+		pageSize, _ = strconv.Atoi(raw)
 	}
 
 	total := len(channelData)
@@ -378,8 +497,8 @@ func SearchChannels(c *gin.Context) {
 
 	pagedData := channelData[startIdx:endIdx]
 
-	for _, datum := range pagedData {
-		clearChannelInfo(datum)
+	for i, datum := range pagedData {
+		pagedData[i] = channelResponseForActor(c, datum)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -395,9 +514,13 @@ func SearchChannels(c *gin.Context) {
 }
 
 func GetChannel(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
+		if err != nil {
+			common.ApiError(c, err)
+		} else {
+			common.ApiErrorMsg(c, "无效的渠道ID")
+		}
 		return
 	}
 	channel, err := model.GetChannelById(id, false)
@@ -405,9 +528,7 @@ func GetChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if channel != nil {
-		clearChannelInfo(channel)
-	}
+	channel = channelResponseForActor(c, channel)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -419,8 +540,8 @@ func GetChannel(c *gin.Context) {
 // GetChannelKey 获取渠道密钥（需要通过安全验证中间件）
 // 此函数依赖 SecureVerificationRequired 中间件，确保用户已通过安全验证
 func GetChannelKey(c *gin.Context) {
-	channelId, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	channelId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || channelId <= 0 {
 		common.ApiError(c, fmt.Errorf("渠道ID格式错误: %v", err))
 		return
 	}
@@ -474,6 +595,12 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 func validateChannel(channel *model.Channel, isAdd bool) error {
 	if channel == nil {
 		return fmt.Errorf("channel cannot be empty")
+	}
+	if err := model.ValidateChannelWeight(channel.Weight); err != nil {
+		return err
+	}
+	if err := model.ValidateChannelBaseURL(channel.BaseURL); err != nil {
+		return err
 	}
 
 	// 校验 channel settings
@@ -539,8 +666,8 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 }
 
 func RefreshCodexChannelCredential(c *gin.Context) {
-	channelId, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	channelId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || channelId <= 0 {
 		common.ApiError(c, fmt.Errorf("invalid channel id: %w", err))
 		return
 	}
@@ -593,7 +720,7 @@ func getVertexArrayKeys(keys string) ([]string, error) {
 		case string:
 			keyStr = strings.TrimSpace(v)
 		default:
-			bytes, err := json.Marshal(v)
+			bytes, err := common.Marshal(v)
 			if err != nil {
 				return nil, fmt.Errorf("Vertex AI key JSON 编码失败: %w", err)
 			}
@@ -621,7 +748,7 @@ func AddChannel(c *gin.Context) {
 	if err := validateChannel(addChannelRequest.Channel, true); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -637,7 +764,7 @@ func AddChannel(c *gin.Context) {
 			if err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": common.MaskSensitiveInfo(err.Error()),
 				})
 				return
 			}
@@ -663,7 +790,7 @@ func AddChannel(c *gin.Context) {
 			if err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": err.Error(),
+					"message": common.MaskSensitiveInfo(err.Error()),
 				})
 				return
 			}
@@ -714,18 +841,22 @@ func AddChannel(c *gin.Context) {
 }
 
 func DeleteChannel(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
+		common.ApiErrorMsg(c, "无效的渠道ID")
+		return
+	}
 	channelName := ""
 	channelProxy := ""
 	channelLookupFailed := false
-	if existing, err := model.GetChannelById(id, false); err == nil && existing != nil {
+	if existing, lookupErr := model.GetChannelById(id, false); lookupErr == nil && existing != nil {
 		channelName = existing.Name
 		channelProxy = existing.GetSetting().Proxy
 	} else {
 		channelLookupFailed = true
 	}
 	channel := model.Channel{Id: id}
-	err := channel.Delete()
+	err = channel.Delete()
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -849,6 +980,10 @@ func EditTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	if err := model.ValidateChannelWeight(channelTag.Weight); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
 	if (channelTag.ParamOverride != nil || channelTag.HeaderOverride != nil) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
@@ -968,7 +1103,7 @@ func UpdateChannel(c *gin.Context) {
 	if err := validateChannel(&channel.Channel, false); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -977,7 +1112,7 @@ func UpdateChannel(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -1016,7 +1151,7 @@ func UpdateChannel(c *gin.Context) {
 				if strings.HasPrefix(strings.TrimSpace(originChannel.Key), "[") {
 					// JSON数组格式
 					var arr []json.RawMessage
-					if err := json.Unmarshal([]byte(strings.TrimSpace(originChannel.Key)), &arr); err == nil {
+					if err := common.Unmarshal([]byte(strings.TrimSpace(originChannel.Key)), &arr); err == nil {
 						existingKeys = make([]string, len(arr))
 						for i, v := range arr {
 							existingKeys[i] = string(v)
@@ -1035,7 +1170,7 @@ func UpdateChannel(c *gin.Context) {
 						if err != nil {
 							c.JSON(http.StatusOK, gin.H{
 								"success": false,
-								"message": "追加密钥解析失败: " + err.Error(),
+								"message": common.MaskSensitiveInfo("追加密钥解析失败: " + err.Error()),
 							})
 							return
 						}
@@ -1114,19 +1249,18 @@ func UpdateChannel(c *gin.Context) {
 		"name":           channel.Name,
 		"changed_fields": changedFields,
 	})
-	channel.Key = ""
-	clearChannelInfo(&channel.Channel)
+	projectedChannel := channelResponseForActor(c, &channel.Channel)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data":    projectedChannel,
 	})
 	return
 }
 
 func UpdateChannelStatus(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
@@ -1289,7 +1423,7 @@ func FetchModels(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -1317,7 +1451,7 @@ func FetchModels(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("获取模型列表失败: %s", err.Error()),
+			"message": common.MaskSensitiveInfo(fmt.Sprintf("获取模型列表失败: %s", err.Error())),
 		})
 		return
 	}
@@ -1369,7 +1503,7 @@ func GetTagModels(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -1403,8 +1537,8 @@ func GetTagModels(c *gin.Context) {
 //	suffix         - string appended to the original name (default "_复制")
 //	reset_balance  - bool, when true will reset balance & used_quota to 0 (default true)
 func CopyChannel(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid id"})
 		return
 	}
@@ -1437,7 +1571,7 @@ func CopyChannel(c *gin.Context) {
 		clone.UsedQuota = 0
 	}
 
-	if err := clone.ValidateSettings(); err != nil {
+	if err := validateChannel(&clone, false); err != nil {
 		common.SysError("failed to validate cloned channel: " + err.Error())
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Failed to copy channel: invalid channel settings"})
 		return
@@ -1584,11 +1718,10 @@ func ManageMultiKeys(c *gin.Context) {
 				}
 			}
 
-			// Create key preview (first 10 chars)
-			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
-			}
+			// Never return a credential prefix.  Prefixes are often enough to
+			// identify or brute-force provider keys; a stable one-way fingerprint
+			// still lets operators spot duplicates across pages.
+			keyPreview := channelKeyPreview(key)
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
 				Index:        i,
@@ -1968,6 +2101,26 @@ func multiKeyActionRequiresSensitiveWrite(action string) bool {
 	return action == "delete_key" || action == "delete_disabled_keys"
 }
 
+// logOllamaManagementError records only non-reversible metadata for an
+// upstream management failure. The client error may contain request URLs,
+// response payloads, or provider details and must not be copied to clients.
+func logOllamaManagementError(c *gin.Context, operation string, channelID int, modelName string, err error) {
+	if err == nil {
+		return
+	}
+	modelMeta := ""
+	if modelName != "" {
+		modelMeta = fmt.Sprintf(" model_meta=%s", common.SensitiveLogMeta(modelName))
+	}
+	common.SysError(fmt.Sprintf(
+		"ollama %s failed channel_id=%d%s error_meta=%s",
+		operation,
+		channelID,
+		modelMeta,
+		common.SensitiveLogMeta(err.Error()),
+	))
+}
+
 // OllamaPullModel 拉取 Ollama 模型
 func OllamaPullModel(c *gin.Context) {
 	var req struct {
@@ -2018,9 +2171,10 @@ func OllamaPullModel(c *gin.Context) {
 	key := strings.Split(channel.Key, "\n")[0]
 	err = ollama.PullOllamaModel(baseURL, key, req.ModelName)
 	if err != nil {
+		logOllamaManagementError(c, "pull_model", req.ChannelID, req.ModelName, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("Failed to pull model: %s", err.Error()),
+			"message": "Failed to pull model",
 		})
 		return
 	}
@@ -2029,6 +2183,18 @@ func OllamaPullModel(c *gin.Context) {
 		"success": true,
 		"message": fmt.Sprintf("Model %s pulled successfully", req.ModelName),
 	})
+}
+
+func setOllamaPullStreamHeaders(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	// CORS is enforced by the /api/channel route group.  Do not set a
+	// wildcard here: doing so would overwrite the middleware's exact origin
+	// and re-open a cross-origin response path for this streaming endpoint.
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
 }
 
 // OllamaPullModelStream 流式拉取 Ollama 模型
@@ -2078,17 +2244,14 @@ func OllamaPullModelStream(c *gin.Context) {
 		baseURL = channel.GetBaseURL()
 	}
 
-	// 设置 SSE 头部
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
+	// 设置 SSE 头部（CORS 由路由组统一处理）
+	setOllamaPullStreamHeaders(c)
 
 	key := strings.Split(channel.Key, "\n")[0]
 
 	// 创建进度回调函数
 	progressCallback := func(progress ollama.OllamaPullResponse) {
-		data, _ := json.Marshal(progress)
+		data, _ := common.Marshal(progress)
 		fmt.Fprintf(c.Writer, "data: %s\n\n", string(data))
 		c.Writer.Flush()
 	}
@@ -2097,12 +2260,13 @@ func OllamaPullModelStream(c *gin.Context) {
 	err = ollama.PullOllamaModelStream(baseURL, key, req.ModelName, progressCallback)
 
 	if err != nil {
-		errorData, _ := json.Marshal(gin.H{
-			"error": err.Error(),
+		logOllamaManagementError(c, "pull_model_stream", req.ChannelID, req.ModelName, err)
+		errorData, _ := common.Marshal(gin.H{
+			"error": "Failed to pull model",
 		})
 		fmt.Fprintf(c.Writer, "data: %s\n\n", string(errorData))
 	} else {
-		successData, _ := json.Marshal(gin.H{
+		successData, _ := common.Marshal(gin.H{
 			"message": fmt.Sprintf("Model %s pulled successfully", req.ModelName),
 		})
 		fmt.Fprintf(c.Writer, "data: %s\n\n", string(successData))
@@ -2163,9 +2327,10 @@ func OllamaDeleteModel(c *gin.Context) {
 	key := strings.Split(channel.Key, "\n")[0]
 	err = ollama.DeleteOllamaModel(baseURL, key, req.ModelName)
 	if err != nil {
+		logOllamaManagementError(c, "delete_model", req.ChannelID, req.ModelName, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("Failed to delete model: %s", err.Error()),
+			"message": "Failed to delete model",
 		})
 		return
 	}
@@ -2178,8 +2343,8 @@ func OllamaDeleteModel(c *gin.Context) {
 
 // OllamaVersion 获取 Ollama 服务版本信息
 func OllamaVersion(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
 			"message": "Invalid channel id",
@@ -2212,9 +2377,19 @@ func OllamaVersion(c *gin.Context) {
 	key := strings.Split(channel.Key, "\n")[0]
 	version, err := ollama.FetchOllamaVersion(baseURL, key)
 	if err != nil {
+		logOllamaManagementError(c, "fetch_version", id, "", err)
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": fmt.Sprintf("获取Ollama版本失败: %s", err.Error()),
+			"message": "获取Ollama版本失败，请稍后重试",
+		})
+		return
+	}
+	version = strings.TrimSpace(version)
+	if version == "" || len(version) > 256 {
+		logOllamaManagementError(c, "fetch_version", id, "", fmt.Errorf("invalid Ollama version response"))
+		c.JSON(http.StatusBadGateway, gin.H{
+			"success": false,
+			"message": "获取Ollama版本失败，请稍后重试",
 		})
 		return
 	}

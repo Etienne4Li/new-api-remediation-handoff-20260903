@@ -18,6 +18,17 @@ func DecodeJson(reader io.Reader, v any) error {
 	return json.NewDecoder(reader).Decode(v)
 }
 
+// DecodeJsonLimited decodes JSON from an untrusted stream after applying a
+// hard byte bound. Use it for responses from external providers (and any
+// other stream whose size is not controlled by the application).
+func DecodeJsonLimited(reader io.Reader, maxBytes int64, v any) error {
+	data, err := ReadBodyLimited(reader, -1, maxBytes)
+	if err != nil {
+		return err
+	}
+	return Unmarshal(data, v)
+}
+
 func Marshal(v any) ([]byte, error) {
 	return json.Marshal(v)
 }

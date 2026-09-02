@@ -41,9 +41,10 @@ type proxyURLConfig struct {
 }
 
 func checkRedirect(req *http.Request, via []*http.Request) error {
+	stripSensitiveRedirectHeaders(req, via)
 	urlStr := req.URL.String()
 	if err := validateURLWithCurrentFetchSetting(urlStr, true); err != nil {
-		return fmt.Errorf("redirect to %s blocked: %v", urlStr, err)
+		return fmt.Errorf("redirect to %q blocked: %v", common.SanitizeRequestURIForLog(urlStr), err)
 	}
 	if len(via) >= 10 {
 		return fmt.Errorf("stopped after 10 redirects")
@@ -52,14 +53,99 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 }
 
 func checkProtectedFetchRedirect(req *http.Request, via []*http.Request) error {
+	stripSensitiveRedirectHeaders(req, via)
 	urlStr := req.URL.String()
 	if err := ValidateSSRFProtectedFetchURL(urlStr); err != nil {
-		return fmt.Errorf("redirect to %s blocked: %v", urlStr, err)
+		return fmt.Errorf("redirect to %q blocked: %v", common.SanitizeRequestURIForLog(urlStr), err)
 	}
 	if len(via) >= 10 {
 		return fmt.Errorf("stopped after 10 redirects")
 	}
 	return nil
+}
+
+// stripSensitiveRedirectHeaders prevents provider credentials and bearer-like
+// request metadata from following a redirect to a different origin. The
+// standard net/http redirect policy only compares host names and does not
+// remove custom headers such as x-goog-api-key; it therefore treats a change
+// from example.test:443 to example.test:8443 as trusted and forwards the key.
+// Media/task proxy paths use these clients for provider status and content
+// requests, so this is a security boundary rather than a convenience filter.
+//
+// Keep the comparison aligned with browser origin semantics (scheme, host and
+// effective port). A same-origin redirect retains headers so providers that
+// use a multi-step endpoint continue to work. The request passed to a
+// CheckRedirect callback is the new redirect request, so mutating it here does
+// not alter the caller's original request or the cached client.
+func stripSensitiveRedirectHeaders(req *http.Request, via []*http.Request) {
+	if req == nil || req.URL == nil || len(via) == 0 {
+		return
+	}
+	previous := via[len(via)-1]
+	if previous == nil || previous.URL == nil || sameHTTPOrigin(previous.URL, req.URL) {
+		return
+	}
+	for _, name := range sensitiveRedirectHeaders {
+		req.Header.Del(name)
+	}
+}
+
+var sensitiveRedirectHeaders = []string{
+	"Authorization",
+	"Proxy-Authorization",
+	"Cookie",
+	"Cookie2",
+	"Referer",
+	"X-API-Key",
+	"X-Goog-API-Key",
+	"X-Goog-User-Project",
+	"API-Key",
+	"X-Auth-Token",
+	"X-Access-Token",
+	"X-Token",
+	"X-Secret",
+	"X-Client-Secret",
+	"X-API-Secret",
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil || left.Hostname() == "" || right.Hostname() == "" {
+		return false
+	}
+	// Userinfo is never part of an HTTP origin, but accepting it here is
+	// unsafe: a redirect such as https://user:pass@provider.example could be
+	// treated as trusted and retain bearer-like headers. Legitimate provider
+	// endpoints do not need credentials embedded in their URLs, so fail closed
+	// whenever either side carries userinfo.
+	if left.User != nil || right.User != nil {
+		return false
+	}
+	leftScheme := strings.ToLower(strings.TrimSpace(left.Scheme))
+	rightScheme := strings.ToLower(strings.TrimSpace(right.Scheme))
+	if (leftScheme != "http" && leftScheme != "https") || leftScheme != rightScheme {
+		return false
+	}
+	if !strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return effectiveHTTPPort(left) == effectiveHTTPPort(right)
+}
+
+func effectiveHTTPPort(value *url.URL) string {
+	if value == nil {
+		return ""
+	}
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func validateURLWithCurrentFetchSetting(urlStr string, applyDomainIPFilter bool) error {
@@ -394,8 +480,10 @@ func getOrCreateDirectClient(policy HTTPTransportPolicy) (*http.Client, error) {
 		if client := GetHttpClient(); client != nil {
 			return client, nil
 		}
-		// Compatibility with pre-init callers: never assign httpClient outside InitHttpClient.
-		return http.DefaultClient, nil
+		// Compatibility with pre-init callers: construct the same guarded client
+		// shape instead of falling back to http.DefaultClient, whose redirect
+		// policy forwards sensitive headers unchanged.
+		return newDirectHTTPClient(policy, nil), nil
 	}
 
 	if client, ok := proxyClients.get("", policy); ok {

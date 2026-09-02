@@ -1,7 +1,6 @@
 package siliconflow
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,15 +14,13 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 )
 
 type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
@@ -54,9 +51,16 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		sfRequest.ImageSize = request.Size
 	}
 	if sfRequest.BatchSize == 0 {
-		if request.N != nil {
-			sfRequest.BatchSize = lo.FromPtr(request.N)
+		imageN, ok := dto.BoundedImageN(request.N)
+		if !ok {
+			return nil, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxImageN)
 		}
+		if request.N != nil && *request.N > 0 {
+			sfRequest.BatchSize = imageN
+		}
+	}
+	if sfRequest.BatchSize < 0 || sfRequest.BatchSize > dto.MaxImageN {
+		return nil, fmt.Errorf("batch_size must be between 1 and %d", dto.MaxImageN)
 	}
 
 	return sfRequest, nil
@@ -93,8 +97,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	// TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

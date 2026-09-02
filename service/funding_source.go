@@ -33,14 +33,35 @@ type FundingSource interface {
 var ErrInsufficientWalletQuota = errors.New("wallet quota insufficient")
 
 type WalletFunding struct {
-	userId   int
-	consumed int // 实际预扣的用户额度
+	userId    int
+	requestId string // stable request identity used by the durable billing journal
+	consumed  int    // 实际预扣的用户额度
 }
 
 func (w *WalletFunding) Source() string { return BillingSourceWallet }
 
 func (w *WalletFunding) PreConsume(amount int) error {
 	if amount <= 0 {
+		return nil
+	}
+	// BillingSession supplies a stable request ID.  Keep the standalone
+	// fallback for legacy callers/tests that construct WalletFunding directly;
+	// those callers retain the historical conditional reservation semantics.
+	if w.requestId != "" {
+		err := model.ApplyBillingOperation(model.BillingOperationSpec{
+			RequestID:            w.requestId,
+			Component:            "wallet_preconsume",
+			UserID:               w.userId,
+			WalletDelta:          -int64(amount),
+			RequireWalletBalance: true,
+		})
+		if err != nil {
+			if errors.Is(err, model.ErrBillingOperationInsufficient) {
+				return ErrInsufficientWalletQuota
+			}
+			return err
+		}
+		w.consumed = amount
 		return nil
 	}
 	reserved, err := model.TryReserveUserQuota(w.userId, amount)
@@ -58,6 +79,14 @@ func (w *WalletFunding) Settle(delta int) error {
 	if delta == 0 {
 		return nil
 	}
+	if w.requestId != "" {
+		return model.ApplyBillingOperation(model.BillingOperationSpec{
+			RequestID:   w.requestId,
+			Component:   "wallet_settle",
+			UserID:      w.userId,
+			WalletDelta: -int64(delta),
+		})
+	}
 	if delta > 0 {
 		return model.DecreaseUserQuota(w.userId, delta, false)
 	}
@@ -68,9 +97,27 @@ func (w *WalletFunding) Refund() error {
 	if w.consumed <= 0 {
 		return nil
 	}
+	if w.requestId != "" {
+		if err := model.ApplyBillingOperation(model.BillingOperationSpec{
+			RequestID:   w.requestId,
+			Component:   "wallet_refund",
+			UserID:      w.userId,
+			WalletDelta: int64(w.consumed),
+		}); err != nil {
+			return err
+		}
+		w.consumed = 0
+		return nil
+	}
 	// IncreaseUserQuota 是 quota += N 的非幂等操作，不能重试，否则会多退额度。
-	// 订阅的 RefundSubscriptionPreConsume 有 requestId 幂等保护所以可以重试。
-	return model.IncreaseUserQuota(w.userId, w.consumed, false)
+	// BillingSession 在成功后也会清零 consumed，保证同一进程内的重复
+	// Refund 不会再次增加钱包余额。跨进程崩溃窗口仍需持久 outbox/操作
+	// marker（后续治理项）才能完全消除重复退款风险。
+	if err := model.IncreaseUserQuota(w.userId, w.consumed, false); err != nil {
+		return err
+	}
+	w.consumed = 0
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -78,10 +125,17 @@ func (w *WalletFunding) Refund() error {
 // ---------------------------------------------------------------------------
 
 type SubscriptionFunding struct {
-	requestId      string
-	userId         int
-	modelName      string
-	amount         int64 // 预扣的订阅额度（subConsume）
+	requestId string
+	userId    int
+	modelName string
+	amount    int64 // 预扣的订阅额度（subConsume）
+	// Token fields are populated by NewBillingSession. When present, the
+	// subscription and token reservations are committed in one transaction.
+	tokenId        int
+	tokenKey       string
+	tokenUnlimited bool
+	playground     bool
+	combined       bool
 	subscriptionId int
 	preConsumed    int64
 	// 以下字段在 PreConsume 成功后填充，供 RelayInfo 同步使用
@@ -95,7 +149,18 @@ func (s *SubscriptionFunding) Source() string { return BillingSourceSubscription
 
 func (s *SubscriptionFunding) PreConsume(_ int) error {
 	// amount 参数被忽略，使用内部 s.amount（已在构造时根据 preConsumedQuota 计算）
-	res, err := model.PreConsumeUserSubscription(s.requestId, s.userId, s.modelName, 0, s.amount)
+	var (
+		res *model.SubscriptionPreConsumeResult
+		err error
+	)
+	if s.combined {
+		res, err = model.PreConsumeUserSubscriptionAndToken(
+			s.requestId, s.userId, s.modelName, 0, s.amount,
+			s.tokenId, s.tokenKey, s.tokenUnlimited, s.playground,
+		)
+	} else {
+		res, err = model.PreConsumeUserSubscription(s.requestId, s.userId, s.modelName, 0, s.amount)
+	}
 	if err != nil {
 		return err
 	}
@@ -123,7 +188,13 @@ func (s *SubscriptionFunding) Refund() error {
 		return nil
 	}
 	return refundWithRetry(func() error {
-		return model.RefundSubscriptionPreConsume(s.requestId)
+		if err := model.RefundSubscriptionPreConsume(s.requestId); err != nil {
+			return err
+		}
+		// The DB marker is idempotent; clearing the local amount prevents a
+		// second call from doing unnecessary work in this process.
+		s.preConsumed = 0
+		return nil
 	})
 }
 

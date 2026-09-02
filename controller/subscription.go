@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -25,6 +26,19 @@ type BillingPreferenceRequest struct {
 
 type SubscriptionBalancePayRequest struct {
 	PlanId int `json:"plan_id"`
+}
+
+func requireManageableUser(c *gin.Context, userId int) bool {
+	user, err := model.GetUserById(userId, false)
+	if err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	if !canManageTargetRole(c.GetInt("role"), user.Role) {
+		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
+		return false
+	}
+	return true
 }
 
 // ---- User APIs ----
@@ -138,6 +152,28 @@ type AdminUpsertSubscriptionPlanRequest struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+// normalizeSubscriptionPlanCurrency canonicalizes the ISO-4217 code stored on
+// a plan.  Payment adapters use this value when freezing the provider checkout
+// snapshot, so silently replacing a configured currency with USD would make a
+// EUR/JPY plan charge one currency while the local order promises another.
+// Keep the validation deliberately provider-neutral: each gateway can still
+// reject currencies it does not support when the checkout is created.
+func normalizeSubscriptionPlanCurrency(value string) (string, error) {
+	currency := strings.ToUpper(strings.TrimSpace(value))
+	if currency == "" {
+		return "USD", nil
+	}
+	if len(currency) != 3 {
+		return "", fmt.Errorf("currency must be a 3-letter ISO currency code")
+	}
+	for _, ch := range currency {
+		if ch < 'A' || ch > 'Z' {
+			return "", fmt.Errorf("currency must be a 3-letter ISO currency code")
+		}
+	}
+	return currency, nil
+}
+
 func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if !requirePaymentCompliance(c) {
 		return
@@ -161,10 +197,11 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorMsg(c, "价格不能超过9999")
 		return
 	}
-	if req.Plan.Currency == "" {
-		req.Plan.Currency = "USD"
+	var currencyErr error
+	if req.Plan.Currency, currencyErr = normalizeSubscriptionPlanCurrency(req.Plan.Currency); currencyErr != nil {
+		common.ApiErrorMsg(c, currencyErr.Error())
+		return
 	}
-	req.Plan.Currency = "USD"
 	if req.Plan.AllowBalancePay == nil {
 		req.Plan.AllowBalancePay = common.GetPointer(true)
 	}
@@ -218,8 +255,8 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 
-	id, _ := strconv.Atoi(c.Param("id"))
-	if id <= 0 {
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
 		common.ApiErrorMsg(c, "无效的ID")
 		return
 	}
@@ -241,10 +278,11 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = id
-	if req.Plan.Currency == "" {
-		req.Plan.Currency = "USD"
+	var currencyErr error
+	if req.Plan.Currency, currencyErr = normalizeSubscriptionPlanCurrency(req.Plan.Currency); currencyErr != nil {
+		common.ApiErrorMsg(c, currencyErr.Error())
+		return
 	}
-	req.Plan.Currency = "USD"
 	if req.Plan.DurationUnit == "" {
 		req.Plan.DurationUnit = model.SubscriptionDurationMonth
 	}
@@ -279,7 +317,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
 		// update plan (allow zero values updates with map)
 		updateMap := map[string]interface{}{
 			"title":                      req.Plan.Title,
@@ -330,8 +368,8 @@ func AdminUpdateSubscriptionPlanStatus(c *gin.Context) {
 		return
 	}
 
-	id, _ := strconv.Atoi(c.Param("id"))
-	if id <= 0 {
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
 		common.ApiErrorMsg(c, "无效的ID")
 		return
 	}
@@ -363,6 +401,9 @@ func AdminBindSubscription(c *gin.Context) {
 		common.ApiErrorMsg(c, "参数错误")
 		return
 	}
+	if !requireManageableUser(c, req.UserId) {
+		return
+	}
 	msg, err := model.AdminBindSubscription(req.UserId, req.PlanId, "")
 	if err != nil {
 		common.ApiError(c, err)
@@ -378,9 +419,12 @@ func AdminBindSubscription(c *gin.Context) {
 // ---- Admin: user subscription management ----
 
 func AdminListUserSubscriptions(c *gin.Context) {
-	userId, _ := strconv.Atoi(c.Param("id"))
-	if userId <= 0 {
+	userId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || userId <= 0 {
 		common.ApiErrorMsg(c, "无效的用户ID")
+		return
+	}
+	if !requireManageableUser(c, userId) {
 		return
 	}
 	subs, err := model.GetAllUserSubscriptions(userId)
@@ -423,14 +467,17 @@ func AdminCreateUserSubscription(c *gin.Context) {
 		return
 	}
 
-	userId, _ := strconv.Atoi(c.Param("id"))
-	if userId <= 0 {
+	userId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || userId <= 0 {
 		common.ApiErrorMsg(c, "无效的用户ID")
 		return
 	}
 	var req AdminCreateUserSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.PlanId <= 0 {
 		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+	if !requireManageableUser(c, userId) {
 		return
 	}
 	msg, err := model.AdminBindSubscription(userId, req.PlanId, "")
@@ -445,9 +492,38 @@ func AdminCreateUserSubscription(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
+// AdminRetryPaidUncreditedSubscriptionOrder retries entitlement creation for a
+// payment that was authenticated but blocked by a plan purchase cap.  The
+// model layer takes the order/user locks and never replays provider credit.
+func AdminRetryPaidUncreditedSubscriptionOrder(c *gin.Context) {
+	tradeNo := strings.TrimSpace(c.Param("trade_no"))
+	if tradeNo == "" {
+		common.ApiErrorMsg(c, "无效的订单号")
+		return
+	}
+	LockOrder(tradeNo)
+	defer UnlockOrder(tradeNo)
+	order, err := model.GetSubscriptionOrderByTradeNoWithError(tradeNo)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !requireManageableUser(c, order.UserId) {
+		return
+	}
+	if err := model.RetryPaidUncreditedSubscriptionOrder(tradeNo); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	recordManageAudit(c, "subscription.paid_uncredited_retry", map[string]interface{}{
+		"trade_no": tradeNo,
+	})
+	common.ApiSuccess(c, nil)
+}
+
 func AdminResetUserSubscriptionsByPlan(c *gin.Context) {
-	userId, _ := strconv.Atoi(c.Param("id"))
-	if userId <= 0 {
+	userId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || userId <= 0 {
 		common.ApiErrorMsg(c, "无效的用户ID")
 		return
 	}
@@ -458,6 +534,9 @@ func AdminResetUserSubscriptionsByPlan(c *gin.Context) {
 	}
 	if req.PlanId <= 0 {
 		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+	if !requireManageableUser(c, userId) {
 		return
 	}
 	advanceResetTime := resolveAdvanceResetTime(req.AdvanceResetTime)
@@ -479,8 +558,8 @@ func AdminResetUserSubscriptionsByPlan(c *gin.Context) {
 }
 
 func AdminResetPlanSubscriptions(c *gin.Context) {
-	planId, _ := strconv.Atoi(c.Param("id"))
-	if planId <= 0 {
+	planId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || planId <= 0 {
 		common.ApiErrorMsg(c, "无效的ID")
 		return
 	}
@@ -490,7 +569,7 @@ func AdminResetPlanSubscriptions(c *gin.Context) {
 		return
 	}
 	advanceResetTime := resolveAdvanceResetTime(req.AdvanceResetTime)
-	result, err := model.AdminResetPlanSubscriptions(planId, advanceResetTime)
+	result, err := model.AdminResetPlanSubscriptionsForRole(planId, advanceResetTime, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -510,9 +589,17 @@ func AdminResetPlanSubscriptions(c *gin.Context) {
 
 // AdminInvalidateUserSubscription cancels a user subscription immediately.
 func AdminInvalidateUserSubscription(c *gin.Context) {
-	subId, _ := strconv.Atoi(c.Param("id"))
-	if subId <= 0 {
+	subId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || subId <= 0 {
 		common.ApiErrorMsg(c, "无效的订阅ID")
+		return
+	}
+	userId, err := model.GetUserSubscriptionOwnerID(subId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !requireManageableUser(c, userId) {
 		return
 	}
 	msg, err := model.AdminInvalidateUserSubscription(subId)
@@ -529,9 +616,17 @@ func AdminInvalidateUserSubscription(c *gin.Context) {
 
 // AdminDeleteUserSubscription hard-deletes a user subscription.
 func AdminDeleteUserSubscription(c *gin.Context) {
-	subId, _ := strconv.Atoi(c.Param("id"))
-	if subId <= 0 {
+	subId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || subId <= 0 {
 		common.ApiErrorMsg(c, "无效的订阅ID")
+		return
+	}
+	userId, err := model.GetUserSubscriptionOwnerID(subId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if !requireManageableUser(c, userId) {
 		return
 	}
 	msg, err := model.AdminDeleteUserSubscription(subId)

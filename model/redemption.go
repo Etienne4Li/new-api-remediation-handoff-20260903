@@ -12,19 +12,30 @@ import (
 )
 
 type Redemption struct {
-	Id           int            `json:"id"`
-	UserId       int            `json:"user_id"`
-	Key          string         `json:"key" gorm:"type:char(32);uniqueIndex"`
-	Status       int            `json:"status" gorm:"default:1"`
-	Name         string         `json:"name" gorm:"index"`
-	Quota        int            `json:"quota" gorm:"default:100"`
-	CreatedTime  int64          `json:"created_time" gorm:"bigint"`
-	RedeemedTime int64          `json:"redeemed_time" gorm:"bigint"`
-	Count        int            `json:"count" gorm:"-:all"` // only for api request
-	UsedUserId   int            `json:"used_user_id"`
-	DeletedAt    gorm.DeletedAt `gorm:"index"`
-	ExpiredTime  int64          `json:"expired_time" gorm:"bigint"` // 过期时间，0 表示不过期
+	Id     int `json:"id"`
+	UserId int `json:"user_id"`
+	// Key exists only in memory. The historical key column stores a
+	// fingerprint marker while the authenticated ciphertext and indexed hash
+	// live in separate columns.
+	Key           string         `json:"key" gorm:"-"`
+	LegacyKey     string         `json:"-" gorm:"column:key;type:varchar(80);not null;uniqueIndex"`
+	KeyCiphertext string         `json:"-" gorm:"column:key_ciphertext;type:text"`
+	KeyHash       *string        `json:"-" gorm:"column:key_hash;type:char(64);index"`
+	Status        int            `json:"status" gorm:"default:1"`
+	Name          string         `json:"name" gorm:"index"`
+	Quota         int            `json:"quota" gorm:"default:100"`
+	CreatedTime   int64          `json:"created_time" gorm:"bigint"`
+	RedeemedTime  int64          `json:"redeemed_time" gorm:"bigint"`
+	Count         int            `json:"count" gorm:"-:all"` // only for api request
+	UsedUserId    int            `json:"used_user_id"`
+	DeletedAt     gorm.DeletedAt `gorm:"index"`
+	ExpiredTime   int64          `json:"expired_time" gorm:"bigint"` // 过期时间，0 表示不过期
 }
+
+// redemptionSearchCountHardLimit bounds the work used to populate list
+// totals.  A capped total is preferable to an unbounded COUNT on a table that
+// is directly reachable from an administrative search endpoint.
+const redemptionSearchCountHardLimit = 10000
 
 func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
 	// 开始事务
@@ -38,8 +49,9 @@ func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total 
 		}
 	}()
 
-	// 获取总数
-	err = tx.Model(&Redemption{}).Count(&total).Error
+	// 获取有界总数。Limit applied to Count is not a SQL work bound, so probe
+	// only primary keys (limit+1) instead.
+	total, err = boundedPrimaryKeyCount(tx.Model(&Redemption{}), redemptionSearchCountHardLimit)
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -103,8 +115,8 @@ func SearchRedemptions(keyword string, status string, startIdx int, num int) (re
 		}
 	}
 
-	// Get total count
-	err = query.Count(&total).Error
+	// Get a bounded total; aggregate COUNT would scan the complete match set.
+	total, err = boundedPrimaryKeyCount(query, redemptionSearchCountHardLimit)
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -142,17 +154,13 @@ func Redeem(key string, userId int) (quota int, err error) {
 		return 0, errors.New("无效的 user id")
 	}
 	redemption := &Redemption{}
-
-	keyCol := "`key`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		keyCol = `"key"`
-	}
 	common.RandomSleep()
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		err := lockForUpdate(tx).Where(keyCol+" = ?", key).First(redemption).Error
+		matched, err := findRedemptionByKeyForUpdate(tx, key)
 		if err != nil {
 			return errors.New("无效的兑换码")
 		}
+		redemption = matched
 		if redemption.Status != common.RedemptionCodeStatusEnabled {
 			return errors.New("该兑换码已被使用")
 		}
@@ -187,6 +195,9 @@ func Redeem(key string, userId int) (quota int, err error) {
 }
 
 func (redemption *Redemption) Insert() error {
+	if redemption == nil || redemption.Key == "" {
+		return errors.New("redemption key must not be empty")
+	}
 	if redemption.Quota <= 0 {
 		return errors.New("redemption quota must be positive")
 	}

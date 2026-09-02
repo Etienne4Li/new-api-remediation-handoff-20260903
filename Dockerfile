@@ -29,6 +29,17 @@ RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$
 
 FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 
+# Keep the source identity in the image itself so an operator can audit a
+# digest without relying solely on a mutable registry tag. CI passes VCS_REF;
+# direct builds retain an explicit "unknown" marker rather than inventing a
+# revision.
+ARG VCS_REF=unknown
+ARG BUILD_VERSION=unknown
+LABEL org.opencontainers.image.source="https://github.com/QuantumNous/new-api" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.version="$BUILD_VERSION" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
     && rm -rf /var/lib/apt/lists/* \

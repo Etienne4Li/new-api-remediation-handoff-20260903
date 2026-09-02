@@ -25,7 +25,10 @@ export interface CustomOAuthBinding {
   provider_name: string
   provider_slug: string
   provider_icon: string
-  provider_user_id: string
+  /** Returned for the current user's profile only; admin responses redact it. */
+  provider_user_id?: string
+  /** Redacted admin responses expose binding state instead of the identity ID. */
+  is_bound?: boolean
 }
 
 export function indexCustomOAuthBindings(
@@ -37,23 +40,46 @@ export function indexCustomOAuthBindings(
 /**
  * Build GitHub OAuth URL
  */
-export function buildGitHubOAuthUrl(clientId: string, state: string): string {
-  return `https://github.com/login/oauth/authorize?client_id=${clientId}&state=${state}&scope=user:email`
+export function buildGitHubOAuthUrl(
+  clientId: string,
+  state: string,
+  codeChallenge?: string,
+  redirectURI?: string
+): string {
+  const url = new URL('https://github.com/login/oauth/authorize')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set('state', state)
+  url.searchParams.set('scope', 'user:email')
+  if (redirectURI) url.searchParams.set('redirect_uri', redirectURI)
+  if (codeChallenge) {
+    url.searchParams.set('code_challenge', codeChallenge)
+    url.searchParams.set('code_challenge_method', 'S256')
+  }
+  return url.toString()
 }
 
 /**
  * Build Discord OAuth URL
  */
-export function buildDiscordOAuthUrl(clientId: string, state: string): string {
+export function buildDiscordOAuthUrl(
+  clientId: string,
+  state: string,
+  codeChallenge?: string,
+  redirectURI?: string
+): string {
   const url = new URL('https://discord.com/oauth2/authorize')
   url.searchParams.set('client_id', clientId)
   url.searchParams.set(
     'redirect_uri',
-    `${window.location.origin}/oauth/discord`
+    redirectURI || `${window.location.origin}/oauth/discord`
   )
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'identify+openid')
   url.searchParams.set('state', state)
+  if (codeChallenge) {
+    url.searchParams.set('code_challenge', codeChallenge)
+    url.searchParams.set('code_challenge_method', 'S256')
+  }
   return url.toString()
 }
 
@@ -63,20 +89,46 @@ export function buildDiscordOAuthUrl(clientId: string, state: string): string {
 export function buildOIDCOAuthUrl(
   authUrl: string,
   clientId: string,
-  state: string
+  state: string,
+  codeChallenge?: string,
+  redirectURI?: string
 ): string {
   const url = new URL(authUrl)
   url.searchParams.set('client_id', clientId)
-  url.searchParams.set('redirect_uri', `${window.location.origin}/oauth/oidc`)
+  url.searchParams.set(
+    'redirect_uri',
+    redirectURI || `${window.location.origin}/oauth/oidc`
+  )
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'openid profile email')
   url.searchParams.set('state', state)
+  if (codeChallenge) {
+    url.searchParams.set('code_challenge', codeChallenge)
+    url.searchParams.set('code_challenge_method', 'S256')
+  }
   return url.toString()
 }
 
 /**
  * Build LinuxDO OAuth URL
  */
-export function buildLinuxDOOAuthUrl(clientId: string, state: string): string {
-  return `https://connect.linux.do/oauth2/authorize?response_type=code&client_id=${clientId}&state=${state}`
+export function buildLinuxDOOAuthUrl(
+  clientId: string,
+  state: string,
+  codeChallenge?: string,
+  redirectURI?: string
+): string {
+  const url = new URL('https://connect.linux.do/oauth2/authorize')
+  url.searchParams.set('response_type', 'code')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set(
+    'redirect_uri',
+    redirectURI || `${window.location.origin}/oauth/linuxdo`
+  )
+  url.searchParams.set('state', state)
+  if (codeChallenge) {
+    url.searchParams.set('code_challenge', codeChallenge)
+    url.searchParams.set('code_challenge_method', 'S256')
+  }
+  return url.toString()
 }

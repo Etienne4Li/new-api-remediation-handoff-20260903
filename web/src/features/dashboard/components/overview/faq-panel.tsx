@@ -41,7 +41,7 @@ export function FAQPanel() {
     <PanelWrapper
       title={
         <span className='flex items-center gap-2'>
-          <IconBadge tone='chart-4' size='sm'>
+          <IconBadge tone='neutral' size='sm'>
             <HelpCircle />
           </IconBadge>
           {t('FAQ')}

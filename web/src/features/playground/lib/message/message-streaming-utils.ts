@@ -37,7 +37,7 @@ import {
  * Separates <think> reasoning from visible content in real-time.
  * Note: versions[0].content keeps the full raw content with tags during streaming.
  */
-export function processStreamingContent(
+function processStreamingContent(
   message: Message,
   contentChunk?: string
 ): Message {
@@ -169,7 +169,7 @@ export function isAssistantMessagePending(message: Message): boolean {
   )
 }
 
-export function isPendingAssistantMessage(message?: Message): boolean {
+function isPendingAssistantMessage(message?: Message): boolean {
   return Boolean(
     message?.from === MESSAGE_ROLES.ASSISTANT &&
     isAssistantMessagePending(message)
@@ -184,7 +184,7 @@ export function hasChatCompletionChoice(
   return Boolean(response.choices?.[0])
 }
 
-export function applyChatCompletionChoice(
+function applyChatCompletionChoice(
   message: Message,
   choice: ChatCompletionChoice
 ): Message {

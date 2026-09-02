@@ -52,7 +52,7 @@ Transitive dependencies should be audited before a final external release.
 | backend     | production  | Go        | `github.com/tidwall/gjson`                            | `v1.18.0`                            | MIT                                                |
 | backend     | production  | Go        | `github.com/tidwall/sjson`                            | `v1.2.5`                             | MIT                                                |
 | backend     | production  | Go        | `github.com/tiktoken-go/tokenizer`                    | `v0.6.2`                             | MIT                                                |
-| backend     | production  | Go        | `github.com/waffo-com/waffo-go`                       | `v1.3.1`                             | MIT                                                |
+| backend     | production  | Go        | `github.com/waffo-com/waffo-go`                       | `v1.3.2`                             | MIT                                                |
 | backend     | production  | Go        | `github.com/yapingcat/gomedia`                        | `v0.0.0-20240906162731-17feea57090c` | MIT                                                |
 | backend     | production  | Go        | `golang.org/x/crypto`                                 | `v0.45.0`                            | BSD-3-Clause                                       |
 | backend     | production  | Go        | `golang.org/x/image`                                  | `v0.38.0`                            | BSD-3-Clause                                       |

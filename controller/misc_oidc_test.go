@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -13,11 +14,10 @@ import (
 )
 
 func TestGetStatusReturnsEffectiveOIDCDisplayName(t *testing.T) {
-	settings := system_setting.GetOIDCSettings()
-	originalDisplayName := settings.DisplayName
+	originalDisplayName := system_setting.GetOIDCSettings().DisplayName
 	originalOptionMap := common.OptionMap
 	t.Cleanup(func() {
-		settings.DisplayName = originalDisplayName
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"oidc.display_name": originalDisplayName})
 		common.OptionMap = originalOptionMap
 	})
 	common.OptionMap = map[string]string{}
@@ -41,7 +41,7 @@ func TestGetStatusReturnsEffectiveOIDCDisplayName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			settings.DisplayName = tt.displayName
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"oidc.display_name": tt.displayName}))
 			response := httptest.NewRecorder()
 			context, _ := gin.CreateTestContext(response)
 			context.Request = httptest.NewRequest(http.MethodGet, "/api/status", nil)

@@ -31,14 +31,7 @@ import {
   Route,
   WalletCards,
 } from 'lucide-react'
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { MultiSelect } from '@/components/multi-select'
@@ -284,7 +277,10 @@ export function FlowCharts(props: FlowChartsProps) {
     () => stages.filter((stage) => !hiddenStages.includes(stage)),
     [stages, hiddenStages]
   )
-  useEffect(() => {
+  const [previousVisibleStages, setPreviousVisibleStages] =
+    useState(visibleStages)
+  if (visibleStages !== previousVisibleStages) {
+    setPreviousVisibleStages(visibleStages)
     const visible = new Set(visibleStages)
     setSelectedNodes((prev) => {
       const next = prev.filter((filter) => visible.has(filter.kind))
@@ -296,7 +292,7 @@ export function FlowCharts(props: FlowChartsProps) {
     // The graph reshapes when columns are toggled, so any highlighted edge may
     // no longer exist. Drop the link selection rather than leave it dangling.
     setActiveFlowLink(undefined)
-  }, [visibleStages])
+  }
   const toggleStage = (stage: FlowNodeKind) => {
     setHiddenStages((prev) => {
       const hidden = new Set(prev)
@@ -532,7 +528,10 @@ export function FlowCharts(props: FlowChartsProps) {
 
   return (
     <div className='flex flex-col gap-3'>
-      <div className='flex flex-col gap-2 xl:flex-row xl:items-end xl:justify-between'>
+      <section
+        className='bg-card flex flex-col gap-3 rounded-lg border p-3 shadow-xs sm:p-4 @4xl/content:flex-row @4xl/content:items-end @4xl/content:justify-between'
+        aria-label={t('Flow Filters')}
+      >
         <div className='flex min-w-0 flex-wrap items-end gap-2'>
           <div className='flex min-w-0 flex-col gap-1.5'>
             <div className='flex items-center gap-1.5'>
@@ -642,9 +641,9 @@ export function FlowCharts(props: FlowChartsProps) {
           />
         </div>
 
-        <div className='flex min-w-0 items-center gap-2 xl:justify-end'>
+        <div className='flex min-w-0 items-center gap-2 @4xl/content:justify-end'>
           {isAdmin && (
-            <div className='flex min-w-0 flex-col gap-2 sm:flex-row xl:w-[min(24rem,34vw)]'>
+            <div className='flex min-w-0 flex-col gap-2 sm:flex-row @4xl/content:w-[min(24rem,34vw)]'>
               <MultiSelect
                 options={userFilterOptions}
                 selected={selectedUsers}
@@ -662,9 +661,12 @@ export function FlowCharts(props: FlowChartsProps) {
             <Loader2 className='text-muted-foreground size-4 animate-spin' />
           )}
         </div>
-      </div>
+      </section>
 
-      <div className='overflow-hidden rounded-lg border'>
+      <section
+        className='bg-card overflow-hidden rounded-lg border shadow-xs'
+        aria-label={chartTitle}
+      >
         <div className='flex w-full flex-col gap-2 border-b px-3 py-2 sm:px-5 sm:py-3 lg:flex-row lg:items-center lg:justify-between'>
           <div className='flex min-w-0 items-center gap-2'>
             <IconBadge tone='info' size='sm'>
@@ -725,7 +727,7 @@ export function FlowCharts(props: FlowChartsProps) {
         <div className='h-[560px] p-1.5 sm:h-[680px] sm:p-2 2xl:h-[760px]'>
           {chartContent}
         </div>
-      </div>
+      </section>
     </div>
   )
 }

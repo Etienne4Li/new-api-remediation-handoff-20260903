@@ -143,7 +143,7 @@ const OPERATIONS_SECTIONS = [
   },
 ] as const
 
-export type OperationsSectionId = (typeof OPERATIONS_SECTIONS)[number]['id']
+type OperationsSectionId = (typeof OPERATIONS_SECTIONS)[number]['id']
 
 const operationsRegistry = createSectionRegistry<
   OperationsSectionId,

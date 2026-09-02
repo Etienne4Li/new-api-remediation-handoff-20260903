@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type QueryClient } from '@tanstack/react-query'
+import type { QueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
@@ -30,7 +30,7 @@ import { modelsQueryKeys } from './query-keys'
 /**
  * Enable a model
  */
-export async function handleEnableModel(
+async function handleEnableModel(
   id: number,
   queryClient?: QueryClient,
   onSuccess?: () => void
@@ -54,7 +54,7 @@ export async function handleEnableModel(
 /**
  * Disable a model
  */
-export async function handleDisableModel(
+async function handleDisableModel(
   id: number,
   queryClient?: QueryClient,
   onSuccess?: () => void

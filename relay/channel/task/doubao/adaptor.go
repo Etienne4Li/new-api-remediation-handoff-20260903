@@ -2,10 +2,12 @@ package doubao
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -119,7 +121,20 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
 	// Accept only POST /v1/video/generations as "generate" action.
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate); taskErr != nil {
+		return taskErr
+	}
+	// Provider fields are merged from metadata after the shared validator. Run
+	// the same conversion now so an oversized/negative metadata.duration is
+	// rejected before the asynchronous task is pre-charged.
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -209,7 +224,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -219,7 +234,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	// Parse Doubao response
 	var dResp responsePayload
 	if err := common.Unmarshal(responseBody, &dResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body_meta: %s", common.SensitiveLogBody(responseBody)), "unmarshal_response_body_failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -240,14 +255,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 // FetchTask fetch task status
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
 	}
+	escapedTaskID, err := taskcommon.EscapeTaskIDPathSegment(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task_id: %w", err)
+	}
 
-	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", baseUrl, taskID)
+	uri := fmt.Sprintf("%s/api/v3/contents/generations/tasks/%s", strings.TrimRight(baseUrl, "/"), escapedTaskID)
 
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -272,9 +298,24 @@ func (a *TaskAdaptor) GetChannelName() string {
 }
 
 func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*requestPayload, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	for key := range req.Metadata {
+		if strings.EqualFold(strings.TrimSpace(key), "model") || strings.EqualFold(strings.TrimSpace(key), "model_name") {
+			return nil, errors.New("can't change model with metadata")
+		}
+	}
+	if req.Duration < 0 || req.Duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
 	r := requestPayload{
 		Model:   req.Model,
 		Content: []ContentItem{},
+	}
+	if req.Duration != 0 {
+		duration := dto.IntValue(req.Duration)
+		r.Duration = &duration
 	}
 
 	// Add images if present
@@ -293,9 +334,43 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 	if err := taskcommon.UnmarshalMetadata(metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
+	// Validate metadata.duration before applying the legacy `seconds` alias.
+	// Otherwise a huge metadata value could be overwritten by a valid seconds
+	// value and escape the boundary check below.
+	if r.Duration != nil {
+		duration := int(*r.Duration)
+		if duration <= 0 || duration > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+		}
+	}
+	if err := validateMediaURLs(&r.Content); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(r.CallbackURL) != "" {
+		return nil, errors.New("callback_url is not supported")
+	}
 
-	if sec, _ := strconv.Atoi(req.Seconds); sec > 0 {
-		r.Duration = lo.ToPtr(dto.IntValue(sec))
+	// `seconds` is the OpenAI-compatible spelling and historically takes
+	// precedence over metadata.duration. Parse it strictly: silently ignoring
+	// a malformed value would make the provider choose a different duration
+	// than the one the caller supplied.
+	if raw := strings.TrimSpace(req.Seconds); raw != "" {
+		sec, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid seconds: %w", err)
+		}
+		if sec < 0 || sec > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("seconds must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+		}
+		if sec > 0 {
+			r.Duration = lo.ToPtr(dto.IntValue(sec))
+		}
+	}
+	if r.Duration != nil {
+		duration := int(*r.Duration)
+		if duration <= 0 || duration > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+		}
 	}
 
 	r.Content = lo.Reject(r.Content, func(c ContentItem, _ int) bool { return c.Type == "text" })
@@ -307,6 +382,29 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 	return &r, nil
 }
 
+func validateMediaURLs(content *[]ContentItem) error {
+	if content == nil {
+		return nil
+	}
+	for index := range *content {
+		item := &(*content)[index]
+		for field, media := range map[string]*MediaURL{
+			"image_url": item.ImageURL,
+			"video_url": item.VideoURL,
+			"audio_url": item.AudioURL,
+		} {
+			if media == nil || strings.TrimSpace(media.URL) == "" {
+				continue
+			}
+			if err := common.ValidateHTTPURL(media.URL); err != nil {
+				return fmt.Errorf("content[%d].%s: %w", index, field, err)
+			}
+			media.URL = strings.TrimSpace(media.URL)
+		}
+	}
+	return nil
+}
+
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
 	resTask := responseTask{}
 	if err := common.Unmarshal(respBody, &resTask); err != nil {
@@ -314,7 +412,8 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	}
 
 	taskResult := relaycommon.TaskInfo{
-		Code: 0,
+		Code:   0,
+		TaskID: resTask.ID,
 	}
 
 	// Map Doubao status to internal status
@@ -328,7 +427,11 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	case "succeeded":
 		taskResult.Status = model.TaskStatusSuccess
 		taskResult.Progress = "100%"
-		taskResult.Url = resTask.Content.VideoURL
+		if normalized, err := taskcommon.NormalizeTaskResultURL(resTask.Content.VideoURL); err != nil {
+			return nil, fmt.Errorf("invalid doubao video URL: %w", err)
+		} else {
+			taskResult.Url = normalized
+		}
 		// 解析 usage 信息用于按倍率计费
 		taskResult.CompletionTokens = resTask.Usage.CompletionTokens
 		taskResult.TotalTokens = resTask.Usage.TotalTokens

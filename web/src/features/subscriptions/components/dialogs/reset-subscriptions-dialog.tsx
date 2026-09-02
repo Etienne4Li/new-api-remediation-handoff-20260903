@@ -36,7 +36,14 @@ export function ResetSubscriptionsDialog() {
   const planLabel = plan?.title || (plan?.id ? `#${plan.id}` : '-')
 
   useEffect(() => {
-    if (isOpen) setAdvanceResetTime(true)
+    if (!isOpen) return
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) setAdvanceResetTime(true)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [isOpen])
 
   const handleConfirm = async () => {

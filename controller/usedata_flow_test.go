@@ -21,6 +21,8 @@ func setupFlowControllerTestDB(t *testing.T) {
 	t.Helper()
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.QuotaData{}))
+	require.NoError(t, model.DB.Create(&model.User{Id: 1, Username: "alice", AffCode: "flow-controller-alice", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}).Error)
+	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "bob", AffCode: "flow-controller-bob", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}).Error)
 	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "east"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 11, UserId: 1, Key: "sk-primary", Name: "primary"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 22, UserId: 2, Key: "sk-backup", Name: "backup"}).Error)
@@ -132,4 +134,31 @@ func TestGetUserFlowQuotaDatesRejectsInvalidTimeRange(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 	require.False(t, payload.Success)
 	require.Equal(t, "invalid start_timestamp", payload.Message)
+}
+
+func TestQuotaDataEndpointsRejectMalformedTimestamps(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	for _, endpoint := range []struct {
+		name string
+		path string
+		call func(*gin.Context)
+	}{
+		{name: "all", path: "/api/data?start_timestamp=oops", call: GetAllQuotaDates},
+		{name: "grouped", path: "/api/data/users?end_timestamp=oops", call: GetQuotaDatesByUser},
+		{name: "self", path: "/api/data/self?start_timestamp=oops", call: GetUserQuotaDates},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Set("id", 1)
+			ctx.Set("role", common.RoleAdminUser)
+			ctx.Request = httptest.NewRequest(http.MethodGet, endpoint.path, nil)
+			endpoint.call(ctx)
+			var payload struct {
+				Success bool `json:"success"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+			require.False(t, payload.Success)
+		})
+	}
 }

@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,9 +81,18 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	instance := VeoInstance{Prompt: req.Prompt}
 	if img := ExtractMultipartImage(c, info); img != nil {
 		instance.Image = img
+	} else if hasMultipartInputReference(c) {
+		return nil, errors.New("invalid input_reference image")
 	} else if len(req.Images) > 0 {
-		if parsed := ParseImageInput(req.Images[0]); parsed != nil {
-			instance.Image = parsed
+		if len(req.Images) > 1 {
+			return nil, errors.New("only one image input is supported")
+		}
+		parsed := ParseImageInput(req.Images[0])
+		if parsed == nil {
+			return nil, errors.New("invalid image input: expected a supported data URI or base64 image")
+		}
+		instance.Image = parsed
+		if info != nil {
 			info.Action = constant.TaskActionGenerate
 		}
 	}
@@ -91,9 +101,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, params); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
-	if params.DurationSeconds == 0 && req.Duration > 0 {
-		params.DurationSeconds = req.Duration
-	}
+	// Normalize numeric duration and string seconds exactly as the billing path
+	// does so the provider cannot fall back to a different default.
+	params.DurationSeconds = ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
 	if params.Resolution == "" && req.Size != "" {
 		params.Resolution = SizeToVeoResolution(req.Size)
 	}
@@ -115,6 +125,14 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	return bytes.NewReader(data), nil
 }
 
+func hasMultipartInputReference(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	multipartForm, err := c.MultipartForm()
+	return err == nil && multipartForm != nil && len(multipartForm.File["input_reference"]) > 0
+}
+
 // DoRequest delegates to common helper.
 func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	return channel.DoTaskApiRequest(a, c, info, requestBody)
@@ -122,7 +140,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return "", nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
@@ -181,6 +199,16 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 
 // FetchTask polls task status via the Gemini operations GET endpoint.
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+// FetchTaskWithContext is the cancellable variant used by the background task
+// poller and the video proxy.  Status requests must honor the caller's
+// deadline even when the global relay timeout is disabled for streaming calls.
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -194,7 +222,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	version := model_setting.GetGeminiVersionSetting("default")
 	url := fmt.Sprintf("%s/%s/%s", baseUrl, version, upstreamName)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +244,7 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	}
 
 	ti := &relaycommon.TaskInfo{}
+	ti.TaskID = taskcommon.EncodeLocalTaskID(op.Name)
 
 	if op.Error.Message != "" {
 		ti.Status = model.TaskStatusFailure
@@ -232,8 +261,6 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 
 	ti.Status = model.TaskStatusSuccess
 	ti.Progress = "100%"
-
-	ti.TaskID = taskcommon.EncodeLocalTaskID(op.Name)
 
 	if len(op.Response.GenerateVideoResponse.GeneratedVideos) > 0 {
 		if uri := op.Response.GenerateVideoResponse.GeneratedVideos[0].Video.URI; uri != "" {

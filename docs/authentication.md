@@ -24,7 +24,7 @@
 
 `SYNC_FREQUENCY` 越大，独立 Redis 部署的陈旧窗口越长；值越小，每个活跃 SID 在每个节点上回源数据库的频率越高。默认配置下，持续活跃的 Session 每个节点最多约每 60 秒增加一次数据库主键点查。共享 Redis 时，撤销 tombstone 和版本发布仍保持即时传播。
 
-所有节点必须使用相同的 `SESSION_SECRET`。当多个节点连接同一个 Redis 时，还必须使用相同的 `CRYPTO_SECRET`，否则节点生成的缓存键摘要不一致，无法正确共享缓存。上述保证只覆盖登录 Session 鉴权的有界陈旧语义；限流额度及其他 Redis 缓存仍会受到 Redis 拓扑影响，不能据此认为整个控制面与拓扑无关。
+所有节点必须使用相同的 `SESSION_SECRET`。共享数据库的节点还必须长期保持同一个 `CRYPTO_SECRET`：它同时用于数据库静态凭据加密、凭据指纹和缓存键摘要，现有 `enc:v1` 数据不可通过直接替换该密钥来轮换。上述保证只覆盖登录 Session 鉴权的有界陈旧语义；限流额度及其他 Redis 缓存仍会受到 Redis 拓扑影响，不能据此认为整个控制面与拓扑无关。
 
 ## 浏览器接口
 
@@ -124,13 +124,29 @@ SESSION_COOKIE_TRUSTED_URL=https://panel.example.com,https://admin.example.com
 
 ## 可信代理与 IP 限流
 
-Gin 默认会信任所有代理提供的客户端 IP 请求头。本项目改为兼顾常见反代拓扑和公网直连安全的三态配置：
+Gin 只在请求的直连来源属于显式配置的可信代理时解析客户端 IP 请求头。本项目采用 fail-closed 的三态配置：
 
-- 未配置、空字符串或纯空白的 `TRUSTED_PROXIES` 默认信任 `127.0.0.0/8`、`::1`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 和 `fc00::/7`，并输出启动告警。该默认值覆盖同机 Nginx、Docker Compose 和常见内网反代；公网直连地址不在列表中，其伪造的 `X-Forwarded-For` 会被忽略。
-- `TRUSTED_PROXIES=none`（大小写不敏感且必须单独使用）启用严格直连模式，不信任任何代理，`ClientIP()` 只使用 TCP 直连地址。
-- 其他非空值按英文逗号解析为代理 IP/CIDR，并完全替代默认列表。应填写反向代理自身的地址而不是客户端网段；非法 CIDR、空列表或将 `none` 与其他值混用都会阻止服务启动。
+- 未配置、空字符串或纯空白的 `TRUSTED_PROXIES` 进入严格直连模式并输出启动告警；转发头不会影响 `ClientIP()`。这也是 `TRUSTED_PROXIES=none`（大小写不敏感且必须单独使用）的行为。
+- 其他非空值按英文逗号解析为代理 IP/CIDR，并完全替代默认值。仅支持 IP 地址或 CIDR，必须填写反向代理自身的地址而不是整个客户端网段；非法 CIDR、空条目或将 `none` 与其他值混用都会阻止服务启动。
 
-Gin 只在请求的直连来源属于可信代理时解析客户端 IP 请求头，并从转发链右侧向左寻找首个非可信地址。因此常见 Nginx `$proxy_add_x_forwarded_for` 链中的公网客户端地址会阻止更左侧的伪造前缀生效。默认信任私网的残余风险是：能够从同一私网直接访问应用的其他机器或容器仍可伪造这些请求头；需要消除此风险时应使用 `none` 或配置精确代理地址。
+启动时会安装转发头清洗中间件：不可信直连来源的 `X-Forwarded-For`、`X-Real-IP`、`CF-Connecting-IP` 和标准 `Forwarded` 头会被删除；可信来源的重复、空白、非法或互相冲突的身份头会全部丢弃并回退到 TCP 直连地址，不会因恶意请求放大为全站 `400`。合法 XFF 链从右向左跳过已配置的代理地址，取第一个非可信 hop，并重写成单一 canonical `X-Forwarded-For`，防止客户端伪造左侧前缀。可信代理若只发送 `X-Real-IP` 或 `CF-Connecting-IP` 仍可使用，但应用会先校验并转换它；生产边缘层应先清除入站同名头，再用 `$remote_addr`/受信 CDN 地址重建 XFF。`Forwarded` 暂不作为身份来源。
+
+Nginx 反代至少应显式覆盖客户端可控的同名头（不要使用会保留入站前缀的 `$proxy_add_x_forwarded_for`）：
+
+```nginx
+location / {
+    # 若 Nginx 直接接收公网连接，$remote_addr 就是真实客户端地址。
+    # 若前面还有 CDN，先用 real_ip 模块并仅列出 CDN 官方 CIDR，
+    # 再使用这里的 $remote_addr；不要把任意私网网段加入 set_real_ip_from。
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header CF-Connecting-IP "";
+    proxy_set_header Forwarded "";
+    proxy_pass http://new-api:3000;
+}
+```
+
+应用容器只能被该 Nginx/负载均衡器访问；将其实际 TCP 地址（而不是整个 Docker bridge 或办公网段）填入 `TRUSTED_PROXIES`。异步图片网关使用同样的边界，通过 `ASYNC_TRUSTED_PROXY_NETWORKS` 配置；留空即严格直连模式。变更代理拓扑后，应分别从代理和直连入口发送带伪造 XFF、X-Real-IP、CF-Connecting-IP 的请求，确认审计 IP、限流键和 Token IP allowlist 均仍使用真实地址。
 
 Redis 限流使用原子 Lua 固定窗口，替代旧的近似滑动窗口 List 实现。这是有意的语义变化：窗口边界两侧可分别打满一次，极短时间内通过量最高约为配置值的两倍。例如 `20 次/20 分钟` 在边界可通过约 40 次。帐户级 Session 上限和签发窗口继续控制数据库增长；如未来需要严格抑制边界突发，需单独迁移为 ZSET 滑动窗口。
 
@@ -163,11 +179,11 @@ Proof 同时绑定用户、登录会话、用户鉴权版本、会话版本和 s
 ## 升级注意事项
 
 - 旧 `session` Cookie 不再使用；升级后现有面板登录会失效，用户需要重新登录。
-- 数据库迁移会新增 `user_sessions`、`auth_flows`、`external_identity_claims` 和 `users.auth_version`，并为已有用户初始化鉴权版本、回填 Telegram 账号唯一归属；若历史数据中同一 Telegram ID 已绑定多个用户，迁移会拒绝继续启动，需先消除歧义。
+- 数据库迁移会新增 `user_sessions`、`auth_flows`、`external_identity_claims` 和 `users.auth_version`，并为已有用户初始化鉴权版本、回填 GitHub、Discord、OIDC、WeChat、Telegram、Linux DO 账号的唯一归属；若历史数据中同一 provider 身份已绑定多个用户，迁移会拒绝继续启动，需先消除歧义。
 - 数据库迁移会为 Session 签发计数和分批清理新增索引；已有 `user_sessions` 很大时应为首次启动预留维护窗口。
 - `user_sessions.previous_refresh_hash` 会从定长 `char(64)` 迁移为 `varchar(64)`。应用会兼容读取历史定长字段留下的空格填充；迁移后的目标结构必须保持幂等，连续启动不应反复执行列类型变更。
 - 仅 master 节点定时清理过期登录会话、超过配置保留期的 revoked 会话和已过保留期的 AuthFlow。
-- 未配置 `TRUSTED_PROXIES` 时会兼容信任回环和常见私网代理；使用公网负载均衡器、`100.64.0.0/10`、链路本地地址或自定义 CNI 网段的部署仍需显式配置。需要严格忽略所有转发头时设置为 `none`。
+- 未配置 `TRUSTED_PROXIES` 时为严格直连模式，不信任任何转发头。使用反向代理、负载均衡器或自定义 CNI 网段的部署必须显式配置实际代理 IP/CIDR，并确保边缘层先清除再重建 XFF。
 - Redis 限流从近似滑动窗口改为原子固定窗口，存在明确的边界双倍突发语义。
 - 用户级模型成功请求限流的 UTC 时间戳在滚动升级期间存在一个窗口的混合格式过渡，期间可能临时误放行或误拒绝。
 - 自建客户端应按新的 AuthBundle、`flow_token` 和 Security Proof 契约升级；PAT 客户端可直接移除 `New-Api-User`。

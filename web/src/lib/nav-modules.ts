@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { getStatus } from '@/lib/api'
+import { readCachedStatus, writeCachedStatus } from '@/lib/status-cache'
 
 export type ModuleAccess = { enabled: boolean; requireAuth: boolean }
 
@@ -54,10 +55,7 @@ function cloneHeaderNavDefaults(): HeaderNavModules {
   }
 }
 
-export function parseHeaderNavBoolean(
-  raw: unknown,
-  fallback: boolean
-): boolean {
+function parseHeaderNavBoolean(raw: unknown, fallback: boolean): boolean {
   if (typeof raw === 'boolean') return raw
   if (typeof raw === 'number') {
     if (raw === 1) return true
@@ -104,7 +102,7 @@ function parseHeaderNavRecord(raw: unknown): Record<string, unknown> | null {
   }
 }
 
-export function parseHeaderNavModules(raw: unknown): HeaderNavModules {
+function parseHeaderNavModules(raw: unknown): HeaderNavModules {
   const result = cloneHeaderNavDefaults()
   const parsed = parseHeaderNavRecord(raw)
   if (!parsed) return result
@@ -143,34 +141,18 @@ export function parseHeaderNavModulesFromStatus(
 }
 
 function getCachedStatus(): Record<string, unknown> | null {
-  try {
-    if (typeof window === 'undefined') return null
-    const raw = window.localStorage.getItem('status')
-    return raw ? (JSON.parse(raw) as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
+  return readCachedStatus<Record<string, unknown>>() ?? null
 }
 
 function cacheStatus(status: Record<string, unknown> | null): void {
-  try {
-    if (typeof window !== 'undefined' && status) {
-      window.localStorage.setItem('status', JSON.stringify(status))
-    }
-  } catch {
-    /* empty */
-  }
+  writeCachedStatus(status)
 }
 
-export function getModuleAccessFromStatus(
+function getModuleAccessFromStatus(
   status: Record<string, unknown> | null,
   module: HeaderNavModule
 ): ModuleAccess {
   return parseHeaderNavModulesFromStatus(status)[module] ?? DEFAULTS[module]
-}
-
-export function getModuleAccess(module: HeaderNavModule): ModuleAccess {
-  return getModuleAccessFromStatus(getCachedStatus(), module)
 }
 
 export async function getFreshModuleAccess(

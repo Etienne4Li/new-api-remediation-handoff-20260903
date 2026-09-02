@@ -29,6 +29,11 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info con
 	}
 	if claudeRequest.MaxTokens != nil {
 		openAIRequest.MaxTokens = kitutil.GetPointer(*claudeRequest.MaxTokens)
+	} else if claudeRequest.MaxTokensToSample != nil {
+		// Older Claude clients use max_tokens_to_sample.  Preserve the limit
+		// when falling back to Ollama's legacy /api/chat dialect instead of
+		// silently allowing an unbounded generation.
+		openAIRequest.MaxTokens = kitutil.GetPointer(*claudeRequest.MaxTokensToSample)
 	}
 	if claudeRequest.TopP != nil {
 		openAIRequest.TopP = kitutil.GetPointer(*claudeRequest.TopP)
@@ -157,10 +162,24 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info con
 					}
 					mediaMessages = append(mediaMessages, message)
 				case "image":
-					imageData := fmt.Sprintf("data:%s;base64,%s", mediaMsg.Source.MediaType, mediaMsg.Source.Data)
+					if mediaMsg.Source == nil {
+						return nil, fmt.Errorf("image content source is required")
+					}
+					if strings.TrimSpace(mediaMsg.Source.MediaType) == "" {
+						return nil, fmt.Errorf("image content media type is required")
+					}
+					sourceData := strings.TrimSpace(kitutil.Interface2String(mediaMsg.Source.Data))
+					sourceURL := strings.TrimSpace(mediaMsg.Source.Url)
+					if sourceData == "" && sourceURL == "" {
+						return nil, fmt.Errorf("image content data or url is required")
+					}
+					imageURL := sourceURL
+					if sourceData != "" {
+						imageURL = fmt.Sprintf("data:%s;base64,%s", mediaMsg.Source.MediaType, sourceData)
+					}
 					mediaMessage := dto.MediaContent{
 						Type:     "image_url",
-						ImageUrl: &dto.MessageImageUrl{Url: imageData},
+						ImageUrl: &dto.MessageImageUrl{Url: imageURL},
 					}
 					mediaMessages = append(mediaMessages, mediaMessage)
 				case "tool_use":

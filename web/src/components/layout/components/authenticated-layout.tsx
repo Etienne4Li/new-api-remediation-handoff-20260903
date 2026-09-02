@@ -37,12 +37,18 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   return (
     <LayoutProvider>
       <SearchProvider>
-        <SidebarProvider defaultOpen={defaultOpen} className='flex-col'>
+        <SidebarProvider
+          defaultOpen={defaultOpen}
+          data-authenticated-shell=''
+          className='flex-col'
+        >
           <SkipToMain />
           <AppHeader />
           <div className='flex min-h-0 w-full flex-1'>
             <AppSidebar />
             <SidebarInset
+              id='content'
+              tabIndex={-1}
               className={cn(
                 '@container/content',
                 'h-[calc(100svh-var(--app-header-height,0px))]',

@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 'use client'
 
-import { memo, useLayoutEffect, useMemo, useRef } from 'react'
+import { memo, useLayoutEffect, useMemo, useState } from 'react'
 import { getMarkdown, parseMarkdownToStructure } from 'stream-markdown-parser'
 
 import { cn } from '@/lib/utils'
@@ -59,10 +59,7 @@ export const Response = memo((props: ResponseProps) => {
   const parserId = props.parserId ?? DEFAULT_PARSER_ID
   const markdown = getCachedMarkdown(parserId)
   const shouldParseMarkdown = content.length <= MAX_PARSED_MARKDOWN_CHARS
-  const fadeStateRef = useRef<FadeState | null>(null)
-  if (fadeStateRef.current == null) {
-    fadeStateRef.current = createFadeState()
-  }
+  const [fadeState] = useState<FadeState>(createFadeState)
 
   const nodes = useMemo(() => {
     if (!shouldParseMarkdown) {
@@ -82,7 +79,6 @@ export const Response = memo((props: ResponseProps) => {
 
   if (parsedContent.bodyNodes.length > 0) {
     if (shouldAnimate) {
-      const fadeState = fadeStateRef.current
       const suppress =
         fadeState.firstRun && content.length > FADE_HYDRATION_THRESHOLD
       fadeRun = beginRun(fadeState, suppress)
@@ -100,10 +96,6 @@ export const Response = memo((props: ResponseProps) => {
 
   useLayoutEffect(() => {
     if (!shouldAnimate) {
-      return
-    }
-    const fadeState = fadeStateRef.current
-    if (fadeState == null) {
       return
     }
     commitRun(fadeState)

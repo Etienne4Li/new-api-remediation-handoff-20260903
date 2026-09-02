@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
+	"github.com/QuantumNous/new-api/common"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
@@ -12,11 +14,10 @@ import (
 )
 
 func GetPerfMetricsSummary(c *gin.Context) {
-	hours := 24
-	if rawHours := c.Query("hours"); rawHours != "" {
-		if parsed, err := strconv.Atoi(rawHours); err == nil {
-			hours = parsed
-		}
+	hours, err := parsePerfMetricsHours(c)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
 	}
 
 	activeGroups := append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
@@ -24,7 +25,7 @@ func GetPerfMetricsSummary(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -45,11 +46,10 @@ func GetPerfMetrics(c *gin.Context) {
 		return
 	}
 
-	hours := 24
-	if rawHours := c.Query("hours"); rawHours != "" {
-		if parsed, err := strconv.Atoi(rawHours); err == nil {
-			hours = parsed
-		}
+	hours, err := parsePerfMetricsHours(c)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
 	}
 
 	result, err := perfmetrics.Query(perfmetrics.QueryParams{
@@ -60,7 +60,7 @@ func GetPerfMetrics(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -71,6 +71,21 @@ func GetPerfMetrics(c *gin.Context) {
 		"success": true,
 		"data":    result,
 	})
+}
+
+// parsePerfMetricsHours distinguishes an omitted query parameter (which uses
+// the documented 24-hour default) from malformed or non-positive input.  The
+// model package still applies its 30-day upper bound as a second defense.
+func parsePerfMetricsHours(c *gin.Context) (int, error) {
+	rawHours := c.Query("hours")
+	if rawHours == "" {
+		return 24, nil
+	}
+	hours, err := strconv.Atoi(rawHours)
+	if err != nil || hours <= 0 {
+		return 0, fmt.Errorf("hours must be a positive integer")
+	}
+	return hours, nil
 }
 
 func filterActiveGroups(groups []perfmetrics.GroupResult) []perfmetrics.GroupResult {

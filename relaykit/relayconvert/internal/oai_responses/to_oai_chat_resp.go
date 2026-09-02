@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
 const (
@@ -151,7 +152,7 @@ func UsageFromResponsesUsage(src *dto.Usage) *dto.Usage {
 	if src.TotalTokens != 0 {
 		usage.TotalTokens = src.TotalTokens
 	} else {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.TotalTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	}
 	if src.InputTokensDetails != nil {
 		usage.PromptTokensDetails.CachedTokens = src.InputTokensDetails.CachedTokens

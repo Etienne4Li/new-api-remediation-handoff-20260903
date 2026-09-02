@@ -14,11 +14,11 @@ type StatusCodeRange struct {
 	End   int
 }
 
-var AutomaticDisableStatusCodeRanges = []StatusCodeRange{{Start: 401, End: 401}}
+var defaultAutomaticDisableStatusCodeRanges = []StatusCodeRange{{Start: 401, End: 401}}
 
 // Default behavior matches legacy hardcoded retry rules in controller/relay.go shouldRetry:
 // retry for 1xx, 3xx, 4xx(except 400/408), 5xx(except 504/524), and no retry for 2xx.
-var AutomaticRetryStatusCodeRanges = []StatusCodeRange{
+var defaultAutomaticRetryStatusCodeRanges = []StatusCodeRange{
 	{Start: 100, End: 199},
 	{Start: 300, End: 399},
 	{Start: 401, End: 407},
@@ -28,17 +28,30 @@ var AutomaticRetryStatusCodeRanges = []StatusCodeRange{
 	{Start: 525, End: 599},
 }
 
+// Deprecated: use GetOperationRuntimeConfig and its policy methods. These
+// slices remain exported only so older integrations continue to compile; they
+// are replaced (never mutated in place) whenever a runtime update publishes.
+var AutomaticDisableStatusCodeRanges = append([]StatusCodeRange(nil), defaultAutomaticDisableStatusCodeRanges...)
+var AutomaticRetryStatusCodeRanges = append([]StatusCodeRange(nil), defaultAutomaticRetryStatusCodeRanges...)
+
 var alwaysSkipRetryStatusCodes = map[int]struct{}{
 	504: {},
 	524: {},
 }
 
 var alwaysSkipRetryCodes = map[types.ErrorCode]struct{}{
-	types.ErrorCodeBadResponseBody: {},
+	types.ErrorCodeBadResponseBody:             {},
+	types.ErrorCodeSessionBlockedByCyberPolicy: {},
 }
 
 func AutomaticDisableStatusCodesToString() string {
-	return statusCodeRangesToString(AutomaticDisableStatusCodeRanges)
+	return statusCodeRangesToString(GetOperationRuntimeConfig().AutomaticDisableStatusCodeRanges)
+}
+
+// AutomaticDisableStatusCodesToStringWithoutOptionLock is for publication
+// code that already holds common.OptionMapRWMutex.
+func AutomaticDisableStatusCodesToStringWithoutOptionLock() string {
+	return statusCodeRangesToString(GetOperationRuntimeConfigWithoutOptionLock().AutomaticDisableStatusCodeRanges)
 }
 
 func AutomaticDisableStatusCodesFromString(s string) error {
@@ -46,16 +59,30 @@ func AutomaticDisableStatusCodesFromString(s string) error {
 	if err != nil {
 		return err
 	}
-	AutomaticDisableStatusCodeRanges = ranges
+	UpdateOperationRuntimeConfig(func(config *OperationRuntimeConfig) {
+		config.AutomaticDisableStatusCodeRanges = ranges
+	})
 	return nil
 }
 
 func ShouldDisableByStatusCode(code int) bool {
-	return shouldMatchStatusCodeRanges(AutomaticDisableStatusCodeRanges, code)
+	return GetOperationRuntimeConfig().ShouldDisableByStatusCode(code)
+}
+
+// ShouldDisableByStatusCodeWithoutOptionLock is the lock-free-internally
+// variant for callers that already hold the option publication lock.
+func ShouldDisableByStatusCodeWithoutOptionLock(code int) bool {
+	return GetOperationRuntimeConfigWithoutOptionLock().ShouldDisableByStatusCode(code)
 }
 
 func AutomaticRetryStatusCodesToString() string {
-	return statusCodeRangesToString(AutomaticRetryStatusCodeRanges)
+	return statusCodeRangesToString(GetOperationRuntimeConfig().AutomaticRetryStatusCodeRanges)
+}
+
+// AutomaticRetryStatusCodesToStringWithoutOptionLock is for publication code
+// that already holds common.OptionMapRWMutex.
+func AutomaticRetryStatusCodesToStringWithoutOptionLock() string {
+	return statusCodeRangesToString(GetOperationRuntimeConfigWithoutOptionLock().AutomaticRetryStatusCodeRanges)
 }
 
 func AutomaticRetryStatusCodesFromString(s string) error {
@@ -63,7 +90,9 @@ func AutomaticRetryStatusCodesFromString(s string) error {
 	if err != nil {
 		return err
 	}
-	AutomaticRetryStatusCodeRanges = ranges
+	UpdateOperationRuntimeConfig(func(config *OperationRuntimeConfig) {
+		config.AutomaticRetryStatusCodeRanges = ranges
+	})
 	return nil
 }
 
@@ -78,10 +107,34 @@ func IsAlwaysSkipRetryCode(errorCode types.ErrorCode) bool {
 }
 
 func ShouldRetryByStatusCode(code int) bool {
+	return GetOperationRuntimeConfig().ShouldRetryByStatusCode(code)
+}
+
+// ShouldRetryByStatusCodeWithoutOptionLock is the lock-free-internally
+// variant for callers that already hold the option publication lock.
+func ShouldRetryByStatusCodeWithoutOptionLock(code int) bool {
+	return GetOperationRuntimeConfigWithoutOptionLock().ShouldRetryByStatusCode(code)
+}
+
+// ShouldDisableByStatusCode evaluates the policy contained in one already
+// loaded snapshot. Keeping the range and keyword decisions on the same value
+// prevents a request from mixing generations during a hot reload.
+func (config OperationRuntimeConfig) ShouldDisableByStatusCode(code int) bool {
+	return shouldMatchStatusCodeRanges(config.AutomaticDisableStatusCodeRanges, code)
+}
+
+// ShouldRetryByStatusCode evaluates retry policy from one already loaded
+// snapshot. The caller may combine this with other fields from that snapshot.
+func (config OperationRuntimeConfig) ShouldRetryByStatusCode(code int) bool {
+	// Cloudflare 524 is opt-in for synchronous relays. Task relays continue to
+	// use IsAlwaysSkipRetryStatusCode to avoid duplicate task creation.
+	if code == 524 {
+		return shouldMatchStatusCodeRanges(config.AutomaticRetryStatusCodeRanges, code)
+	}
 	if IsAlwaysSkipRetryStatusCode(code) {
 		return false
 	}
-	return shouldMatchStatusCodeRanges(AutomaticRetryStatusCodeRanges, code)
+	return shouldMatchStatusCodeRanges(config.AutomaticRetryStatusCodeRanges, code)
 }
 
 func statusCodeRangesToString(ranges []StatusCodeRange) string {

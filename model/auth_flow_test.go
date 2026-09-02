@@ -107,3 +107,27 @@ func TestConsumeAuthFlowWithActionRollsBackTogether(t *testing.T) {
 	assert.Nil(t, flow.ConsumedAt)
 	require.NoError(t, ClaimExternalAuthAssertion(AuthFlowPurposeTelegramAssertion, "assertion-a", time.Now().Add(time.Minute)))
 }
+
+func TestCreateAuthFlowWithActionRollsBackTogether(t *testing.T) {
+	truncateTables(t)
+	actionErr := errors.New("verifier initialization failed")
+	token, flow, err := CreateAuthFlowWithAction(AuthFlowCreate{
+		Purpose:   AuthFlowPurposeOAuth,
+		Provider:  "github",
+		Intent:    AuthFlowIntentBind,
+		UserId:    42,
+		SessionId: "session-a",
+		ExpiresAt: time.Now().Add(time.Minute),
+	}, func(tx *gorm.DB, generatedToken string, created *AuthFlow) error {
+		assert.NotEmpty(t, generatedToken)
+		assert.NotZero(t, created.Id)
+		return actionErr
+	})
+	assert.ErrorIs(t, err, actionErr)
+	assert.Empty(t, token)
+	assert.Nil(t, flow)
+
+	var count int64
+	require.NoError(t, DB.Model(&AuthFlow{}).Count(&count).Error)
+	assert.Zero(t, count)
+}

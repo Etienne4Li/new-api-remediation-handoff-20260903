@@ -3,12 +3,45 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 
 	"github.com/gin-gonic/gin"
 )
+
+// parseOptionalDataTimestamp preserves the API's optional zero bounds while
+// rejecting malformed/negative values.  Silently converting a typo to zero
+// broadens a dashboard query to the full data set.
+func parseOptionalDataTimestamp(c *gin.Context, key string) (int64, bool) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return 0, true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		common.ApiErrorMsg(c, "invalid "+key)
+		return 0, false
+	}
+	return value, true
+}
+
+func parseOptionalDataTimeRange(c *gin.Context) (int64, int64, bool) {
+	start, ok := parseOptionalDataTimestamp(c, "start_timestamp")
+	if !ok {
+		return 0, 0, false
+	}
+	end, ok := parseOptionalDataTimestamp(c, "end_timestamp")
+	if !ok {
+		return 0, 0, false
+	}
+	if start != 0 && end != 0 && end < start {
+		common.ApiErrorMsg(c, "invalid time range")
+		return 0, 0, false
+	}
+	return start, end, true
+}
 
 func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 	startTimestamp, err := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -29,10 +62,12 @@ func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 }
 
 func GetAllQuotaDates(c *gin.Context) {
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	startTimestamp, endTimestamp, ok := parseOptionalDataTimeRange(c)
+	if !ok {
+		return
+	}
 	username := c.Query("username")
-	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, username)
+	dates, err := model.GetAllQuotaDatesForRole(startTimestamp, endTimestamp, username, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -46,9 +81,11 @@ func GetAllQuotaDates(c *gin.Context) {
 }
 
 func GetQuotaDatesByUser(c *gin.Context) {
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	dates, err := model.GetQuotaDataGroupByUser(startTimestamp, endTimestamp)
+	startTimestamp, endTimestamp, ok := parseOptionalDataTimeRange(c)
+	if !ok {
+		return
+	}
+	dates, err := model.GetQuotaDataGroupByUserForRole(startTimestamp, endTimestamp, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -62,8 +99,10 @@ func GetQuotaDatesByUser(c *gin.Context) {
 
 func GetUserQuotaDates(c *gin.Context) {
 	userId := c.GetInt("id")
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	startTimestamp, endTimestamp, ok := parseOptionalDataTimeRange(c)
+	if !ok {
+		return
+	}
 	// 判断时间跨度是否超过 1 个月
 	if endTimestamp-startTimestamp > 2592000 {
 		c.JSON(http.StatusOK, gin.H{

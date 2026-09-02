@@ -150,6 +150,11 @@ type RelayInfo struct {
 	ParamOverrideAudit                    []string
 
 	PriceData hosttypes.PriceData
+	// PriceDataSnapshotReady records that PriceData was computed for this
+	// request and is safe to use as an immutable pricing snapshot.  A zero
+	// value in PriceData is meaningful (for example, a free model), so callers
+	// must not infer readiness from individual numeric fields.
+	PriceDataSnapshotReady bool
 
 	// QuotaClamp is set (non-nil) when a quota conversion saturated at the
 	// supported single-request bound (or NaN fallback) while computing this request's charge.
@@ -185,7 +190,24 @@ type RelayInfo struct {
 	*TaskRelayInfo
 }
 
+// SetPriceDataSnapshot stores the request-scoped pricing snapshot.  Pricing
+// helpers should use this instead of assigning PriceData directly so zero
+// rates remain distinguishable from an uninitialised legacy RelayInfo.
+func (info *RelayInfo) SetPriceDataSnapshot(priceData hosttypes.PriceData) {
+	if info == nil {
+		return
+	}
+	info.PriceData = priceData
+	info.PriceDataSnapshotReady = true
+}
+
 func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
+	// Runtime overrides are derived from one channel's param/header rules and
+	// must not survive when a retry selects another channel.
+	info.RuntimeHeadersOverride = nil
+	info.UseRuntimeHeadersOverride = false
+	info.ParamOverrideAudit = nil
+
 	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)
@@ -259,7 +281,7 @@ func (info *RelayInfo) ToString() string {
 	fmt.Fprintf(b, "RelayMode: %d, ", info.RelayMode)
 	fmt.Fprintf(b, "IsStream: %t, ", info.IsStream)
 	fmt.Fprintf(b, "IsPlayground: %t, ", info.IsPlayground)
-	fmt.Fprintf(b, "RequestURLPath: %q, ", info.RequestURLPath)
+	fmt.Fprintf(b, "RequestURLPath: %q, ", common.SanitizeRequestURIForLog(info.RequestURLPath))
 	fmt.Fprintf(b, "OriginModelName: %q, ", info.OriginModelName)
 	fmt.Fprintf(b, "EstimatePromptTokens: %d, ", info.estimatePromptTokens)
 	fmt.Fprintf(b, "ShouldIncludeUsage: %t, ", info.ShouldIncludeUsage)
@@ -297,7 +319,7 @@ func (info *RelayInfo) ToString() string {
 	if info.ChannelMeta != nil {
 		cm := info.ChannelMeta
 		fmt.Fprintf(b, "ChannelMeta{ Type: %d, Id: %d, IsMultiKey: %t, MultiKeyIndex: %d, BaseURL: %q, ApiType: %d, ApiVersion: %q, Organization: %q, CreateTime: %d, UpstreamModelName: %q, IsModelMapped: %t, SupportStreamOptions: %t, ApiKey: ***masked*** }, ",
-			cm.ChannelType, cm.ChannelId, cm.ChannelIsMultiKey, cm.ChannelMultiKeyIndex, cm.ChannelBaseUrl, cm.ApiType, cm.ApiVersion, cm.Organization, cm.ChannelCreateTime, cm.UpstreamModelName, cm.IsModelMapped, cm.SupportStreamOptions)
+			cm.ChannelType, cm.ChannelId, cm.ChannelIsMultiKey, cm.ChannelMultiKeyIndex, SanitizeURLForLog(cm.ChannelBaseUrl), cm.ApiType, cm.ApiVersion, cm.Organization, cm.ChannelCreateTime, cm.UpstreamModelName, cm.IsModelMapped, cm.SupportStreamOptions)
 	}
 
 	// Responses usage info (non-sensitive)
@@ -887,10 +909,18 @@ func (t *TaskSubmitReq) HasImage() bool {
 }
 
 func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
+	if t == nil {
+		return errors.New("task request is nil")
+	}
+	// A request object can be decoded more than once when the body is replayed
+	// for a retry. Reset first so omitted fields cannot inherit values from a
+	// previous decode.
+	*t = TaskSubmitReq{}
 	type Alias TaskSubmitReq
 	aux := &struct {
 		Metadata json.RawMessage `json:"metadata,omitempty"`
 		Duration json.RawMessage `json:"duration,omitempty"`
+		Seconds  json.RawMessage `json:"seconds,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(t),
@@ -900,32 +930,64 @@ func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	parseOptionalInt := func(raw json.RawMessage, field string) (int, error) {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed == "" || trimmed == "null" {
+			return 0, nil
+		}
+		var value int
+		if err := common.Unmarshal(raw, &value); err == nil {
+			return value, nil
+		}
+		var textValue string
+		if err := common.Unmarshal(raw, &textValue); err != nil {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+		textValue = strings.TrimSpace(textValue)
+		if textValue == "" {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+		value, err := strconv.Atoi(textValue)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+		return value, nil
+	}
+
 	if len(aux.Duration) > 0 {
-		var durationInt int
-		if err := common.Unmarshal(aux.Duration, &durationInt); err == nil {
-			t.Duration = durationInt
-		} else {
-			var durationStr string
-			if err := common.Unmarshal(aux.Duration, &durationStr); err == nil && durationStr != "" {
-				if v, err := strconv.Atoi(durationStr); err == nil {
-					t.Duration = v
-				}
-			}
+		value, err := parseOptionalInt(aux.Duration, "duration")
+		if err != nil {
+			return err
+		}
+		t.Duration = value
+	}
+	if len(aux.Seconds) > 0 {
+		value, err := parseOptionalInt(aux.Seconds, "seconds")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(aux.Seconds)) != "" && strings.TrimSpace(string(aux.Seconds)) != "null" {
+			t.Seconds = strconv.Itoa(value)
 		}
 	}
 
 	if len(aux.Metadata) > 0 {
 		var metadataStr string
-		if err := common.Unmarshal(aux.Metadata, &metadataStr); err == nil && metadataStr != "" {
+		if err := common.Unmarshal(aux.Metadata, &metadataStr); err == nil && strings.TrimSpace(metadataStr) != "" {
 			var metadataObj map[string]interface{}
-			if err := common.Unmarshal([]byte(metadataStr), &metadataObj); err == nil {
-				t.Metadata = metadataObj
-				return nil
+			if err := common.Unmarshal([]byte(metadataStr), &metadataObj); err != nil {
+				return fmt.Errorf("metadata must be a JSON object: %w", err)
 			}
+			t.Metadata = metadataObj
+			return nil
 		}
 
 		var metadataObj map[string]interface{}
-		if err := common.Unmarshal(aux.Metadata, &metadataObj); err == nil {
+		if err := common.Unmarshal(aux.Metadata, &metadataObj); err != nil {
+			if strings.TrimSpace(string(aux.Metadata)) != "null" {
+				return fmt.Errorf("metadata must be a JSON object: %w", err)
+			}
+		} else {
 			t.Metadata = metadataObj
 		}
 	}

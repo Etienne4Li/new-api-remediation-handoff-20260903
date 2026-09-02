@@ -108,6 +108,8 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     }
 
     const methods = await fetchVerificationMethods()
+    if (!methods) return
+
     if (!methods.has2FA) {
       // Without 2FA enabled, register directly. The browser-level Passkey prompt
       // is itself a strong proof of presence, so no extra verification is needed.
@@ -119,6 +121,7 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     await startVerification(register, {
       scope: 'passkey.register',
       preferredMethod: '2fa',
+      availableMethods: methods,
       title: t('Security verification'),
       description: t(
         'Confirm your identity with Two-factor Authentication before registering a Passkey.'
@@ -128,6 +131,8 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
 
   const handleRemove = useCallback(async () => {
     const methods = await fetchVerificationMethods()
+    if (!methods) return
+
     let required: VerificationMethod | null = null
     if (methods.has2FA) {
       required = '2fa'
@@ -154,6 +159,7 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     await startVerification(remove, {
       scope: 'passkey.delete',
       preferredMethod: required,
+      availableMethods: methods,
       title: t('Security verification'),
       description: t(
         'Confirm your identity before removing this Passkey from your account.'

@@ -2,6 +2,8 @@ package vertex
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,7 +115,13 @@ func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, info
 	if info != nil {
 		proxy = info.ChannelSetting.Proxy
 	}
-	token, err := vertexcore.AcquireAccessToken(*adc, proxy)
+	requestCtx := context.Background()
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	authCtx, authCancel := context.WithTimeout(requestCtx, service.TaskPollingRequestTimeout)
+	defer authCancel()
+	token, err := vertexcore.AcquireAccessTokenWithContext(authCtx, *adc, proxy)
 	if err != nil {
 		return fmt.Errorf("failed to acquire access token: %w", err)
 	}
@@ -128,7 +136,10 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	if !ok {
 		return nil
 	}
-	req := v.(relaycommon.TaskSubmitReq)
+	req, ok := v.(relaycommon.TaskSubmitReq)
+	if !ok {
+		return nil
+	}
 
 	seconds := geminitask.ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
 	resolution := geminitask.ResolveVeoResolution(req.Metadata, req.Size)
@@ -146,14 +157,26 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if !ok {
 		return nil, fmt.Errorf("request not found in context")
 	}
-	req := v.(relaycommon.TaskSubmitReq)
+	req, ok := v.(relaycommon.TaskSubmitReq)
+	if !ok {
+		return nil, fmt.Errorf("unexpected task_request type")
+	}
 
 	instance := geminitask.VeoInstance{Prompt: req.Prompt}
 	if img := geminitask.ExtractMultipartImage(c, info); img != nil {
 		instance.Image = img
+	} else if hasMultipartInputReference(c) {
+		return nil, fmt.Errorf("invalid input_reference image")
 	} else if len(req.Images) > 0 {
-		if parsed := geminitask.ParseImageInput(req.Images[0]); parsed != nil {
-			instance.Image = parsed
+		if len(req.Images) > 1 {
+			return nil, fmt.Errorf("only one image input is supported")
+		}
+		parsed := geminitask.ParseImageInput(req.Images[0])
+		if parsed == nil {
+			return nil, fmt.Errorf("invalid image input: expected a supported data URI or base64 image")
+		}
+		instance.Image = parsed
+		if info != nil {
 			info.Action = constant.TaskActionGenerate
 		}
 	}
@@ -162,9 +185,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, params); err != nil {
 		return nil, fmt.Errorf("unmarshal metadata failed: %w", err)
 	}
-	if params.DurationSeconds == 0 && req.Duration > 0 {
-		params.DurationSeconds = req.Duration
-	}
+	// Normalize numeric duration and string seconds exactly as the billing path
+	// does so the provider cannot fall back to a different default.
+	params.DurationSeconds = geminitask.ResolveVeoDuration(req.Metadata, req.Duration, req.Seconds)
 	if params.Resolution == "" && req.Size != "" {
 		params.Resolution = geminitask.SizeToVeoResolution(req.Size)
 	}
@@ -186,6 +209,14 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	return bytes.NewReader(data), nil
 }
 
+func hasMultipartInputReference(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	multipartForm, err := c.MultipartForm()
+	return err == nil && multipartForm != nil && len(multipartForm.File["input_reference"]) > 0
+}
+
 // DoRequest delegates to common helper.
 func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	return channel.DoTaskApiRequest(a, c, info, requestBody)
@@ -193,7 +224,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return "", nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
@@ -244,6 +275,16 @@ func buildFetchOperationURL(baseURL, upstreamName string) (string, error) {
 
 // FetchTask fetch task status
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+// FetchTaskWithContext is the cancellable variant used by task polling and
+// realtime video fetches.  Both the OAuth token exchange and the operation
+// request share the caller's deadline.
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -265,11 +306,11 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err := common.Unmarshal([]byte(key), adc); err != nil {
 		return nil, fmt.Errorf("failed to decode credentials: %w", err)
 	}
-	token, err := vertexcore.AcquireAccessToken(*adc, proxy)
+	token, err := vertexcore.AcquireAccessTokenWithContext(ctx, *adc, proxy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire access token: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -290,6 +331,7 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		return nil, fmt.Errorf("unmarshal operation response failed: %w", err)
 	}
 	ti := &relaycommon.TaskInfo{}
+	ti.TaskID = taskcommon.EncodeLocalTaskID(op.Name)
 	if op.Error.Message != "" {
 		ti.Status = model.TaskStatusFailure
 		ti.Reason = op.Error.Message
@@ -306,47 +348,102 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	if len(op.Response.Videos) > 0 {
 		v0 := op.Response.Videos[0]
 		if v0.BytesBase64Encoded != "" {
-			mime := strings.TrimSpace(v0.MimeType)
-			if mime == "" {
-				enc := strings.TrimSpace(v0.Encoding)
-				if enc == "" {
-					enc = "mp4"
-				}
-				if strings.Contains(enc, "/") {
-					mime = enc
-				} else {
-					mime = "video/" + enc
+			mime, videoBytes, decodeErr := service.DecodeBase64VideoData(v0.BytesBase64Encoded, common.GetMaxFileDownloadBytes())
+			if decodeErr != nil {
+				return nil, fmt.Errorf("invalid inline video payload: %w", decodeErr)
+			}
+			if declared := vertexDeclaredVideoMIME(v0.MimeType, v0.Encoding); declared != "" {
+				mime, decodeErr = service.ResolveVideoMIME(declared, videoBytes)
+				if decodeErr != nil {
+					return nil, fmt.Errorf("inline video MIME mismatch: %w", decodeErr)
 				}
 			}
-			ti.Url = "data:" + mime + ";base64," + v0.BytesBase64Encoded
+			// Preserve the provider's original bytes in the URL only after the
+			// strict decoder has validated them. The MIME is canonical and never
+			// derived by concatenating provider-controlled strings.
+			ti.Url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(videoBytes)
 			return ti, nil
 		}
 	}
 	if op.Response.BytesBase64Encoded != "" {
-		enc := strings.TrimSpace(op.Response.Encoding)
-		if enc == "" {
-			enc = "mp4"
+		mime, videoBytes, decodeErr := service.DecodeBase64VideoData(op.Response.BytesBase64Encoded, common.GetMaxFileDownloadBytes())
+		if decodeErr != nil {
+			return nil, fmt.Errorf("invalid inline video payload: %w", decodeErr)
 		}
-		mime := enc
-		if !strings.Contains(enc, "/") {
-			mime = "video/" + enc
+		if declared := vertexDeclaredVideoMIME("", op.Response.Encoding); declared != "" {
+			mime, decodeErr = service.ResolveVideoMIME(declared, videoBytes)
+			if decodeErr != nil {
+				return nil, fmt.Errorf("inline video MIME mismatch: %w", decodeErr)
+			}
 		}
-		ti.Url = "data:" + mime + ";base64," + op.Response.BytesBase64Encoded
+		ti.Url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(videoBytes)
 		return ti, nil
 	}
 	if op.Response.Video != "" { // some variants use `video` as base64
-		enc := strings.TrimSpace(op.Response.Encoding)
-		if enc == "" {
-			enc = "mp4"
+		mime, videoBytes, decodeErr := service.DecodeBase64VideoData(op.Response.Video, common.GetMaxFileDownloadBytes())
+		if decodeErr != nil {
+			return nil, fmt.Errorf("invalid inline video payload: %w", decodeErr)
 		}
-		mime := enc
-		if !strings.Contains(enc, "/") {
-			mime = "video/" + enc
+		if declared := vertexDeclaredVideoMIME("", op.Response.Encoding); declared != "" {
+			mime, decodeErr = service.ResolveVideoMIME(declared, videoBytes)
+			if decodeErr != nil {
+				return nil, fmt.Errorf("inline video MIME mismatch: %w", decodeErr)
+			}
 		}
-		ti.Url = "data:" + mime + ";base64," + op.Response.Video
+		ti.Url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(videoBytes)
 		return ti, nil
 	}
 	return ti, nil
+}
+
+// vertexDeclaredVideoMIME converts the two provider declaration forms into a
+// canonical MIME candidate. It is used only as a compatibility check after
+// bytes have already been decoded and sniffed; it never manufactures a data
+// URL type from an arbitrary provider string.
+func vertexDeclaredVideoMIME(mimeType, encoding string) string {
+	if strings.TrimSpace(mimeType) != "" {
+		if normalized, err := service.NormalizeVideoMIME(mimeType); err == nil && service.IsSafeVideoMIME(normalized) {
+			return normalized
+		}
+		// A non-empty malformed declaration must be rejected by the caller,
+		// rather than silently ignored as if the provider omitted it.
+		return strings.TrimSpace(mimeType)
+	}
+	encoding = strings.ToLower(strings.TrimSpace(encoding))
+	if strings.Contains(encoding, "/") {
+		if normalized, err := service.NormalizeVideoMIME(encoding); err == nil && service.IsSafeVideoMIME(normalized) {
+			return normalized
+		}
+		return encoding
+	}
+	switch encoding {
+	case "mp4":
+		return "video/mp4"
+	case "webm":
+		return "video/webm"
+	case "mov", "quicktime":
+		return "video/quicktime"
+	case "avi":
+		return "video/avi"
+	case "flv":
+		return "video/flv"
+	case "mpeg", "mpg":
+		return "video/mpeg"
+	case "mpegps", "mpeg-ps":
+		return "video/mpegps"
+	case "3gpp", "3gp":
+		return "video/3gpp"
+	case "3gpp2", "3gp2":
+		return "video/3gpp2"
+	case "ogg":
+		return "video/ogg"
+	case "wmv", "asf":
+		return "video/wmv"
+	case "":
+		return ""
+	default:
+		return encoding
+	}
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {

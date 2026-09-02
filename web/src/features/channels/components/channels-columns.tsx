@@ -326,7 +326,7 @@ const SENSITIVE_MASK = '••••'
 /**
  * Balance cell component with click to update
  */
-export function BalanceCell({ channel }: { channel: Channel }) {
+function BalanceCell({ channel }: { channel: Channel }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const layout = useContext(ChannelRowActionsLayoutContext)

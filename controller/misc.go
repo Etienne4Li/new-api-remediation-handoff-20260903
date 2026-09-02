@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -42,6 +41,19 @@ func TestStatus(c *gin.Context) {
 }
 
 func GetStatus(c *gin.Context) {
+	// The status payload is consumed by anonymous clients and may be cached by
+	// browsers/proxies. Keep it private and non-persistent because it contains
+	// deployment metadata and public chat presets.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	stripeConfig := setting.GetStripeConfig()
+	generalSetting := operation_setting.GetGeneralSettingSnapshot()
+	paymentConfig := operation_setting.GetPaymentRuntimeConfig()
+	operationConfig := operation_setting.GetOperationRuntimeConfig()
+	securityConfig := common.GetSecurityRuntimeConfig()
+	runtimeConfig := common.GetGeneralRuntimeConfig()
+	systemName := common.GetSystemName()
 
 	cs := console_setting.GetConsoleSetting()
 	common.OptionMapRWMutex.RLock()
@@ -49,54 +61,59 @@ func GetStatus(c *gin.Context) {
 
 	passkeySetting := system_setting.GetPasskeySettings()
 	legalSetting := system_setting.GetLegalSettings()
+	systemConfig := system_setting.GetRuntimeConfig()
+	midjourneyConfig := setting.GetMidjourneyConfig()
 
 	data := gin.H{
 		"version":                     common.Version,
 		"start_time":                  common.StartTime,
-		"email_verification":          common.EmailVerificationEnabled,
-		"github_oauth":                common.GitHubOAuthEnabled,
-		"github_client_id":            common.GitHubClientId,
+		"email_verification":          securityConfig.EmailVerificationEnabled,
+		"github_oauth":                securityConfig.GitHubOAuthEnabled,
+		"github_client_id":            securityConfig.GitHubClientID,
 		"discord_oauth":               system_setting.GetDiscordSettings().Enabled,
 		"discord_client_id":           system_setting.GetDiscordSettings().ClientId,
-		"linuxdo_oauth":               common.LinuxDOOAuthEnabled,
-		"linuxdo_client_id":           common.LinuxDOClientId,
-		"linuxdo_minimum_trust_level": common.LinuxDOMinimumTrustLevel,
-		"telegram_oauth":              common.TelegramOAuthEnabled,
-		"telegram_bot_name":           common.TelegramBotName,
+		"linuxdo_oauth":               securityConfig.LinuxDOOAuthEnabled,
+		"linuxdo_client_id":           securityConfig.LinuxDOClientID,
+		"linuxdo_minimum_trust_level": securityConfig.LinuxDOMinimumTrustLevel,
+		"telegram_oauth":              securityConfig.TelegramOAuthEnabled,
+		"telegram_bot_name":           securityConfig.TelegramBotName,
 		"theme":                       "default",
-		"system_name":                 common.SystemName,
-		"logo":                        common.Logo,
-		"footer_html":                 common.Footer,
-		"wechat_qrcode":               common.WeChatAccountQRCodeImageURL,
-		"wechat_login":                common.WeChatAuthEnabled,
-		"server_address":              system_setting.ServerAddress,
-		"turnstile_check":             common.TurnstileCheckEnabled,
-		"turnstile_site_key":          common.TurnstileSiteKey,
-		"docs_link":                   operation_setting.GetGeneralSetting().DocsLink,
-		"quota_per_unit":              common.QuotaPerUnit,
+		"system_name":                 systemName,
+		"logo":                        runtimeConfig.Logo,
+		"footer_html":                 runtimeConfig.Footer,
+		"wechat_qrcode":               securityConfig.WeChatAccountQRCodeImageURL,
+		"wechat_login":                securityConfig.WeChatAuthEnabled,
+		"server_address":              systemConfig.ServerAddress,
+		"turnstile_check":             securityConfig.TurnstileCheckEnabled,
+		"turnstile_site_key":          securityConfig.TurnstileSiteKey,
+		"docs_link":                   generalSetting.DocsLink,
+		"quota_per_unit":              common.GetQuotaPerUnit(),
 		// 兼容旧前端：保留 display_in_currency，同时提供新的 quota_display_type
-		"display_in_currency":           operation_setting.IsCurrencyDisplay(),
-		"quota_display_type":            operation_setting.GetQuotaDisplayType(),
-		"custom_currency_symbol":        operation_setting.GetGeneralSetting().CustomCurrencySymbol,
-		"custom_currency_exchange_rate": operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate,
+		"display_in_currency":           generalSetting.QuotaDisplayType != operation_setting.QuotaDisplayTypeTokens,
+		"quota_display_type":            generalSetting.QuotaDisplayType,
+		"custom_currency_symbol":        generalSetting.CustomCurrencySymbol,
+		"custom_currency_exchange_rate": generalSetting.CustomCurrencyExchangeRate,
 		"enable_batch_update":           common.BatchUpdateEnabled,
-		"enable_drawing":                common.DrawingEnabled,
-		"enable_task":                   common.TaskEnabled,
-		"enable_data_export":            common.DataExportEnabled,
-		"data_export_default_time":      common.DataExportDefaultTime,
-		"default_collapse_sidebar":      common.DefaultCollapseSidebar,
-		"mj_notify_enabled":             setting.MjNotifyEnabled,
-		"chats":                         setting.Chats,
-		"demo_site_enabled":             operation_setting.DemoSiteEnabled,
-		"self_use_mode_enabled":         operation_setting.SelfUseModeEnabled,
-		"register_enabled":              common.RegisterEnabled,
-		"password_login_enabled":        common.PasswordLoginEnabled,
-		"password_register_enabled":     common.PasswordRegisterEnabled,
-		"default_use_auto_group":        setting.DefaultUseAutoGroup,
+		"enable_drawing":                runtimeConfig.DrawingEnabled,
+		"enable_task":                   runtimeConfig.TaskEnabled,
+		"enable_data_export":            runtimeConfig.DataExportEnabled,
+		"data_export_default_time":      runtimeConfig.DataExportDefaultTime,
+		"default_collapse_sidebar":      runtimeConfig.DefaultCollapseSidebar,
+		"mj_notify_enabled":             midjourneyConfig.NotifyEnabled,
+		// Never expose the admin's placeholder-bearing chat templates (or a
+		// literal credential accidentally left in one) through this anonymous
+		// endpoint. GetPublicChats returns a detached, keyless snapshot.
+		"chats":                     setting.GetPublicChats(),
+		"demo_site_enabled":         operationConfig.DemoSiteEnabled,
+		"self_use_mode_enabled":     operationConfig.SelfUseModeEnabled,
+		"register_enabled":          securityConfig.RegisterEnabled,
+		"password_login_enabled":    securityConfig.PasswordLoginEnabled,
+		"password_register_enabled": securityConfig.PasswordRegisterEnabled,
+		"default_use_auto_group":    setting.GetDefaultUseAutoGroup(),
 
-		"usd_exchange_rate": operation_setting.USDExchangeRate,
-		"price":             operation_setting.Price,
-		"stripe_unit_price": setting.StripeUnitPrice,
+		"usd_exchange_rate": paymentConfig.USDExchangeRate,
+		"price":             paymentConfig.Price,
+		"stripe_unit_price": stripeConfig.UnitPrice,
 
 		// 面板启用开关
 		"api_info_enabled":      cs.ApiInfoEnabled,
@@ -122,7 +139,7 @@ func GetStatus(c *gin.Context) {
 		"setup":                       constant.Setup,
 		"user_agreement_enabled":      legalSetting.UserAgreement != "",
 		"privacy_policy_enabled":      legalSetting.PrivacyPolicy != "",
-		"checkin_enabled":             operation_setting.GetCheckinSetting().Enabled,
+		"checkin_enabled":             operation_setting.GetCheckinSettingSnapshot().Enabled,
 	}
 
 	// 根据启用状态注入可选内容
@@ -235,6 +252,7 @@ func GetHomePageContent(c *gin.Context) {
 }
 
 func SendEmailVerification(c *gin.Context) {
+	securityConfig := common.GetSecurityRuntimeConfig()
 	email := model.NormalizeEmail(c.Query("email"))
 	if err := common.Validate.Var(email, "required,email"); err != nil {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
@@ -250,9 +268,9 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	localPart := parts[0]
 	domainPart := parts[1]
-	if common.EmailDomainRestrictionEnabled {
+	if securityConfig.EmailDomainRestrictionEnabled {
 		allowed := false
-		for _, domain := range common.EmailDomainWhitelist {
+		for _, domain := range securityConfig.EmailDomainWhitelist {
 			if domainPart == domain {
 				allowed = true
 				break
@@ -266,7 +284,7 @@ func SendEmailVerification(c *gin.Context) {
 			return
 		}
 	}
-	if common.EmailAliasRestrictionEnabled {
+	if securityConfig.EmailAliasRestrictionEnabled {
 		containsSpecialSymbols := strings.Contains(localPart, "+") || strings.Contains(localPart, ".")
 		if containsSpecialSymbols {
 			c.JSON(http.StatusOK, gin.H{
@@ -283,10 +301,10 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	code := common.GenerateVerificationCode(6)
 	common.RegisterVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
-	subject := fmt.Sprintf("%s邮箱验证邮件", common.SystemName)
+	subject := fmt.Sprintf("%s邮箱验证邮件", common.GetSystemName())
 	content := fmt.Sprintf("<p>您好，你正在进行%s邮箱验证。</p>"+
 		"<p>您的验证码为: <strong>%s</strong></p>"+
-		"<p>验证码 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.SystemName, code, common.VerificationValidMinutes)
+		"<p>验证码 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.GetSystemName(), code, common.VerificationValidMinutes)
 	err := common.SendEmail(subject, email, content)
 	if err != nil {
 		common.ApiError(c, err)
@@ -308,12 +326,12 @@ func SendPasswordResetEmail(c *gin.Context) {
 	if _, err := model.GetUniqueUserByEmail(email); err == nil {
 		code := common.GenerateVerificationCode(0)
 		common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
-		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
-		subject := fmt.Sprintf("%s密码重置", common.SystemName)
+		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.GetServerAddress(), email, code)
+		subject := fmt.Sprintf("%s密码重置", common.GetSystemName())
 		content := fmt.Sprintf("<p>您好，你正在进行%s密码重置。</p>"+
 			"<p>点击 <a href='%s'>此处</a> 进行密码重置。</p>"+
 			"<p>如果链接无法点击，请尝试点击下面的链接或将其复制到浏览器中打开：<br> %s </p>"+
-			"<p>重置链接 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.SystemName, link, link, common.VerificationValidMinutes)
+			"<p>重置链接 %d 分钟内有效，如果不是本人操作，请忽略。</p>", common.GetSystemName(), link, link, common.VerificationValidMinutes)
 		err := common.SendEmail(subject, email, content)
 		if err != nil {
 			logger.LogError(c.Request.Context(), fmt.Sprintf("failed to send password reset email to %s: %s", email, err.Error()))
@@ -333,8 +351,14 @@ type PasswordResetRequest struct {
 }
 
 func ResetPassword(c *gin.Context) {
+	// The response contains a one-time generated credential. Prevent browsers,
+	// shared proxies, and referrer-bearing navigations from retaining it.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Header("Referrer-Policy", "no-referrer")
 	var req PasswordResetRequest
-	err := json.NewDecoder(c.Request.Body).Decode(&req)
+	err := common.UnmarshalBodyReusable(c, &req)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -344,13 +368,17 @@ func ResetPassword(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	if !common.VerifyCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose) {
+	if !common.ConsumeVerificationCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose) {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordResetLinkInvalid)
 		return
 	}
 	password := common.GenerateVerificationCode(12)
 	err = model.ResetUserPasswordByEmail(req.Email, password)
 	if err != nil {
+		// The token is claimed atomically before the database mutation to prevent
+		// concurrent double resets.  If persistence fails, restore the same
+		// short-lived token so a transient database outage remains retryable.
+		common.RegisterVerificationCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose)
 		if errors.Is(err, model.ErrEmailNotFound) || errors.Is(err, model.ErrEmailAmbiguous) {
 			common.ApiErrorI18n(c, i18n.MsgUserPasswordResetLinkInvalid)
 			return
@@ -358,7 +386,6 @@ func ResetPassword(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.DeleteKey(req.Email, common.PasswordResetPurpose)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

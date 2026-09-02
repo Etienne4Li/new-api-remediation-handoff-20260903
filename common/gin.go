@@ -57,11 +57,8 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 		}
 	}
 
-	maxMB := constant.MaxRequestBodyMB
-	if maxMB <= 0 {
-		maxMB = 128 // 默认 128MB
-	}
-	maxBytes := int64(maxMB) << 20
+	maxBytes := GetMaxRequestBodyBytes()
+	maxMB := maxBytes >> 20
 
 	contentLength := c.Request.ContentLength
 
@@ -197,16 +194,23 @@ func GetContextKeyType[T any](c *gin.Context, key constant.ContextKey) (T, bool)
 }
 
 func ApiError(c *gin.Context, err error) {
+	message := "unknown error"
+	if err != nil {
+		// Error strings may include provider URLs, credentials, or database
+		// connection details. Keep useful validation text while masking known
+		// sensitive patterns at this HTTP boundary.
+		message = MaskSensitiveInfo(err.Error())
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": false,
-		"message": err.Error(),
+		"message": message,
 	})
 }
 
 func ApiErrorMsg(c *gin.Context, msg string) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": false,
-		"message": msg,
+		"message": MaskSensitiveInfo(msg),
 	})
 }
 
@@ -221,7 +225,10 @@ func ApiSuccess(c *gin.Context, data any) {
 // ApiErrorI18n returns a translated error message based on the user's language preference
 // key is the i18n message key, args is optional template data
 func ApiErrorI18n(c *gin.Context, key string, args ...map[string]any) {
-	msg := TranslateMessage(c, key, args...)
+	// Translation arguments frequently include wrapped validation/database
+	// errors.  Treat the fully rendered string as untrusted at this response
+	// boundary, just like ApiError/ApiErrorMsg do.
+	msg := MaskSensitiveInfo(TranslateMessage(c, key, args...))
 	c.JSON(http.StatusOK, gin.H{
 		"success": false,
 		"message": msg,
@@ -376,9 +383,12 @@ func parseBoundary(contentType string) (string, error) {
 
 // multipartMemoryLimit returns the configured multipart memory limit in bytes
 func multipartMemoryLimit() int64 {
-	limitMB := constant.MaxFileDownloadMB
-	if limitMB <= 0 {
-		limitMB = 32
+	limitMB := int64(constant.MaxFileDownloadMB)
+	// Keep the historical 32 MiB fallback, but do not let an overflowing or
+	// negative environment value wrap the byte count and effectively disable
+	// multipart parser limits.
+	if limitMB <= 0 || limitMB > maxInt64RequestLimit>>20 {
+		return 32 << 20
 	}
-	return int64(limitMB) << 20
+	return limitMB << 20
 }

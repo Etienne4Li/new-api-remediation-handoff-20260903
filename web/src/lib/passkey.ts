@@ -32,11 +32,11 @@ type NodeBufferCtor = {
   from(input: string, encoding: string): { toString(encoding: string): string }
 }
 
-export function base64UrlToArrayBuffer(value?: string | null): ArrayBuffer {
+function base64UrlToArrayBuffer(value?: string | null): ArrayBuffer {
   if (!value) return new ArrayBuffer(0)
 
   const padding = '='.repeat((4 - (value.length % 4)) % 4)
-  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const base64 = (value + padding).replaceAll('-', '+').replaceAll('_', '/')
 
   const globalRef = globalThis as typeof globalThis & {
     Buffer?: NodeBufferCtor
@@ -68,7 +68,7 @@ export function base64UrlToArrayBuffer(value?: string | null): ArrayBuffer {
 /**
  * Convert an ArrayBuffer to a base64url string.
  */
-export function arrayBufferToBase64Url(
+function arrayBufferToBase64Url(
   buffer?: ArrayBuffer | ArrayBufferLike | null
 ): string {
   if (!buffer) return ''
@@ -96,9 +96,9 @@ export function arrayBufferToBase64Url(
         }
 
   return encode(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '')
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll(/=+$/g, '')
 }
 
 /**
@@ -282,8 +282,3 @@ export async function createCredential(
 /**
  * Execute an async Passkey credential request flow.
  */
-export async function getCredential(
-  options: PublicKeyCredentialRequestOptions
-) {
-  return navigator.credentials.get({ publicKey: options })
-}

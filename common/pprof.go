@@ -3,43 +3,80 @@ package common
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/cpu"
 )
 
-// Monitor 定时监控cpu使用率，超过阈值输出pprof文件
+const (
+	defaultPPROFDirectory    = "./pprof"
+	defaultPPROFThreshold    = 80.0
+	pprofSampleDuration      = 10 * time.Second
+	pprofPollInterval        = 30 * time.Second
+	maxPPROFDirectoryNameLen = 4096
+)
+
+// Monitor 定时监控 CPU 使用率，超过阈值输出 pprof 文件。
+//
+// Profiling is an operational aid and must never be able to terminate the
+// application.  A transient gopsutil/filesystem error is logged and retried
+// on the next interval.  Profile files are private because they can contain
+// request data and provider details.
 func Monitor() {
 	for {
 		percent, err := cpu.Percent(time.Second, false)
 		if err != nil {
-			panic(err)
+			SysLog("读取 CPU 使用率失败 " + err.Error())
+			time.Sleep(pprofPollInterval)
+			continue
 		}
-		if percent[0] > 80 {
-			fmt.Println("cpu usage too high")
-			// write pprof file
-			if _, err := os.Stat("./pprof"); os.IsNotExist(err) {
-				err := os.Mkdir("./pprof", os.ModePerm)
-				if err != nil {
-					SysLog("创建pprof文件夹失败 " + err.Error())
-					continue
-				}
-			}
-			f, err := os.Create("./pprof/" + fmt.Sprintf("cpu-%s.pprof", time.Now().Format("20060102150405")))
-			if err != nil {
-				SysLog("创建pprof文件失败 " + err.Error())
-				continue
-			}
-			err = pprof.StartCPUProfile(f)
-			if err != nil {
-				SysLog("启动pprof失败 " + err.Error())
-				continue
-			}
-			time.Sleep(10 * time.Second) // profile for 30 seconds
-			pprof.StopCPUProfile()
-			f.Close()
+		config := GetPerformanceMonitorConfig()
+		threshold := config.CPUThreshold
+		if threshold <= 0 {
+			threshold = int(defaultPPROFThreshold)
 		}
-		time.Sleep(30 * time.Second)
+		if config.Enabled && len(percent) > 0 && percent[0] >= float64(threshold) {
+			if err := captureCPUProfile(); err != nil {
+				SysLog("采集 CPU pprof 失败 " + err.Error())
+			}
+		}
+		time.Sleep(pprofPollInterval)
 	}
+}
+
+func pprofDirectory() string {
+	if raw := strings.TrimSpace(os.Getenv("PPROF_DIR")); raw != "" && len(raw) <= maxPPROFDirectoryNameLen {
+		return raw
+	}
+	return defaultPPROFDirectory
+}
+
+// captureCPUProfile captures one bounded profile and closes all resources on
+// every path, including StartCPUProfile failures.
+func captureCPUProfile() error {
+	directory := filepath.Clean(pprofDirectory())
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return fmt.Errorf("create profile directory: %w", err)
+	}
+	path := filepath.Join(directory, fmt.Sprintf("cpu-%s.pprof", time.Now().UTC().Format("20060102150405.000000000")))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("create profile file: %w", err)
+	}
+	started := false
+	defer func() {
+		if started {
+			pprof.StopCPUProfile()
+		}
+		_ = f.Close()
+	}()
+	if err := pprof.StartCPUProfile(f); err != nil {
+		return fmt.Errorf("start CPU profile: %w", err)
+	}
+	started = true
+	time.Sleep(pprofSampleDuration)
+	return nil
 }

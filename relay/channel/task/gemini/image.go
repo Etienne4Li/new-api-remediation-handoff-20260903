@@ -2,10 +2,10 @@ package gemini
 
 import (
 	"encoding/base64"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
@@ -13,9 +13,28 @@ import (
 
 const maxVeoImageSize = 20 * 1024 * 1024 // 20 MB
 
+func detectVeoImageMIME(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	detected := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data), ";", 2)[0]))
+	if !strings.HasPrefix(detected, "image/") {
+		return ""
+	}
+	switch detected {
+	case "image/png", "image/jpeg", "image/webp":
+		return detected
+	default:
+		return ""
+	}
+}
+
 // ExtractMultipartImage reads the first `input_reference` file from a multipart
 // form upload and returns a VeoImageInput. Returns nil if no file is present.
 func ExtractMultipartImage(c *gin.Context, info *relaycommon.RelayInfo) *VeoImageInput {
+	if c == nil {
+		return nil
+	}
 	mf, err := c.MultipartForm()
 	if err != nil {
 		return nil
@@ -34,17 +53,19 @@ func ExtractMultipartImage(c *gin.Context, info *relaycommon.RelayInfo) *VeoImag
 	}
 	defer file.Close()
 
-	fileBytes, err := io.ReadAll(file)
+	fileBytes, err := common.ReadBodyLimited(file, fh.Size, maxVeoImageSize)
 	if err != nil {
 		return nil
 	}
 
-	mimeType := fh.Header.Get("Content-Type")
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType = http.DetectContentType(fileBytes)
+	mimeType := detectVeoImageMIME(fileBytes)
+	if mimeType == "" {
+		return nil
 	}
 
-	info.Action = constant.TaskActionGenerate
+	if info != nil {
+		info.Action = constant.TaskActionGenerate
+	}
 	return &VeoImageInput{
 		BytesBase64Encoded: base64.StdEncoding.EncodeToString(fileBytes),
 		MimeType:           mimeType,
@@ -64,18 +85,21 @@ func ParseImageInput(imageStr string) *VeoImageInput {
 		return parseDataURI(imageStr)
 	}
 
-	raw, err := base64.StdEncoding.DecodeString(imageStr)
+	raw, err := common.DecodeBase64Limited(imageStr, maxVeoImageSize)
 	if err != nil {
+		return nil
+	}
+	mimeType := detectVeoImageMIME(raw)
+	if mimeType == "" {
 		return nil
 	}
 	return &VeoImageInput{
 		BytesBase64Encoded: imageStr,
-		MimeType:           http.DetectContentType(raw),
+		MimeType:           mimeType,
 	}
 }
 
 func parseDataURI(uri string) *VeoImageInput {
-	// data:image/png;base64,iVBOR...
 	rest := uri[len("data:"):]
 	idx := strings.Index(rest, ",")
 	if idx < 0 {
@@ -87,10 +111,23 @@ func parseDataURI(uri string) *VeoImageInput {
 		return nil
 	}
 
-	mimeType := "application/octet-stream"
-	parts := strings.SplitN(meta, ";", 2)
-	if len(parts) >= 1 && parts[0] != "" {
-		mimeType = parts[0]
+	parts := strings.Split(meta, ";")
+	hasBase64 := false
+	for _, part := range parts[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			hasBase64 = true
+		}
+	}
+	if !hasBase64 {
+		return nil
+	}
+	raw, err := common.DecodeBase64Limited(b64, maxVeoImageSize)
+	if err != nil {
+		return nil
+	}
+	mimeType := detectVeoImageMIME(raw)
+	if mimeType == "" {
+		return nil
 	}
 
 	return &VeoImageInput{

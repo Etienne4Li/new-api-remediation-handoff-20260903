@@ -18,9 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useEffect, useState } from 'react'
 
-export function resolveThemeRadiusPx(
-  cssVariable = '--radius-md'
-): number | undefined {
+function resolveThemeRadiusPx(cssVariable = '--radius-md'): number | undefined {
   if (typeof document === 'undefined') return undefined
 
   const probe = document.createElement('div')
@@ -44,7 +42,11 @@ export function useThemeRadiusPx(
   const [radius, setRadius] = useState<number | undefined>()
 
   useEffect(() => {
-    setRadius(resolveThemeRadiusPx(cssVariable))
+    const frameId = requestAnimationFrame(() => {
+      setRadius(resolveThemeRadiusPx(cssVariable))
+    })
+
+    return () => cancelAnimationFrame(frameId)
   }, [cssVariable, refreshKey])
 
   return radius

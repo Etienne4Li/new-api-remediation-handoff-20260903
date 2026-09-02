@@ -59,7 +59,7 @@ func PasskeyRegisterBegin(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -137,7 +137,7 @@ func PasskeyRegisterFinish(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -223,7 +223,7 @@ func PasskeyDelete(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -260,7 +260,7 @@ func PasskeyStatus(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -497,7 +497,7 @@ func PasskeyVerifyBegin(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -574,7 +574,7 @@ func PasskeyVerifyFinish(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +23,24 @@ import (
 )
 
 const authIdentityContextKey = "auth_identity"
+
+const GeminiQueryKeyAuthEnv = "GEMINI_QUERY_KEY_AUTH_ENABLED"
+
+// GeminiQueryKeyAuthEnabled reports whether the legacy Gemini `?key=`
+// authentication form is enabled. Query-string credentials are disabled by
+// default because reverse-proxy, browser, and upstream access logs commonly
+// retain the complete URL. Deployments that still need this compatibility
+// form must opt in explicitly and should scrub query strings at the edge.
+func GeminiQueryKeyAuthEnabled() bool {
+	return common.GetEnvOrDefaultBool(GeminiQueryKeyAuthEnv, false)
+}
+
+func isGeminiQueryKeyPath(path string) bool {
+	return path == "/v1/models" ||
+		strings.HasPrefix(path, "/v1beta/models") ||
+		strings.HasPrefix(path, "/v1beta/openai/models") ||
+		strings.HasPrefix(path, "/v1/models/")
+}
 
 type dashboardCredentialKind int
 
@@ -219,7 +238,7 @@ func writeDashboardAuthError(c *gin.Context, err error) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "code": "AUTH_UNAUTHORIZED", "message": common.TranslateMessage(c, i18n.MsgAuthAccessTokenInvalid)})
 		return
 	}
-	common.SysLog("dashboard authentication error: " + err.Error())
+	common.SysLog("dashboard authentication error_meta=" + common.SensitiveLogMeta(err.Error()))
 	c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"success": false, "code": "AUTH_INTERNAL_ERROR", "message": common.TranslateMessage(c, i18n.MsgDatabaseError)})
 }
 
@@ -272,14 +291,21 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	}
 }
 
-// TokenAuthReadOnly 宽松版本的令牌认证中间件，用于只读查询接口。
-// 只验证令牌 key 是否存在，不检查令牌状态、过期时间和额度。
-// 即使令牌已过期、已耗尽或已禁用，也允许访问。
-// 仍然检查用户是否被封禁。
+// TokenAuthReadOnly is the read-only API-token authentication path. Exhausted
+// tokens may still inspect their own usage, but expiry, explicit disablement,
+// user status, and IP restrictions remain security boundaries and are
+// enforced identically to TokenAuth.
 func TokenAuthReadOnly() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		key := c.Request.Header.Get("Authorization")
-		if key == "" {
+		c.Header("Cache-Control", "no-store, private, max-age=0")
+		c.Header("Pragma", "no-cache")
+		c.Header("Vary", "Authorization")
+		// Keep this path's credential parsing strict and unambiguous. In
+		// particular, accept the standard case-insensitive Bearer scheme and
+		// arbitrary horizontal whitespace, but never interpret a suffix as a
+		// different token (relay-only channel suffixes are not meaningful here).
+		raw, ok := authorizationToken(c.GetHeader("Authorization"))
+		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgTokenNotProvided),
@@ -287,14 +313,25 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			c.Abort()
 			return
 		}
-		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
-			key = strings.TrimSpace(key[7:])
+		// Keep the transport-prefix handling identical to TokenAuth.  Token
+		// keys are opaque; only the conventional lower-case `sk-` prefix is
+		// stripped.  Treating `SK-foo` as a prefix here would make a read-only
+		// request resolve a different row than the normal relay path when an
+		// actual token key begins with those characters.
+		key := strings.TrimPrefix(raw, "sk-")
+		if key == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgTokenInvalid),
+			})
+			c.Abort()
+			return
 		}
-		key = strings.TrimPrefix(key, "sk-")
-		parts := strings.Split(key, "-")
-		key = parts[0]
 
-		token, err := model.GetTokenByKey(key, false)
+		// This endpoint is an account/security introspection surface. Read the
+		// authoritative row instead of a potentially stale Redis snapshot so a
+		// just-disabled/expired token cannot remain usable during cache TTL.
+		token, err := model.GetTokenByKey(key, true)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -302,7 +339,7 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 					"message": common.TranslateMessage(c, i18n.MsgTokenInvalid),
 				})
 			} else {
-				common.SysLog("TokenAuthReadOnly GetTokenByKey database error: " + err.Error())
+				common.SysLog("TokenAuthReadOnly GetTokenByKey database error_meta=" + common.SensitiveLogMeta(err.Error()))
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
@@ -312,9 +349,12 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
-		// TokenAuthReadOnly must keep allowing other token states to query read-only
-		// data, such as token usage logs; only explicitly disabled tokens are denied.
-		if token.Status == common.TokenStatusDisabled {
+		// Read-only access may remain available for an exhausted token so the
+		// owner can inspect its usage, but every other non-active state must be
+		// denied.  Do not use a blacklist here: zero/unknown status values are
+		// unsafe defaults when old rows or a cache corruption are encountered.
+		if (token.Status != common.TokenStatusEnabled && token.Status != common.TokenStatusExhausted) ||
+			(token.ExpiredTime != -1 && token.ExpiredTime < common.GetTimestamp()) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgTokenStatusUnavailable),
@@ -323,9 +363,22 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
+		allowIps := token.GetIpLimits()
+		if len(allowIps) > 0 {
+			ip := net.ParseIP(c.ClientIP())
+			if ip == nil || !common.IsIpInCIDRList(ip, allowIps) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": "您的 IP 不在令牌允许访问的列表中",
+				})
+				c.Abort()
+				return
+			}
+		}
+
 		userCache, err := model.GetUserCache(token.UserId)
 		if err != nil {
-			common.SysLog(fmt.Sprintf("TokenAuthReadOnly GetUserCache error for user %d: %v", token.UserId, err))
+			common.SysLog(fmt.Sprintf("TokenAuthReadOnly GetUserCache error for user %d error_meta=%s", token.UserId, common.SensitiveLogMeta(err.Error())))
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
@@ -342,9 +395,17 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
+		// These endpoints return account/token-specific information.  They may
+		// be reached through a reverse proxy or CDN, so make the no-cache
+		// boundary explicit at the authentication layer rather than relying on
+		// each handler to remember it.
+		c.Header("Cache-Control", "no-store, private, max-age=0")
+		c.Header("Pragma", "no-cache")
 		c.Set("id", token.UserId)
 		c.Set("token_id", token.Id)
 		c.Set("token_key", token.Key)
+		c.Set("token_name", token.Name)
+		c.Set("authenticated_token", token)
 		c.Next()
 	}
 }
@@ -373,23 +434,29 @@ func TokenAuth() func(c *gin.Context) {
 				c.Request.Header.Set("Authorization", "Bearer "+anthropicKey)
 			}
 		}
-		// gemini api 从query中获取key
-		if c.Request.URL.Path == "/v1/models" ||
-			strings.HasPrefix(c.Request.URL.Path, "/v1beta/models") ||
-			strings.HasPrefix(c.Request.URL.Path, "/v1beta/openai/models") ||
-			strings.HasPrefix(c.Request.URL.Path, "/v1/models/") {
-			skKey := c.Query("key")
-			if skKey != "" {
-				c.Request.Header.Set("Authorization", "Bearer "+skKey)
+		// Gemini's legacy query-string key form is compatibility-only. Keep it
+		// disabled unless the deployment explicitly opts in; the standard
+		// x-goog-api-key header remains accepted without this flag.
+		if isGeminiQueryKeyPath(c.Request.URL.Path) {
+			_, queryKeyPresent := c.GetQuery("key")
+			queryKeyAuthEnabled := GeminiQueryKeyAuthEnabled()
+			if queryKeyPresent && !queryKeyAuthEnabled {
+				abortWithOpenAiMessage(c, http.StatusUnauthorized, "Gemini query API key authentication is disabled")
+				return
 			}
-			// 从x-goog-api-key header中获取key
+			if queryKeyAuthEnabled {
+				skKey := c.Query("key")
+				if skKey != "" {
+					c.Request.Header.Set("Authorization", "Bearer "+skKey)
+				}
+			}
+			// The header form is the preferred Gemini authentication transport.
 			xGoogKey := c.Request.Header.Get("x-goog-api-key")
 			if xGoogKey != "" {
 				c.Request.Header.Set("Authorization", "Bearer "+xGoogKey)
 			}
 		}
 		key := c.Request.Header.Get("Authorization")
-		parts := make([]string, 0)
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
@@ -398,15 +465,26 @@ func TokenAuth() func(c *gin.Context) {
 			if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 				key = strings.TrimSpace(key[7:])
 			}
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
-		} else {
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
 		}
+		key = strings.TrimPrefix(key, "sk-")
+
+		// A token key is opaque and may legitimately contain hyphens.  Always
+		// try the complete key first; splitting it before lookup both rejects
+		// valid keys and lets a shorter, colliding prefix authenticate as the
+		// wrong token.  The suffix form is retained only for the legacy
+		// admin-only channel pinning syntax (<token>-<channel-id>), and is
+		// considered only when no exact token exists.
+		var parts []string
 		token, err := model.ValidateUserToken(key)
+		if token == nil && errors.Is(err, model.ErrTokenInvalid) {
+			if baseKey, channelID, ok := splitLegacyTokenChannelSuffix(key); ok {
+				fallbackToken, fallbackErr := model.ValidateUserToken(baseKey)
+				token, err = fallbackToken, fallbackErr
+				if fallbackErr == nil {
+					parts = []string{baseKey, channelID}
+				}
+			}
+		}
 		if token != nil {
 			id := c.GetInt("id")
 			if id == 0 {
@@ -415,7 +493,7 @@ func TokenAuth() func(c *gin.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, model.ErrDatabase) {
-				common.SysLog("TokenAuth ValidateUserToken database error: " + err.Error())
+				common.SysLog("TokenAuth ValidateUserToken database error_meta=" + common.SensitiveLogMeta(err.Error()))
 				abortWithOpenAiMessage(c, http.StatusInternalServerError,
 					common.TranslateMessage(c, i18n.MsgDatabaseError))
 			} else {
@@ -443,7 +521,7 @@ func TokenAuth() func(c *gin.Context) {
 
 		userCache, err := model.GetUserCache(token.UserId)
 		if err != nil {
-			common.SysLog(fmt.Sprintf("TokenAuth GetUserCache error for user %d: %v", token.UserId, err))
+			common.SysLog(fmt.Sprintf("TokenAuth GetUserCache error for user %d error_meta=%s", token.UserId, common.SensitiveLogMeta(err.Error())))
 			abortWithOpenAiMessage(c, http.StatusInternalServerError,
 				common.TranslateMessage(c, i18n.MsgDatabaseError))
 			return
@@ -483,9 +561,44 @@ func TokenAuth() func(c *gin.Context) {
 	}
 }
 
+// splitLegacyTokenChannelSuffix recognizes the historical admin channel-pin
+// form (<token>-<channel-id>).  Token keys themselves are opaque, so this
+// parser is only consulted after an exact key lookup has established that no
+// token with the full value exists.
+func splitLegacyTokenChannelSuffix(key string) (baseKey, channelID string, ok bool) {
+	separator := strings.LastIndexByte(key, '-')
+	if separator <= 0 || separator == len(key)-1 {
+		return "", "", false
+	}
+	suffix := key[separator+1:]
+	if _, err := parseCanonicalPositiveChannelID(suffix); err != nil {
+		return "", "", false
+	}
+	return key[:separator], suffix, true
+}
+
 func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) error {
 	if token == nil {
 		return fmt.Errorf("token is nil")
+	}
+	var specificChannelID string
+	if len(parts) != 0 {
+		if len(parts) != 2 {
+			err := fmt.Errorf("invalid token channel suffix")
+			abortWithOpenAiMessage(c, http.StatusBadRequest, "指定渠道 ID 无效")
+			return err
+		}
+		channelID, err := parseCanonicalPositiveChannelID(parts[1])
+		if err != nil {
+			abortWithOpenAiMessage(c, http.StatusBadRequest, "指定渠道 ID 无效")
+			return err
+		}
+		specificChannelID = strconv.Itoa(channelID)
+		if !model.IsAdmin(token.UserId) {
+			c.Header("specific_channel_version", "701e3ae1dc3f7975556d354e0675168d004891c8")
+			abortWithOpenAiMessage(c, http.StatusForbidden, "普通用户不支持指定渠道")
+			return fmt.Errorf("普通用户不支持指定渠道")
+		}
 	}
 	c.Set("id", token.UserId)
 	c.Set("token_id", token.Id)
@@ -506,21 +619,15 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	if token.AutoGroups != "" {
 		autoGroups, err := token.GetAutoGroups()
 		if err != nil {
-			common.SysError(fmt.Sprintf("failed to parse auto groups for token %d: %v", token.Id, err))
+			common.SysError(fmt.Sprintf("failed to parse auto groups for token %d error_meta=%s", token.Id, common.SensitiveLogMeta(err.Error())))
 			autoGroups = []string{}
 			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, autoGroups)
 		} else if len(autoGroups) > 0 {
 			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, autoGroups)
 		}
 	}
-	if len(parts) > 1 {
-		if model.IsAdmin(token.UserId) {
-			c.Set("specific_channel_id", parts[1])
-		} else {
-			c.Header("specific_channel_version", "701e3ae1dc3f7975556d354e0675168d004891c8")
-			abortWithOpenAiMessage(c, http.StatusForbidden, "普通用户不支持指定渠道")
-			return fmt.Errorf("普通用户不支持指定渠道")
-		}
+	if specificChannelID != "" {
+		c.Set("specific_channel_id", specificChannelID)
 	}
 	return nil
 }

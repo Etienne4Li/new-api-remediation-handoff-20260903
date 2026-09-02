@@ -13,6 +13,10 @@ import (
 var StartTime = time.Now().Unix() // unit: second
 var Version = "v0.0.0"            // this hard coding will be replaced automatically when building, no need to manually change
 var SystemName = "New API"
+
+// The legacy presentation/feature variables below are retained for source
+// compatibility. Runtime readers should use GetGeneralRuntimeConfig so an
+// admin hot update cannot race a request.
 var Footer = ""
 var Logo = ""
 var TopUpLink = ""
@@ -34,6 +38,25 @@ var DefaultCollapseSidebar = false // default value of collapse sidebar
 
 var SessionSecret = uuid.New().String()
 var CryptoSecret = uuid.New().String()
+
+// CredentialSecretConfigured records whether the credential-at-rest key was
+// loaded from an operator-controlled secret (CRYPTO_SECRET[_FILE], or the
+// explicitly configured SESSION_SECRET fallback).  The generated process
+// defaults are intentionally useful for unit tests and development, but are
+// not stable across restarts and therefore must not be accepted by a running
+// production instance for new encrypted credentials.
+var CredentialSecretConfigured bool
+
+// CredentialSecretRuntimeReady becomes true once InitEnv has finished loading
+// startup secrets.  Keeping this separate lets package-level/unit-test
+// fixtures use the generated process key without weakening the production
+// fail-closed check, which runs after normal bootstrap initialization.
+var CredentialSecretRuntimeReady bool
+
+// SessionCookieSecure and SessionCookieTrustedURLs are retained for source
+// compatibility. Runtime readers must use GetSessionCookieConfig (or
+// IsSessionCookieSecure), and writers must use Set/UpdateSessionCookieConfig
+// so a request never observes a partially replaced trusted-origin slice.
 var SessionCookieSecure = false
 var SessionCookieTrustedURLs []string
 
@@ -252,4 +275,10 @@ const (
 	TopUpStatusSuccess = "success"
 	TopUpStatusFailed  = "failed"
 	TopUpStatusExpired = "expired"
+	// TopUpStatusPaidUncredited means the provider payment was authenticated
+	// and durably recorded, but the wallet entitlement could not be granted.
+	// It is intentionally terminal until an operator retries the grant or
+	// issues a provider refund; treating it as pending would allow an already
+	// paid event to be replayed indefinitely.
+	TopUpStatusPaidUncredited = "paid_uncredited"
 )

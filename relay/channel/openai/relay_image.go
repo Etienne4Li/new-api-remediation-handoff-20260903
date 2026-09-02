@@ -3,7 +3,6 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,7 +33,8 @@ func updateOpenAIImageCount(info *relaycommon.RelayInfo, count int64) {
 func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	maxBytes := common.GetMaxFileDownloadBytes()
+	responseBody, err := service.ReadProviderResponseBody(resp, maxBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
@@ -86,7 +86,7 @@ func normalizeOpenAIUsage(usage *dto.Usage) {
 		usage.PromptTokensDetails.AudioTokens = usage.InputTokensDetails.AudioTokens
 	}
 	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	}
 }
 
@@ -234,7 +234,8 @@ func extractOpenAIImageStreamErrorMessage(data []byte) string {
 func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	maxBytes := common.GetMaxFileDownloadBytes()
+	responseBody, err := service.ReadProviderResponseBody(resp, maxBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}

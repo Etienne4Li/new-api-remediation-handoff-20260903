@@ -20,7 +20,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import { Pencil } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -43,7 +43,6 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -81,7 +80,7 @@ import {
   getGroups,
   getPermissionCatalog,
 } from '../api'
-import { BINDING_FIELDS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
+import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
   userFormSchema,
   type UserFormValues,
@@ -89,7 +88,7 @@ import {
   transformFormDataToPayload,
   transformUserToFormDefaults,
 } from '../lib'
-import { type User } from '../types'
+import type { User } from '../types'
 import { UserQuotaDialog } from './user-quota-dialog'
 import { useUsers } from './users-provider'
 
@@ -134,25 +133,41 @@ export function UsersMutateDrawer({
 
   // Load existing data when updating
   useEffect(() => {
-    if (open && isUpdate && currentRow) {
+    let cancelled = false
+
+    if (open && currentRow) {
       // For update, fetch fresh data
-      getUser(currentRow.id).then((result) => {
-        if (result.success && result.data) {
+      getUser(currentRow.id)
+        .then((result) => {
+          if (cancelled) return
+          if (!result.success || !result.data) {
+            toast.error(result.message || t(ERROR_MESSAGES.LOAD_FAILED))
+            return
+          }
           form.reset(transformUserToFormDefaults(result.data))
-        }
-      })
+        })
+        .catch(() => {
+          if (!cancelled) {
+            toast.error(t(ERROR_MESSAGES.LOAD_FAILED))
+          }
+        })
     } else if (open && !isUpdate) {
       // For create, reset to defaults
       form.reset(USER_FORM_DEFAULT_VALUES)
     }
-  }, [open, isUpdate, currentRow, form])
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, isUpdate, currentRow, form, t])
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
 
-  const currentQuotaRaw = form.watch('quota_dollars') || 0
-  const selectedRole = form.watch('role')
+  const currentQuotaRaw =
+    useWatch({ control: form.control, name: 'quota_dollars' }) || 0
+  const selectedRole = useWatch({ control: form.control, name: 'role' })
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
   const targetIsAdmin = (selectedRole ?? currentRow?.role ?? 0) >= ROLE.ADMIN
 
@@ -195,7 +210,7 @@ export function UsersMutateDrawer({
               : t(ERROR_MESSAGES.CREATE_FAILED))
         )
       }
-    } catch (_error) {
+    } catch {
       toast.error(t(ERROR_MESSAGES.UNEXPECTED))
     } finally {
       setIsSubmitting(false)
@@ -278,7 +293,8 @@ export function UsersMutateDrawer({
                             { value: '10', label: t('Admin') },
                           ]}
                           onValueChange={(value) =>
-                            value !== null && field.onChange(parseInt(value))
+                            value !== null &&
+                            field.onChange(Number.parseInt(value))
                           }
                           value={String(field.value)}
                         >
@@ -360,12 +376,10 @@ export function UsersMutateDrawer({
                       <FormItem>
                         <FormLabel>{t('Group')}</FormLabel>
                         <Select
-                          items={[
-                            ...groups.map((group) => ({
-                              value: group,
-                              label: group,
-                            })),
-                          ]}
+                          items={groups.map((group) => ({
+                            value: group,
+                            label: group,
+                          }))}
                           onValueChange={field.onChange}
                           value={field.value}
                         >
@@ -540,37 +554,6 @@ export function UsersMutateDrawer({
                     )}
                   </SideDrawerSection>
                 )}
-
-              {/* Binding Information (Read-only) */}
-              {isUpdate && (
-                <SideDrawerSection>
-                  <h3 className='text-sm font-medium'>
-                    {t('Binding Information')}
-                  </h3>
-                  <p className='text-muted-foreground text-xs'>
-                    {t(
-                      'Third-party account bindings (read-only, managed by user in profile settings)'
-                    )}
-                  </p>
-
-                  <div className='flex flex-col gap-3'>
-                    {BINDING_FIELDS.map(({ key, label }) => (
-                      <div key={key}>
-                        <Label className='text-muted-foreground text-xs'>
-                          {t(label)}
-                        </Label>
-                        <Input
-                          value={
-                            (currentRow?.[key as keyof User] as string) || '-'
-                          }
-                          disabled
-                          className='mt-1'
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </SideDrawerSection>
-              )}
             </form>
           </Form>
           <SheetFooter className={sideDrawerFooterClassName()}>

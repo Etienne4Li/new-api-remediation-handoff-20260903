@@ -1,8 +1,10 @@
 package service
 
 import (
+	"math"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -23,21 +25,27 @@ type TieredResultWrapper = billingexpr.TieredResult
 // report them as text-only. This function normalizes to text-only when
 // sub-categories are separately priced.
 func BuildTieredTokenParams(usage *dto.Usage, isClaudeUsageSemantic bool, usedVars map[string]bool) billingexpr.TokenParams {
-	p := float64(usage.PromptTokens)
-	c := float64(usage.CompletionTokens)
-	cr := float64(usage.PromptTokensDetails.CachedTokens)
-	cc5m := float64(usage.PromptTokensDetails.CacheCreationTokensTotal())
+	if usage == nil {
+		return billingexpr.TokenParams{}
+	}
+	// Usage counters are upstream-controlled. Normalize negative values before
+	// converting to float so malformed metadata cannot create a credit in an
+	// expression or reduce the tiered pre-consume amount.
+	p := float64(nonNegativeTokenCount(usage.PromptTokens))
+	c := float64(nonNegativeTokenCount(usage.CompletionTokens))
+	cr := float64(nonNegativeTokenCount(usage.PromptTokensDetails.CachedTokens))
+	cc5m := float64(nonNegativeTokenCount(usage.PromptTokensDetails.CacheCreationTokensTotal()))
 	cc1h := float64(0)
 
 	if usage.UsageSemantic == "anthropic" {
-		cc1h = float64(usage.ClaudeCacheCreation1hTokens)
-		cc5m = float64(usage.ClaudeCacheCreation5mTokens)
+		cc1h = float64(nonNegativeTokenCount(usage.ClaudeCacheCreation1hTokens))
+		cc5m = float64(nonNegativeTokenCount(usage.ClaudeCacheCreation5mTokens))
 	}
 
-	img := float64(usage.PromptTokensDetails.ImageTokens)
-	ai := float64(usage.PromptTokensDetails.AudioTokens)
-	imgO := float64(usage.CompletionTokenDetails.ImageTokens)
-	ao := float64(usage.CompletionTokenDetails.AudioTokens)
+	img := float64(nonNegativeTokenCount(usage.PromptTokensDetails.ImageTokens))
+	ai := float64(nonNegativeTokenCount(usage.PromptTokensDetails.AudioTokens))
+	imgO := float64(nonNegativeTokenCount(usage.CompletionTokenDetails.ImageTokens))
+	ao := float64(nonNegativeTokenCount(usage.CompletionTokenDetails.AudioTokens))
 
 	// len = total input context length for tier condition evaluation.
 	// Non-Claude: prompt_tokens already includes everything.
@@ -186,4 +194,113 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	noteQuotaClamp(relayInfo, tr.Clamp)
 
 	return true, tr.ActualQuotaAfterGroup, &tr
+}
+
+// TryTieredSettleConservative is used when a Responses stream ended
+// abnormally and the expression cannot be evaluated at settlement time. The
+// ordinary TryTieredSettle fallback intentionally returns the frozen
+// reservation, which is safe for most relay errors but can be grossly larger
+// than work observed on a disconnect (for example when max_output_tokens was
+// set very high). This variant scales the frozen reservation by the ratio of
+// observed token dimensions to the pre-consume estimate and caps the result
+// at that reservation. It never treats a client-supplied output ceiling as
+// actual generated usage.
+func TryTieredSettleConservative(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenParams) (ok bool, quota int, result *billingexpr.TieredResult) {
+	if relayInfo == nil {
+		return false, 0, nil
+	}
+	snap := relayInfo.TieredBillingSnapshot
+	if snap == nil || snap.BillingMode != "tiered_expr" {
+		return false, 0, nil
+	}
+
+	requestInput := billingexpr.RequestInput{}
+	if relayInfo.BillingRequestInput != nil {
+		requestInput = *relayInfo.BillingRequestInput
+	}
+	tr, err := billingexpr.ComputeTieredQuotaWithRequest(snap, params, requestInput)
+	if err == nil {
+		noteQuotaClamp(relayInfo, tr.Clamp)
+		return true, tr.ActualQuotaAfterGroup, &tr
+	}
+
+	return true, conservativeTieredFallbackQuota(relayInfo, params), nil
+}
+
+func conservativeTieredFallbackQuota(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenParams) int {
+	if relayInfo == nil || relayInfo.TieredBillingSnapshot == nil {
+		return 0
+	}
+	snap := relayInfo.TieredBillingSnapshot
+
+	// Use the final selected-group reservation where available. Both values are
+	// bounded by the single-request quota policy; clamp defensively in case a
+	// legacy snapshot was populated before the shared quota helpers existed.
+	reservation := snap.EstimatedQuotaAfterGroup
+	if relayInfo.FinalPreConsumedQuota > 0 {
+		reservation = relayInfo.FinalPreConsumedQuota
+	}
+	if reservation <= 0 {
+		return 0
+	}
+	if reservation > common.MaxQuota {
+		reservation = common.MaxQuota
+	}
+
+	actualUnits := positiveFinite(params.Len)
+	inputUnits := positiveFinite(params.P) + positiveFinite(params.CR) + positiveFinite(params.CC) +
+		positiveFinite(params.CC1h) + positiveFinite(params.Img) + positiveFinite(params.AI)
+	if inputUnits > actualUnits {
+		actualUnits = inputUnits
+	}
+	outputUnits := positiveFinite(params.C) + positiveFinite(params.ImgO) + positiveFinite(params.AO)
+	actualUnits += outputUnits
+	if actualUnits <= 0 {
+		return 0
+	}
+
+	estimateTokens := safeTokenTotal(
+		maxInt(relayInfo.TieredBillingSnapshot.EstimatedPromptTokens, 0),
+		maxInt(relayInfo.TieredBillingSnapshot.EstimatedCompletionTokens, 0),
+	)
+	estimateUnits := float64(estimateTokens)
+	if estimateUnits <= 0 || math.IsNaN(estimateUnits) || math.IsInf(estimateUnits, 0) {
+		return reservation
+	}
+
+	// Keep the fallback at or below the reservation. This is deliberately a
+	// conservative *upper* bound for an abnormal stream; a later reconciliation
+	// can charge additional usage if a provider supplies authoritative totals.
+	candidate := float64(reservation) * actualUnits / estimateUnits
+	if math.IsNaN(candidate) || math.IsInf(candidate, 0) || candidate < 0 {
+		return reservation
+	}
+	if candidate > float64(reservation) {
+		candidate = float64(reservation)
+	}
+	quota, clamp := common.QuotaRoundChecked(candidate)
+	if clamp != nil {
+		noteQuotaClamp(relayInfo, clamp)
+		if quota > reservation {
+			return reservation
+		}
+	}
+	if quota < 0 {
+		return 0
+	}
+	return quota
+}
+
+func positiveFinite(value float64) float64 {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return value
+}
+
+func maxInt(value, fallback int) int {
+	if value > fallback {
+		return value
+	}
+	return fallback
 }

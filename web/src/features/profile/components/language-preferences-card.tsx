@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Languages, Loader2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -55,11 +55,19 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
     return normalizeInterfaceLanguage(settings.language || i18n.language)
   }, [props.profile?.setting, i18n.language])
 
-  const [currentLanguage, setCurrentLanguage] = useState(savedLanguage)
-
-  useEffect(() => {
-    setCurrentLanguage(savedLanguage)
-  }, [savedLanguage])
+  // Keep an in-flight user choice separate from the profile-derived baseline.
+  // A profile refresh can arrive while the save request is pending; it must not
+  // overwrite the choice currently shown in the selector.
+  const [draftLanguage, setDraftLanguage] = useState<{
+    language: string
+    baseline: string
+  } | null>(null)
+  const currentLanguage =
+    draftLanguage &&
+    (savedLanguage === draftLanguage.baseline ||
+      savedLanguage === draftLanguage.language)
+      ? draftLanguage.language
+      : savedLanguage
 
   const handleLanguageChange = async (language: string | null) => {
     if (!language) return
@@ -67,7 +75,7 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
     if (nextLanguage === currentLanguage) return
 
     const previousLanguage = currentLanguage
-    setCurrentLanguage(nextLanguage)
+    setDraftLanguage({ language: nextLanguage, baseline: savedLanguage })
     setSaving(true)
     await i18n.changeLanguage(nextLanguage)
 
@@ -94,7 +102,7 @@ export function LanguagePreferencesCard(props: LanguagePreferencesCardProps) {
       props.onProfileUpdate()
       toast.success(t('Language preference saved'))
     } catch {
-      setCurrentLanguage(previousLanguage)
+      setDraftLanguage(null)
       await i18n.changeLanguage(previousLanguage)
       toast.error(t('Failed to update settings'))
     } finally {

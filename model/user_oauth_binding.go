@@ -2,8 +2,10 @@ package model
 
 import (
 	"errors"
+	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
 )
 
@@ -16,12 +18,60 @@ type UserOAuthBinding struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// UserBindingStatus is a redacted view of a user's built-in identity
+// bindings.  It deliberately contains booleans only; provider account IDs
+// are stable identifiers and must not be sent to an administrator just to
+// render binding state.
+type UserBindingStatus struct {
+	Email    bool `json:"email"`
+	GitHub   bool `json:"github_id"`
+	Discord  bool `json:"discord_id"`
+	OIDC     bool `json:"oidc_id"`
+	WeChat   bool `json:"wechat_id"`
+	Telegram bool `json:"telegram_id"`
+	LinuxDO  bool `json:"linux_do_id"`
+}
+
 func (UserOAuthBinding) TableName() string {
 	return "user_oauth_bindings"
 }
 
+// GetUserBindingStatus returns only whether each built-in binding exists.
+// The identity values are selected into a short-lived model object and are
+// converted to booleans before leaving this package; callers cannot
+// accidentally serialize the full User model.
+func GetUserBindingStatus(userId int) (*UserBindingStatus, error) {
+	if userId <= 0 {
+		return nil, errors.New("user ID is required")
+	}
+	var user User
+	if err := DB.Select(
+		"email",
+		"github_id",
+		"discord_id",
+		"oidc_id",
+		"wechat_id",
+		"telegram_id",
+		"linux_do_id",
+	).First(&user, "id = ?", userId).Error; err != nil {
+		return nil, err
+	}
+	return &UserBindingStatus{
+		Email:    user.Email != "",
+		GitHub:   user.GitHubId != "",
+		Discord:  user.DiscordId != "",
+		OIDC:     user.OidcId != "",
+		WeChat:   user.WeChatId != "",
+		Telegram: user.TelegramId != "",
+		LinuxDO:  user.LinuxDOId != "",
+	}, nil
+}
+
 // GetUserOAuthBindingsByUserId returns all OAuth bindings for a user
 func GetUserOAuthBindingsByUserId(userId int) ([]*UserOAuthBinding, error) {
+	if userId <= 0 {
+		return nil, errors.New("user ID is required")
+	}
 	var bindings []*UserOAuthBinding
 	err := DB.Where("user_id = ?", userId).Find(&bindings).Error
 	return bindings, err
@@ -29,6 +79,9 @@ func GetUserOAuthBindingsByUserId(userId int) ([]*UserOAuthBinding, error) {
 
 // GetUserOAuthBinding returns a specific binding for a user and provider
 func GetUserOAuthBinding(userId, providerId int) (*UserOAuthBinding, error) {
+	if userId <= 0 || providerId <= 0 {
+		return nil, errors.New("user and provider IDs are required")
+	}
 	var binding UserOAuthBinding
 	err := DB.Where("user_id = ? AND provider_id = ?", userId, providerId).First(&binding).Error
 	if err != nil {
@@ -56,46 +109,55 @@ func GetUserByOAuthBinding(providerId int, providerUserId string) (*User, error)
 // IsProviderUserIdTaken checks if a provider user ID is already bound to any user
 func IsProviderUserIdTaken(providerId int, providerUserId string) bool {
 	var count int64
-	DB.Model(&UserOAuthBinding{}).Where("provider_id = ? AND provider_user_id = ?", providerId, providerUserId).Count(&count)
+	if err := DB.Model(&UserOAuthBinding{}).
+		Where("provider_id = ? AND provider_user_id = ?", providerId, providerUserId).
+		Count(&count).Error; err != nil {
+		common.SysLog("failed to check OAuth binding: " + err.Error())
+		return false
+	}
 	return count > 0
 }
 
 // CreateUserOAuthBinding creates a new OAuth binding
 func CreateUserOAuthBinding(binding *UserOAuthBinding) error {
-	if binding.UserId == 0 {
+	if binding == nil || binding.UserId <= 0 {
 		return errors.New("user ID is required")
 	}
-	if binding.ProviderId == 0 {
+	if binding.ProviderId <= 0 {
 		return errors.New("provider ID is required")
 	}
-	if binding.ProviderUserId == "" {
+	if strings.TrimSpace(binding.ProviderUserId) == "" {
 		return errors.New("provider user ID is required")
 	}
-
-	// Check if this provider user ID is already taken
-	if IsProviderUserIdTaken(binding.ProviderId, binding.ProviderUserId) {
-		return errors.New("this OAuth account is already bound to another user")
-	}
-
-	binding.CreatedAt = time.Now()
-	return DB.Create(binding).Error
+	binding.ProviderUserId = strings.TrimSpace(binding.ProviderUserId)
+	return DB.Transaction(func(tx *gorm.DB) error {
+		return CreateUserOAuthBindingWithTx(tx, binding)
+	})
 }
 
 // CreateUserOAuthBindingWithTx creates a new OAuth binding within a transaction
 func CreateUserOAuthBindingWithTx(tx *gorm.DB, binding *UserOAuthBinding) error {
-	if binding.UserId == 0 {
+	if tx == nil {
+		return errors.New("database transaction is required")
+	}
+	if binding == nil || binding.UserId <= 0 {
 		return errors.New("user ID is required")
 	}
-	if binding.ProviderId == 0 {
+	if binding.ProviderId <= 0 {
 		return errors.New("provider ID is required")
 	}
-	if binding.ProviderUserId == "" {
+	if strings.TrimSpace(binding.ProviderUserId) == "" {
 		return errors.New("provider user ID is required")
 	}
+	binding.ProviderUserId = strings.TrimSpace(binding.ProviderUserId)
 
 	// Check if this provider user ID is already taken (use tx to check within the same transaction)
 	var count int64
-	tx.Model(&UserOAuthBinding{}).Where("provider_id = ? AND provider_user_id = ?", binding.ProviderId, binding.ProviderUserId).Count(&count)
+	if err := tx.Model(&UserOAuthBinding{}).
+		Where("provider_id = ? AND provider_user_id = ?", binding.ProviderId, binding.ProviderUserId).
+		Count(&count).Error; err != nil {
+		return err
+	}
 	if count > 0 {
 		return errors.New("this OAuth account is already bound to another user")
 	}
@@ -106,31 +168,60 @@ func CreateUserOAuthBindingWithTx(tx *gorm.DB, binding *UserOAuthBinding) error 
 
 // UpdateUserOAuthBinding updates an existing OAuth binding (e.g., rebind to different OAuth account)
 func UpdateUserOAuthBinding(userId, providerId int, newProviderUserId string) error {
-	// Check if the new provider user ID is already taken by another user
-	var existingBinding UserOAuthBinding
-	err := DB.Where("provider_id = ? AND provider_user_id = ?", providerId, newProviderUserId).First(&existingBinding).Error
-	if err == nil && existingBinding.UserId != userId {
-		return errors.New("this OAuth account is already bound to another user")
+	if userId <= 0 || providerId <= 0 || strings.TrimSpace(newProviderUserId) == "" {
+		return errors.New("user, provider, and provider user IDs are required")
 	}
+	newProviderUserId = strings.TrimSpace(newProviderUserId)
 
-	// Check if user already has a binding for this provider
-	var binding UserOAuthBinding
-	err = DB.Where("user_id = ? AND provider_id = ?", userId, providerId).First(&binding).Error
-	if err != nil {
-		// No existing binding, create new one
-		return CreateUserOAuthBinding(&UserOAuthBinding{
-			UserId:         userId,
-			ProviderId:     providerId,
-			ProviderUserId: newProviderUserId,
-		})
-	}
+	// Keep the conflict check and write in one transaction.  The unique
+	// constraints remain the final arbiter, while propagating every lookup
+	// error prevents a database outage from being mistaken for "no binding".
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var existingBinding UserOAuthBinding
+		err := tx.Where("provider_id = ? AND provider_user_id = ?", providerId, newProviderUserId).First(&existingBinding).Error
+		if err == nil && existingBinding.UserId != userId {
+			return errors.New("this OAuth account is already bound to another user")
+		}
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 
-	// Update existing binding
-	return DB.Model(&binding).Update("provider_user_id", newProviderUserId).Error
+		var binding UserOAuthBinding
+		err = tx.Where("user_id = ? AND provider_id = ?", userId, providerId).First(&binding).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return CreateUserOAuthBindingWithTx(tx, &UserOAuthBinding{
+				UserId: userId, ProviderId: providerId, ProviderUserId: newProviderUserId,
+			})
+		}
+		if err != nil {
+			return err
+		}
+
+		result := tx.Model(&binding).Where("id = ? AND user_id = ? AND provider_id = ?", binding.Id, userId, providerId).
+			Update("provider_user_id", newProviderUserId)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			// MySQL may report zero for an unchanged value.  Confirm the row still
+			// exists before treating the operation as successful.
+			var count int64
+			if err := tx.Model(&UserOAuthBinding{}).Where("id = ?", binding.Id).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteUserOAuthBinding deletes an OAuth binding
 func DeleteUserOAuthBinding(userId, providerId int) error {
+	if userId <= 0 || providerId <= 0 {
+		return errors.New("user and provider IDs are required")
+	}
 	return DB.Where("user_id = ? AND provider_id = ?", userId, providerId).Delete(&UserOAuthBinding{}).Error
 }
 

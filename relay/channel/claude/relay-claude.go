@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"io"
 	"net/http"
 	"strings"
 
@@ -72,7 +71,7 @@ func shouldSkipClaudeMessageDeltaUsagePatch(info *relaycommon.RelayInfo) bool {
 	if info == nil {
 		return false
 	}
-	return info.ChannelSetting.PassThroughBodyEnabled
+	return info.ChannelMeta != nil && info.ChannelMeta.ChannelSetting.PassThroughBodyEnabled
 }
 
 func patchClaudeMessageDeltaUsageData(data string, usage *dto.ClaudeUsage) string {
@@ -87,7 +86,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
-		common.SysLog("error unmarshalling stream response: " + err.Error())
+		common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
@@ -127,7 +126,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 
 		err = helper.ObjectData(c, response)
 		if err != nil {
-			logger.LogError(c, "send_stream_response_failed: "+err.Error())
+			logger.LogError(c, "send_stream_response_failed: error_meta="+common.SensitiveLogMeta(err.Error()))
 		}
 	}
 	return nil
@@ -167,7 +166,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 		if claudeInfo.Usage.PromptTokens == 0 {
 			claudeInfo.Usage.PromptTokens = fallback.PromptTokens
 		}
-		claudeInfo.Usage.TotalTokens = claudeInfo.Usage.PromptTokens + claudeInfo.Usage.CompletionTokens
+		claudeInfo.Usage.TotalTokens = common.SaturatingAddNonNegativeInt(claudeInfo.Usage.PromptTokens, claudeInfo.Usage.CompletionTokens)
 	}
 	if claudeInfo.Usage != nil {
 		claudeInfo.Usage.UsageSemantic = "anthropic"
@@ -184,7 +183,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 			response := helper.GenerateFinalUsageResponse(claudeInfo.ResponseId, claudeInfo.Created, info.UpstreamModelName, openAIUsage)
 			err := helper.ObjectData(c, response)
 			if err != nil {
-				common.SysLog("send final response failed: " + err.Error())
+				common.SysLog("send final response failed: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			}
 		}
 		helper.Done(c)
@@ -230,7 +229,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if claudeResponse.Usage != nil {
 		claudeInfo.Usage.PromptTokens = claudeResponse.Usage.InputTokens
 		claudeInfo.Usage.CompletionTokens = claudeResponse.Usage.OutputTokens
-		claudeInfo.Usage.TotalTokens = claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens
+		claudeInfo.Usage.TotalTokens = common.SaturatingAddNonNegativeInt(claudeResponse.Usage.InputTokens, claudeResponse.Usage.OutputTokens)
 		claudeInfo.Usage.UsageSemantic = "anthropic"
 		claudeInfo.Usage.BillingUsage = dto.NewClaudeMessagesBillingUsage(claudeResponse.Usage)
 		claudeInfo.Usage.PromptTokensDetails.CachedTokens = claudeResponse.Usage.CacheReadInputTokens
@@ -275,11 +274,11 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 		ResponseText: strings.Builder{},
 		Usage:        &dto.Usage{},
 	}
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	logger.LogDebug(c, "responseBody: %s", responseBody)
+	logger.LogDebug(c, "response_meta=%s", common.SensitiveLogBody(responseBody))
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, resp, responseBody)
 	if handleErr != nil {
 		return nil, handleErr

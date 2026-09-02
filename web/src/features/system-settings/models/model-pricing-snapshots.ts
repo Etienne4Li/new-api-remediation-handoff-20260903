@@ -58,8 +58,7 @@ export type ModelRow = ModelPricingSnapshot & {
   isDraftNew: boolean
 }
 
-export const hasPricingValue = (value?: string) =>
-  value !== undefined && value !== ''
+const hasPricingValue = (value?: string) => value !== undefined && value !== ''
 
 export const isBasePricingUnset = (snapshot?: ModelPricingSnapshot) =>
   !snapshot ||
@@ -229,7 +228,7 @@ export const buildModelSnapshots = ({
     ...Object.keys(billingExprMap),
   ])
 
-  return Array.from(modelNames).map((name) => {
+  return [...modelNames].map((name) => {
     const price = priceMap[name]?.toString() || ''
     const ratio = ratioMap[name]?.toString() || ''
     const cache = cacheMap[name]?.toString() || ''

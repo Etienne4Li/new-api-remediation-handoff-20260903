@@ -41,13 +41,6 @@ export async function getCustomOAuthProviders(): Promise<
   return res.data
 }
 
-export async function getCustomOAuthProvider(
-  id: number
-): Promise<ApiResponse<CustomOAuthProvider>> {
-  const res = await api.get(`/api/custom-oauth-provider/${id}`)
-  return res.data
-}
-
 export async function createCustomOAuthProvider(
   data: Omit<CustomOAuthProvider, 'id'>
 ): Promise<ApiResponse<CustomOAuthProvider>> {

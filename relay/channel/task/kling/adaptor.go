@@ -2,6 +2,7 @@ package kling
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -130,7 +131,20 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
 	// Use the standard validation method for TaskSubmitReq
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate); taskErr != nil {
+		return taskErr
+	}
+	// Kling accepts provider-specific fields from metadata. Validate the fully
+	// merged payload before pre-consume so metadata.duration cannot bypass the
+	// shared duration bound and only fail after a charge has been reserved.
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -190,7 +204,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -203,7 +217,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 	if kResp.Code != 0 {
-		taskErr = service.TaskErrorWrapperLocal(fmt.Errorf("%s", kResp.Message), "task_failed", http.StatusBadRequest)
+		taskErr = service.TaskErrorWrapperLocal(fmt.Errorf("kling upstream task error: message_meta=%s", common.SensitiveLogMeta(kResp.Message)), "task_failed", http.StatusBadRequest)
 		return
 	}
 	ov := dto.NewOpenAIVideo()
@@ -217,21 +231,32 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 // FetchTask fetch task status
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
+	}
+	escapedTaskID, err := taskcommon.EscapeTaskIDPathSegment(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task_id: %w", err)
 	}
 	action, ok := body["action"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid action")
 	}
 	path := lo.Ternary(action == constant.TaskActionGenerate, "/v1/videos/image2video", "/v1/videos/text2video")
-	url := fmt.Sprintf("%s%s/%s", baseUrl, path, taskID)
+	url := fmt.Sprintf("%s%s/%s", strings.TrimRight(baseUrl, "/"), path, escapedTaskID)
 	if isNewAPIRelay(key) {
-		url = fmt.Sprintf("%s/kling%s/%s", baseUrl, path, taskID)
+		url = fmt.Sprintf("%s/kling%s/%s", strings.TrimRight(baseUrl, "/"), path, escapedTaskID)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -265,14 +290,41 @@ func (a *TaskAdaptor) GetChannelName() string {
 // ============================
 
 func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, info *relaycommon.RelayInfo) (*requestPayload, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if info == nil {
+		return nil, errors.New("relay info is nil")
+	}
+	expectedModel := strings.TrimSpace(info.UpstreamModelName)
+	if expectedModel == "" {
+		expectedModel = "kling-v1"
+	}
+	// A model override is a request error, rather than a silently ignored
+	// option.  The shared metadata decoder strips these fields before the
+	// round-trip (to protect other adaptors), so inspect the original keys
+	// first and reject case-insensitive aliases as well.
+	for key := range req.Metadata {
+		if strings.EqualFold(strings.TrimSpace(key), "model") || strings.EqualFold(strings.TrimSpace(key), "model_name") {
+			return nil, errors.New("can't change model with metadata")
+		}
+	}
+	duration := taskcommon.DefaultInt(req.Duration, 5)
+	if req.Duration == 0 && strings.TrimSpace(req.Seconds) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(req.Seconds))
+		if err != nil {
+			return nil, fmt.Errorf("invalid seconds: %w", err)
+		}
+		duration = parsed
+	}
 	r := requestPayload{
 		Prompt:         req.Prompt,
 		Image:          req.Image,
 		Mode:           taskcommon.DefaultString(req.Mode, "std"),
-		Duration:       fmt.Sprintf("%d", taskcommon.DefaultInt(req.Duration, 5)),
+		Duration:       fmt.Sprintf("%d", duration),
 		AspectRatio:    a.getAspectRatio(req.Size),
-		ModelName:      info.UpstreamModelName,
-		Model:          info.UpstreamModelName,
+		ModelName:      expectedModel,
+		Model:          expectedModel,
 		CfgScale:       0.5,
 		StaticMask:     "",
 		DynamicMasks:   []DynamicMask{},
@@ -280,13 +332,21 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 		CallbackUrl:    "",
 		ExternalTaskId: "",
 	}
-	if r.ModelName == "" {
-		r.ModelName = "kling-v1"
-		r.Model = "kling-v1"
-	}
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
+	// Metadata supports Kling's `model_name` and `duration` fields. Neither may
+	// change the channel-selected model or escape the shared duration boundary;
+	// otherwise billing is calculated for one model while the provider executes
+	// another (or an unbounded-length job).
+	if r.ModelName != expectedModel || r.Model != expectedModel {
+		return nil, errors.New("can't change model with metadata")
+	}
+	parsedDuration, err := strconv.Atoi(strings.TrimSpace(r.Duration))
+	if err != nil || parsedDuration <= 0 || parsedDuration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
+	r.Duration = strconv.Itoa(parsedDuration)
 	return &r, nil
 }
 
@@ -345,6 +405,19 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	taskInfo.Code = resPayload.Code
 	taskInfo.TaskID = resPayload.Data.TaskId
 	taskInfo.Reason = resPayload.Data.TaskStatusMsg
+	if resPayload.Code != 0 {
+		// Keep the provider envelope error authoritative. Do not allow a nested
+		// `succeed` status in an error response to reach billing.
+		taskInfo.Status = model.TaskStatusFailure
+		taskInfo.Progress = "100%"
+		if taskInfo.Reason == "" {
+			taskInfo.Reason = resPayload.Message
+		}
+		if taskInfo.Reason == "" {
+			taskInfo.Reason = "kling task failed"
+		}
+		return taskInfo, nil
+	}
 	//任务状态，枚举值：submitted（已提交）、processing（处理中）、succeed（成功）、failed（失败）
 	status := resPayload.Data.TaskStatus
 	switch status {
@@ -356,14 +429,32 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskInfo.Status = model.TaskStatusSuccess
 		if videos := resPayload.Data.TaskResult.Videos; len(videos) > 0 {
 			video := videos[0]
-			taskInfo.Url = video.Url
+			if normalized, err := taskcommon.NormalizeTaskResultURL(video.Url); err != nil {
+				return nil, fmt.Errorf("invalid kling video URL: %w", err)
+			} else {
+				taskInfo.Url = normalized
+			}
 		}
-		if tokens, err := strconv.ParseFloat(resPayload.Data.FinalUnitDeduction, 64); err == nil {
-			// 上游返回的扣费数值，饱和转换防止超大数值回绕成负数
-			rounded := common.QuotaFromFloat(math.Ceil(tokens))
-			if rounded > 0 {
-				taskInfo.CompletionTokens = rounded
-				taskInfo.TotalTokens = rounded
+		if raw := strings.TrimSpace(resPayload.Data.FinalUnitDeduction); raw != "" {
+			tokens, err := strconv.ParseFloat(raw, 64)
+			if err != nil || math.IsNaN(tokens) || math.IsInf(tokens, 0) {
+				return nil, fmt.Errorf("invalid final_unit_deduction")
+			}
+			if tokens < 0 {
+				return nil, fmt.Errorf("invalid final_unit_deduction: negative value")
+			}
+			if tokens > 0 {
+				// The provider value becomes a token/quota count. Reject values
+				// outside the representable billing domain instead of silently
+				// charging a saturated maximum (or wrapping into a credit).
+				rounded, err := common.QuotaFromFloatStrict(math.Ceil(tokens))
+				if err != nil {
+					return nil, fmt.Errorf("final_unit_deduction out of range: %w", err)
+				}
+				if rounded > 0 {
+					taskInfo.CompletionTokens = rounded
+					taskInfo.TotalTokens = rounded
+				}
 			}
 		}
 	case "failed":

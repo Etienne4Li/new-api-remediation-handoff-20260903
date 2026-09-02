@@ -316,13 +316,13 @@ docker run --name new-api -d --restart always \
 | `SESSION_SECRET` | 鑑權簽章密鑰；所有節點必須保持一致                                           | - |
 | `SESSION_COOKIE_SECURE` | `false`/未設定時關閉 refresh/logout OriginGuard 以相容本機 HTTP 開發代理；`true` 時啟用 Secure Cookie 和嚴格 Origin 驗證 | `false` |
 | `SESSION_COOKIE_TRUSTED_URL` | Secure 模式必填：允許呼叫 refresh/logout 的精確 HTTPS Origin，多個值以英文逗號分隔；不是 relay CORS 白名單 | - |
-| `TRUSTED_PROXIES` | 未設定/留空時信任本機回送、RFC1918 和 IPv6 ULA 並輸出啟動警告；`none` 不信任任何代理；明確指定的代理 IP/CIDR 清單會完整取代預設值 | `127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` |
+| `TRUSTED_PROXIES` | 未設定/留空時僅使用 TCP 直連位址並輸出啟動警告；`none` 同樣是不信任代理的嚴格模式；明確 IP/CIDR 清單會取代預設值（邊緣層必須清除並重建 `X-Forwarded-For`） | 空（嚴格直連） |
 | `USER_SESSION_ACTIVE_LIMIT` | 單一用戶最大活躍登入 Session 數 | `50` |
 | `USER_SESSION_ISSUANCE_LIMIT` | 單一用戶在簽發視窗內可建立的 Session 總數，包含已撤銷 Session | `100` |
 | `USER_SESSION_ISSUANCE_WINDOW_SECONDS` | Session 簽發計數視窗（秒）；高於 revoked 保留期時自動限制 | `86400` |
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | revoked Session 用於稽核與簽發計數的保留天數 | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | 全域每小時 Session 簽發告警門檻；只告警，不拒絕登入 | `5000` |
-| `CRYPTO_SECRET` | 快取鍵 HMAC 密鑰；共用 Redis 的節點必須使用相同有效值 | 預設跟隨 `SESSION_SECRET` |
+| `CRYPTO_SECRET` | 資料庫靜態憑證加密、指紋及快取 HMAC 的持久根密鑰；共用資料庫的節點必須使用同一不可直接輪替的值 | 預設跟隨 `SESSION_SECRET` |
 | `SQL_DSN` | 資料庫連接字符串                                                     | - |
 | `REDIS_CONN_STRING` | Redis 連接字符串                                                  | - |
 | `STREAMING_TIMEOUT` | 流式超時時間（秒）                                                    | `300` |
@@ -404,7 +404,7 @@ docker run --name new-api -d --restart always \
 
 > [!WARNING]
 > - 所有節點必須使用同一個主資料庫，並設定相同的 `SESSION_SECRET`；否則 Access Token、Refresh 工作階段和臨時鑑權流程無法一致驗證。
-> - 連線至同一個 Redis 的節點還必須設定相同的 `CRYPTO_SECRET`，否則節點產生的快取鍵摘要不一致，無法正確共用快取。
+> - 共用資料庫的節點必須長期維持同一個 `CRYPTO_SECRET`；它同時保護靜態憑證、憑證指紋及快取鍵摘要。沒有明確的重新加密遷移時，不得直接替換現有資料庫的此密鑰。
 
 登入 Session 和單一使用者的活躍數／簽發數限制均以資料庫為權威。Redis 中的 Session 僅為短期快取，TTL 跟隨 `SYNC_FREQUENCY`（預設 60 秒），且不會超過 Session 的剩餘有效期。
 

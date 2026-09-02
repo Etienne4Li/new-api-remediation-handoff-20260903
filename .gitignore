@@ -11,6 +11,10 @@ logs
 web/dist
 web/node_modules
 .env
+# Secret files used by docker-compose.secure.yml. Keep the directory outside
+# the repository in production; this rule prevents accidental commits when a
+# local test stack is created beside the source tree.
+secrets/
 one-api
 new-api
 /__debug_bin*

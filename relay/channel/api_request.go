@@ -411,7 +411,7 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 		defer func() {
 			// 增加panic恢复处理
 			if r := recover(); r != nil {
-				logger.LogDebug(c, "SSE ping goroutine panic recovered: %v", r)
+				logger.LogDebug(c, "SSE ping goroutine panic recovered: panic_meta=%s", common2.SensitiveLogMeta(fmt.Sprint(r)))
 			}
 			logger.LogDebug(c, "SSE ping goroutine stopped")
 		}()
@@ -440,7 +440,7 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 			// 发送 ping 数据
 			case <-ticker.C:
 				if err := sendPingData(c, &pingMutex); err != nil {
-					logger.LogDebug(c, "SSE ping error, stopping goroutine: %s", err.Error())
+					logger.LogDebug(c, "SSE ping error, stopping goroutine: error_meta=%s", common2.SensitiveLogMeta(err.Error()))
 					return
 				}
 			// 收到退出信号
@@ -469,7 +469,7 @@ func sendPingData(c *gin.Context, mutex *sync.Mutex) error {
 	helper.ExtendWriteDeadline(c)
 	err := helper.PingData(c)
 	if err != nil {
-		logger.LogError(c, "SSE ping error: "+err.Error())
+		logger.LogError(c, "SSE ping error: error_meta="+common2.SensitiveLogMeta(err.Error()))
 		return err
 	}
 
@@ -514,7 +514,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if info.IsStream {
 		helper.SetEventStreamHeaders(c)
 		// 处理流式请求的 ping 保活
-		generalSettings := operation_setting.GetGeneralSetting()
+		generalSettings := operation_setting.GetGeneralSettingSnapshot()
 		if generalSettings.PingIntervalEnabled && !info.DisablePing {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
 			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval)
@@ -531,7 +531,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	resp, err := relayClient.Do(req)
 	if err != nil {
-		logger.LogError(c, "do request failed: "+err.Error())
+		// net/http includes the complete request URL in many transport errors;
+		// logging it verbatim can expose API keys embedded in query parameters.
+		logger.LogError(c, "do request failed: error_meta="+common2.SensitiveLogMeta(err.Error()))
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
 	if resp == nil {

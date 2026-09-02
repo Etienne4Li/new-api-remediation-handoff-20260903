@@ -55,6 +55,7 @@ export interface UseSecureVerificationOptions {
 export interface StartVerificationOptions {
   scope: SecurityProofScope
   preferredMethod?: VerificationMethod
+  availableMethods?: VerificationMethods
   title?: string
   description?: string
 }

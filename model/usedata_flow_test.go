@@ -14,6 +14,10 @@ func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
 
 func seedFlowLookupData(t *testing.T) {
 	t.Helper()
+	// Administrator flow data is now role-scoped.  Seed the owner rows so the
+	// test exercises the same authoritative role lookup used in production.
+	require.NoError(t, DB.Create(&User{Id: 1, Username: "alice", AffCode: "flow-alice", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}).Error)
+	require.NoError(t, DB.Create(&User{Id: 2, Username: "bob", AffCode: "flow-bob", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}).Error)
 	require.NoError(t, DB.Create(&Channel{Id: 1, Name: "east"}).Error)
 	require.NoError(t, DB.Create(&Channel{Id: 2, Name: "west"}).Error)
 	require.NoError(t, DB.Create(&Token{Id: 11, UserId: 1, Key: "sk-primary", Name: "primary"}).Error)

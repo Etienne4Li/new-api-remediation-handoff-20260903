@@ -51,7 +51,7 @@ export type ResolvedResolutionSelection = ResolutionSelection & {
   ratioType: RatioType
 }
 
-export type ResolutionRemoval = {
+type ResolutionRemoval = {
   model: string
   ratioType: RatioType
 }
@@ -68,7 +68,7 @@ export const RATIO_SYNC_FIELDS: RatioType[] = [
   'audio_completion_ratio',
 ]
 
-export const SYNC_FIELD_ORDER: RatioType[] = [
+const SYNC_FIELD_ORDER: RatioType[] = [
   ...RATIO_SYNC_FIELDS,
   'model_price',
   'billing_mode',
@@ -119,7 +119,7 @@ export function getPreferredSyncField(
   return ratioType
 }
 
-export function getVisibleRatioTypesForSource(
+function getVisibleRatioTypesForSource(
   ratioTypes: Partial<Record<RatioType, RatioDifferenceEntry>>,
   sourceName: string,
   filter?: string
@@ -148,9 +148,7 @@ export function getAlignedRatioTypes(
   return ordered.filter((ratioType) => visible.has(ratioType))
 }
 
-export function getBillingCategory(
-  ratioType: string
-): 'price' | 'ratio' | 'tiered' {
+function getBillingCategory(ratioType: string): 'price' | 'ratio' | 'tiered' {
   if (ratioType === 'model_price') return 'price'
   if (ratioType === 'billing_mode' || ratioType === 'billing_expr') {
     return 'tiered'
@@ -277,7 +275,7 @@ function applyResolutionSelectionToDraft(
   }
 }
 
-export function resolveResolutionSelection(
+function resolveResolutionSelection(
   differences: Record<string, Partial<Record<RatioType, RatioDifferenceEntry>>>,
   selection: ResolutionSelection
 ): ResolvedResolutionSelection {
@@ -361,7 +359,7 @@ export function applyResolutionSelection(
   return applyResolutionSelections(resolutions, differences, [selection])
 }
 
-export function applyResolutionRemovals(
+function applyResolutionRemovals(
   resolutions: ResolutionsMap,
   removals: ResolutionRemoval[]
 ): ResolutionsMap {

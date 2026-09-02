@@ -1,6 +1,10 @@
 package performance_setting
 
 import (
+	"fmt"
+	"strconv"
+	"sync"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
 )
@@ -26,6 +30,15 @@ type PerformanceSetting struct {
 	MonitorDiskThreshold int `json:"monitor_disk_threshold"`
 }
 
+const (
+	// Disk cache values are MiB. A one-terabyte ceiling is intentionally
+	// generous while preventing a mistyped integer from reserving an
+	// effectively unbounded amount of local storage.
+	MaxDiskCacheSizeMB      = 1 << 20
+	MaxDiskCacheThresholdMB = MaxDiskCacheSizeMB
+	MaxMonitorThreshold     = 100
+)
+
 // 默认配置
 var performanceSetting = PerformanceSetting{
 	DiskCacheEnabled:     false,
@@ -38,6 +51,7 @@ var performanceSetting = PerformanceSetting{
 	MonitorMemoryThreshold: 90,
 	MonitorDiskThreshold:   95,
 }
+var performanceSettingMu sync.RWMutex
 
 func init() {
 	// 注册到全局配置管理器
@@ -48,24 +62,140 @@ func init() {
 
 // syncToCommon 将配置同步到 common 包
 func syncToCommon() {
+	performanceSettingMu.RLock()
+	setting := performanceSetting
+	performanceSettingMu.RUnlock()
 	common.SetDiskCacheConfig(common.DiskCacheConfig{
-		Enabled:     performanceSetting.DiskCacheEnabled,
-		ThresholdMB: performanceSetting.DiskCacheThresholdMB,
-		MaxSizeMB:   performanceSetting.DiskCacheMaxSizeMB,
-		Path:        performanceSetting.DiskCachePath,
+		Enabled: setting.DiskCacheEnabled, ThresholdMB: setting.DiskCacheThresholdMB, MaxSizeMB: setting.DiskCacheMaxSizeMB, Path: setting.DiskCachePath,
 	})
 
 	common.SetPerformanceMonitorConfig(common.PerformanceMonitorConfig{
-		Enabled:         performanceSetting.MonitorEnabled,
-		CPUThreshold:    performanceSetting.MonitorCPUThreshold,
-		MemoryThreshold: performanceSetting.MonitorMemoryThreshold,
-		DiskThreshold:   performanceSetting.MonitorDiskThreshold,
+		Enabled: setting.MonitorEnabled, CPUThreshold: setting.MonitorCPUThreshold, MemoryThreshold: setting.MonitorMemoryThreshold, DiskThreshold: setting.MonitorDiskThreshold,
 	})
 }
 
 // GetPerformanceSetting 获取性能设置
 func GetPerformanceSetting() *PerformanceSetting {
-	return &performanceSetting
+	performanceSettingMu.RLock()
+	defer performanceSettingMu.RUnlock()
+	settings := performanceSetting
+	return &settings
+}
+
+// ConfigSnapshot returns a detached value for persistence and status reads.
+func (s *PerformanceSetting) ConfigSnapshot() interface{} {
+	if s == nil {
+		return PerformanceSetting{}
+	}
+	performanceSettingMu.RLock()
+	defer performanceSettingMu.RUnlock()
+	return *s
+}
+
+func (s *PerformanceSetting) ValidateConfigMap(values map[string]string) error {
+	if s == nil {
+		return config.ValidateConfigFromMap(&PerformanceSetting{}, values)
+	}
+	performanceSettingMu.RLock()
+	candidate := *s
+	performanceSettingMu.RUnlock()
+	return applyConfig(&candidate, values)
+}
+func (s *PerformanceSetting) UpdateConfigMap(values map[string]string) error {
+	if s == nil {
+		return fmt.Errorf("performance setting must not be nil")
+	}
+	performanceSettingMu.Lock()
+	candidate := *s
+	if err := applyConfig(&candidate, values); err != nil {
+		performanceSettingMu.Unlock()
+		return err
+	}
+	*s = candidate
+	performanceSettingMu.Unlock()
+	// Only the process-global registered setting drives common's runtime
+	// configuration. Custom ConfigManager instances used by tests/tools must
+	// not mutate the global process state as a side effect.
+	if s == &performanceSetting {
+		syncToCommon()
+	}
+	return nil
+}
+func applyConfig(c *PerformanceSetting, values map[string]string) error {
+	for key, value := range values {
+		switch key {
+		case "disk_cache_enabled":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			c.DiskCacheEnabled = v
+		case "disk_cache_threshold_mb":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > MaxDiskCacheThresholdMB {
+				return fmt.Errorf("disk cache threshold must be between 0 and %d MB", MaxDiskCacheThresholdMB)
+			}
+			c.DiskCacheThresholdMB = v
+		case "disk_cache_max_size_mb":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > MaxDiskCacheSizeMB {
+				return fmt.Errorf("disk cache max size must be between 0 and %d MB", MaxDiskCacheSizeMB)
+			}
+			c.DiskCacheMaxSizeMB = v
+		case "disk_cache_path":
+			c.DiskCachePath = value
+		case "monitor_enabled":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			c.MonitorEnabled = v
+		case "monitor_cpu_threshold":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > MaxMonitorThreshold {
+				return fmt.Errorf("monitor CPU threshold must be between 0 and %d", MaxMonitorThreshold)
+			}
+			c.MonitorCPUThreshold = v
+		case "monitor_memory_threshold":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > MaxMonitorThreshold {
+				return fmt.Errorf("monitor memory threshold must be between 0 and %d", MaxMonitorThreshold)
+			}
+			c.MonitorMemoryThreshold = v
+		case "monitor_disk_threshold":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > MaxMonitorThreshold {
+				return fmt.Errorf("monitor disk threshold must be between 0 and %d", MaxMonitorThreshold)
+			}
+			c.MonitorDiskThreshold = v
+		}
+	}
+	if err := validatePerformanceSetting(*c); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePerformanceSetting(setting PerformanceSetting) error {
+	if setting.DiskCacheThresholdMB < 0 || setting.DiskCacheThresholdMB > MaxDiskCacheThresholdMB {
+		return fmt.Errorf("disk cache threshold must be between 0 and %d MB", MaxDiskCacheThresholdMB)
+	}
+	if setting.DiskCacheMaxSizeMB < 0 || setting.DiskCacheMaxSizeMB > MaxDiskCacheSizeMB {
+		return fmt.Errorf("disk cache max size must be between 0 and %d MB", MaxDiskCacheSizeMB)
+	}
+	if setting.DiskCacheMaxSizeMB > 0 && setting.DiskCacheThresholdMB > setting.DiskCacheMaxSizeMB {
+		return fmt.Errorf("disk cache threshold cannot exceed max size")
+	}
+	for name, threshold := range map[string]int{
+		"CPU":    setting.MonitorCPUThreshold,
+		"memory": setting.MonitorMemoryThreshold,
+		"disk":   setting.MonitorDiskThreshold,
+	} {
+		if threshold < 0 || threshold > MaxMonitorThreshold {
+			return fmt.Errorf("monitor %s threshold must be between 0 and %d", name, MaxMonitorThreshold)
+		}
+	}
+	return nil
 }
 
 // UpdateAndSync 更新配置并同步到 common 包

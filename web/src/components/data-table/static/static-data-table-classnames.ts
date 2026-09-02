@@ -23,11 +23,11 @@ export const staticDataTableClassNames = {
   compactTable: 'text-sm',
   compactHeaderRow: 'hover:bg-transparent',
   mutedHeaderRow:
-    '[background-color:var(--table-header)] hover:[background-color:var(--table-header-hover)]',
+    '[background-color:color-mix(in_oklch,var(--muted)_30%,var(--background))] hover:[background-color:color-mix(in_oklch,var(--muted)_30%,var(--background))]',
   compactHeaderCell:
-    'text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase',
+    'text-muted-foreground py-2 text-[10px] font-medium uppercase',
   compactHeaderCellRight:
-    'text-muted-foreground py-2 text-right text-[10px] font-medium tracking-wider uppercase',
+    'text-muted-foreground py-2 text-right text-[10px] font-medium uppercase',
   compactCell: 'py-2.5',
   compactTopCell: 'py-2.5 align-top',
   compactTopNumericCell: 'py-2.5 text-right align-top font-mono',
@@ -42,6 +42,6 @@ export const staticDataTableClassNames = {
   mutedCodeCell: 'text-muted-foreground font-mono text-sm',
   topNumericCell: 'py-2 text-right font-mono',
   mediumCell: 'font-medium',
-  actionHeaderCell: 'w-auto max-w-none text-right',
-  actionCell: 'w-auto max-w-none text-right',
+  actionHeaderCell: 'text-right',
+  actionCell: 'text-right',
 } as const

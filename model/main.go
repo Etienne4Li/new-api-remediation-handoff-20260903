@@ -1,10 +1,10 @@
 package model
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +26,42 @@ var commonFalseVal string
 
 var logKeyCol string
 var logGroupCol string
+
+const (
+	defaultSQLMaxIdleConns    = 100
+	defaultSQLMaxOpenConns    = 1000
+	defaultSQLMaxLifetimeSecs = 60
+	maxSQLPoolConnections     = 10_000
+	maxSQLLifetimeSeconds     = 30 * 24 * 60 * 60
+)
+
+func configureSQLPool(sqlDB *sql.DB) {
+	if sqlDB == nil {
+		return
+	}
+	idleConns := common.GetEnvOrDefaultBounded(
+		"SQL_MAX_IDLE_CONNS", defaultSQLMaxIdleConns, 0, maxSQLPoolConnections,
+	)
+	// database/sql treats a non-positive max-open value as unlimited. An
+	// accidental 0 or negative value is unsafe for a gateway, so use the
+	// documented finite default instead.
+	openConns := common.GetEnvOrDefaultBounded(
+		"SQL_MAX_OPEN_CONNS", defaultSQLMaxOpenConns, 1, maxSQLPoolConnections,
+	)
+	if idleConns > openConns {
+		common.SysError(fmt.Sprintf(
+			"SQL_MAX_IDLE_CONNS cannot exceed SQL_MAX_OPEN_CONNS; using %d",
+			openConns,
+		))
+		idleConns = openConns
+	}
+	lifetime := common.GetEnvOrDefaultDurationSeconds(
+		"SQL_MAX_LIFETIME", defaultSQLMaxLifetimeSecs, 0, maxSQLLifetimeSeconds,
+	)
+	sqlDB.SetMaxIdleConns(idleConns)
+	sqlDB.SetMaxOpenConns(openConns)
+	sqlDB.SetConnMaxLifetime(lifetime)
+}
 
 func initCol() {
 	// init common column names
@@ -50,58 +86,65 @@ func initCol() {
 	}
 }
 
+// mainKeyColumn resolves the reserved key column from the actual GORM
+// connection. Some package-level tests and embedders inject DB directly and
+// therefore never call initCol; returning an empty select expression in that
+// case produces invalid SQL such as "SELECT id,,key_ciphertext".
+func mainKeyColumn(db *gorm.DB) string {
+	if db != nil && db.Dialector != nil {
+		if db.Dialector.Name() == "postgres" {
+			return `"key"`
+		}
+		return "`key`"
+	}
+	if commonKeyCol != "" {
+		return commonKeyCol
+	}
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		return `"key"`
+	}
+	return "`key`"
+}
+
 var DB *gorm.DB
 
 var LOG_DB *gorm.DB
 
-func createRootAccountIfNeed() error {
-	var user User
-	//if user.Status != common.UserStatusEnabled {
-	if err := DB.First(&user).Error; err != nil {
-		common.SysLog("no user exists, create a root user for you: username is root, password is 123456")
-		hashedPassword, err := common.Password2Hash("123456")
-		if err != nil {
-			return err
-		}
-		rootUser := User{
-			Username:    "root",
-			Password:    hashedPassword,
-			Role:        common.RoleRootUser,
-			Status:      common.UserStatusEnabled,
-			DisplayName: "Root User",
-			AccessToken: nil,
-			Quota:       100000000,
-		}
-		DB.Create(&rootUser)
-	}
-	return nil
-}
-
 func CheckSetup() {
-	setup := GetSetup()
-	if setup == nil {
-		// No setup record exists, check if we have a root user
-		if RootUserExists() {
-			common.SysLog("system is not initialized, but root user exists")
-			// Create setup record
-			newSetup := Setup{
-				Version:       common.Version,
-				InitializedAt: time.Now().Unix(),
-			}
-			err := DB.Create(&newSetup).Error
-			if err != nil {
-				common.SysLog("failed to create setup record: " + err.Error())
-			}
-			constant.Setup = true
-		} else {
-			common.SysLog("system is not initialized and no root user exists")
-			constant.Setup = false
-		}
-	} else {
-		// Setup record exists, system is initialized
+	// Keep bootstrap decisions fail-closed.  The old pointer-only GetSetup
+	// helper intentionally treats a database outage like an empty table, which
+	// could make a healthy installation advertise the setup endpoint (or try to
+	// write a new marker) during a transient outage.
+	setup, err := GetSetupWithError()
+	if err != nil {
+		common.SysError("failed to read setup state: " + err.Error())
+		constant.Setup = false
+		return
+	}
+	if setup != nil {
 		common.SysLog("system is already initialized at: " + time.Unix(setup.InitializedAt, 0).String())
 		constant.Setup = true
+		return
 	}
+
+	// Older databases may contain a root account but no durable setup marker.
+	// Repair only that marker, atomically and without changing credentials or
+	// options.  A missing root leaves setup available for the first-run HTTP
+	// flow; a query/write failure keeps the process closed until it is fixed.
+	created, err := EnsureSetupMarkerForExistingRoot(common.Version)
+	if err != nil {
+		common.SysError("failed to reconcile setup state: " + err.Error())
+		constant.Setup = false
+		return
+	}
+	if created {
+		common.SysLog("reconciled setup marker for an existing root user")
+		constant.Setup = true
+		return
+	}
+
+	common.SysLog("system is not initialized and no root user exists")
+	constant.Setup = false
 }
 
 func isClickHouseDSN(dsn string) bool {
@@ -125,7 +168,10 @@ func normalizeClickHouseDSN(dsn string) string {
 }
 
 func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error) {
-	dsn := os.Getenv(envName)
+	dsn, err := common.GetEnvOrFile(envName, envName+"_FILE")
+	if err != nil {
+		return nil, "", err
+	}
 	if dsn != "" {
 		if isClickHouseDSN(dsn) {
 			if !isLog {
@@ -172,7 +218,11 @@ func InitDB() (err error) {
 	db, dbType, err := chooseDB("SQL_DSN", false)
 	if err == nil {
 		common.SetMainDatabaseType(dbType)
-		if os.Getenv("LOG_SQL_DSN") == "" {
+		logDSN, logDSNErr := common.GetEnvOrFile("LOG_SQL_DSN", "LOG_SQL_DSN_FILE")
+		if logDSNErr != nil {
+			return logDSNErr
+		}
+		if logDSN == "" {
 			common.SetLogDatabaseType(dbType)
 		}
 		initCol()
@@ -193,9 +243,7 @@ func InitDB() (err error) {
 		if err != nil {
 			return err
 		}
-		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		configureSQLPool(sqlDB)
 
 		if !common.IsMasterNode {
 			return nil
@@ -213,7 +261,11 @@ func InitDB() (err error) {
 }
 
 func InitLogDB() (err error) {
-	if os.Getenv("LOG_SQL_DSN") == "" {
+	logDSN, dsnErr := common.GetEnvOrFile("LOG_SQL_DSN", "LOG_SQL_DSN_FILE")
+	if dsnErr != nil {
+		return dsnErr
+	}
+	if logDSN == "" {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
@@ -237,9 +289,7 @@ func InitLogDB() (err error) {
 		if err != nil {
 			return err
 		}
-		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		configureSQLPool(sqlDB)
 
 		if !common.IsMasterNode {
 			return nil
@@ -306,6 +356,25 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	// Payment callbacks may arrive immediately after startup. Expand the
+	// payment order/event schema before the general AutoMigrate pass so legacy
+	// installations receive immutable checkout fields and the idempotency
+	// fence without a surprise table rewrite.
+	if err := migratePaymentSchemaExpand(); err != nil {
+		return err
+	}
+	// Recurring provider identities need a database-level uniqueness fence before
+	// any webhook can bind a subscription.  The expand migration is additive and
+	// backfills only unambiguous legacy rows.
+	if err := migrateSubscriptionProviderBindingSchemaExpand(); err != nil {
+		return err
+	}
+	// Async task polling correlates provider responses by channel/platform and
+	// upstream identity. Install the database-level fence before task rows are
+	// accepted; the regular AutoMigrate below handles fresh databases.
+	if err := migrateTaskIdentitySchemaExpand(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -317,10 +386,18 @@ func migrateDB() error {
 		&PasskeyCredential{},
 		&Option{},
 		&Redemption{},
+		&SupportTicket{},
+		&SupportTicketMessage{},
+		&SupportTicketNotificationOutbox{},
 		&Ability{},
 		&Log{},
 		&Midjourney{},
+		&MidjourneySubmitIntent{},
 		&TopUp{},
+		&PaymentEvent{},
+		&ProviderPaymentBinding{},
+		&ProviderRefundEvent{},
+		&ProviderReversalEffect{},
 		&QuotaData{},
 		&Task{},
 		&Model{},
@@ -332,7 +409,10 @@ func migrateDB() error {
 		&Checkin{},
 		&SubscriptionOrder{},
 		&UserSubscription{},
+		&SubscriptionProviderBindingRecord{},
 		&SubscriptionPreConsumeRecord{},
+		&BillingOperation{},
+		&QuotaCacheRepair{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
@@ -343,6 +423,52 @@ func migrateDB() error {
 		&AuthzRole{},
 	)
 	if err != nil {
+		return err
+	}
+	// Expand legacy credential rows only after the model migrations have added
+	// the ciphertext/hash columns.  The operation is idempotent and uses an
+	// optimistic predicate per row, so more than one new-version master can
+	// safely converge the same database. Old binaries must be stopped before
+	// this destructive plaintext-to-marker transition. Keep it before any
+	// request-serving workers are started: once startup succeeds, no legacy
+	// plaintext should remain in the primary credential tables.
+	if err := MigrateLegacyCredentials(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyChannelConfigSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyUserAccessTokens(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyRedemptionKeys(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyTaskCredentials(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyProviderStorage(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyOptionSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyTwoFASecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyCustomOAuthSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyUserSettingSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyPaymentPayloads(DB); err != nil {
+		return err
+	}
+	if err := ensureLogOrderingIndex(DB); err != nil {
+		return err
+	}
+	if err := ensureTaskUpstreamIdentityIndex(DB, taskMigrationDatabaseType(DB, common.MainDatabaseType())); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
@@ -364,6 +490,18 @@ func migrateDB() error {
 }
 
 func migrateDBFast() error {
+	// Apply additive payment columns and the provider-transaction fence before
+	// the model migrations below are started concurrently. This keeps the fast
+	// path's callback schema identical to the regular migration path.
+	if err := migratePaymentSchemaExpand(); err != nil {
+		return err
+	}
+	if err := migrateSubscriptionProviderBindingSchemaExpand(); err != nil {
+		return err
+	}
+	if err := migrateTaskIdentitySchemaExpand(); err != nil {
+		return err
+	}
 
 	var wg sync.WaitGroup
 
@@ -380,10 +518,18 @@ func migrateDBFast() error {
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
 		{&Redemption{}, "Redemption"},
+		{&SupportTicket{}, "SupportTicket"},
+		{&SupportTicketMessage{}, "SupportTicketMessage"},
+		{&SupportTicketNotificationOutbox{}, "SupportTicketNotificationOutbox"},
 		{&Ability{}, "Ability"},
 		{&Log{}, "Log"},
 		{&Midjourney{}, "Midjourney"},
+		{&MidjourneySubmitIntent{}, "MidjourneySubmitIntent"},
 		{&TopUp{}, "TopUp"},
+		{&PaymentEvent{}, "PaymentEvent"},
+		{&ProviderPaymentBinding{}, "ProviderPaymentBinding"},
+		{&ProviderRefundEvent{}, "ProviderRefundEvent"},
+		{&ProviderReversalEffect{}, "ProviderReversalEffect"},
 		{&QuotaData{}, "QuotaData"},
 		{&Task{}, "Task"},
 		{&Model{}, "Model"},
@@ -395,7 +541,10 @@ func migrateDBFast() error {
 		{&Checkin{}, "Checkin"},
 		{&SubscriptionOrder{}, "SubscriptionOrder"},
 		{&UserSubscription{}, "UserSubscription"},
+		{&SubscriptionProviderBindingRecord{}, "SubscriptionProviderBindingRecord"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
+		{&BillingOperation{}, "BillingOperation"},
+		{&QuotaCacheRepair{}, "QuotaCacheRepair"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
 		{&PerfMetric{}, "PerfMetric"},
@@ -426,6 +575,48 @@ func migrateDBFast() error {
 			return err
 		}
 	}
+	// The fast path runs table AutoMigrate calls concurrently, therefore the
+	// credential expand pass must wait until both token and channel columns are
+	// present.  It is deliberately the same idempotent pass used by migrateDB.
+	if err := MigrateLegacyCredentials(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyChannelConfigSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyUserAccessTokens(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyRedemptionKeys(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyTaskCredentials(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyProviderStorage(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyOptionSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyTwoFASecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyCustomOAuthSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyUserSettingSecrets(DB); err != nil {
+		return err
+	}
+	if err := MigrateLegacyPaymentPayloads(DB); err != nil {
+		return err
+	}
+	if err := ensureLogOrderingIndex(DB); err != nil {
+		return err
+	}
+	if err := ensureTaskUpstreamIdentityIndex(DB, taskMigrationDatabaseType(DB, common.MainDatabaseType())); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -449,7 +640,10 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{})
+	if err := LOG_DB.AutoMigrate(&Log{}); err != nil {
+		return err
+	}
+	return ensureLogOrderingIndex(LOG_DB)
 }
 
 func migrateClickHouseLogDB() error {

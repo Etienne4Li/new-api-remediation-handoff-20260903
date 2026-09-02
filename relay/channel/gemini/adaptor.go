@@ -56,8 +56,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIAudio))
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
@@ -87,6 +86,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 	}
 
+	imageN, ok := dto.BoundedImageN(request.N)
+	if !ok {
+		return nil, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxImageN)
+	}
+
 	// build gemini imagen request
 	geminiRequest := dto.GeminiImageRequest{
 		Instances: []dto.GeminiImageInstance{
@@ -95,7 +99,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 			},
 		},
 		Parameters: dto.GeminiImageParameters{
-			SampleCount:      int(lo.FromPtrOr(request.N, uint(1))),
+			SampleCount:      int(imageN),
 			AspectRatio:      aspectRatio,
 			PersonGeneration: "allow_adult", // default allow adult
 		},
@@ -191,7 +195,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, nil
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {

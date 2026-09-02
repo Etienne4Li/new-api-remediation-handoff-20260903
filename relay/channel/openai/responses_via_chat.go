@@ -2,7 +2,6 @@ package openai
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,7 +21,7 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
@@ -77,6 +76,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	streamErr := (*types.NewAPIError)(nil)
+	observation := &relaycommon.ResponsesStreamBillingObservation{}
 
 	sendEvent := func(event relayconvert.ChatToResponsesStreamEvent) bool {
 		data, err := common.Marshal(event.Payload)
@@ -84,7 +84,10 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 			return false
 		}
-		helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: event.Type}, string(data))
+		if err := helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: event.Type}, string(data)); err != nil {
+			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+			return false
+		}
 		return true
 	}
 
@@ -105,10 +108,11 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 		var chunk dto.ChatCompletionsStreamResponse
 		if err := common.UnmarshalJsonStr(data, &chunk); err != nil {
-			logger.LogError(c, "failed to unmarshal chat stream response: "+err.Error())
+			logger.LogError(c, "failed to unmarshal chat stream response: error_meta="+common.SensitiveLogMeta(err.Error()))
 			sr.Error(err)
 			return
 		}
+		observation.ObserveChatChunk(&chunk)
 
 		results, err := relayconvert.ConvertStreamResponseChunk(c, info, state, &chunk)
 		if err != nil {
@@ -129,8 +133,18 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	// Chat is the source protocol here; a scanner [DONE] is a valid terminal
+	// marker, while an EOF without it remains an incomplete stream.
+	observation.ApplyResponsesStreamBillingMarkers(c, info, streamErr != nil, true)
 
 	if streamErr != nil {
+		if observation.ObservedOutput || observation.HasUpstreamUsage {
+			usage := state.Usage()
+			if usage == nil || usage.TotalTokens == 0 {
+				usage = service.ResponseText2Usage(c, state.UsageText(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+			}
+			return usage, streamErr
+		}
 		return nil, streamErr
 	}
 

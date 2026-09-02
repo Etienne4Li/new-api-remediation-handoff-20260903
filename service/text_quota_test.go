@@ -770,6 +770,46 @@ func TestComposeTieredTextQuotaErrorFallbackUsesPreConsumedQuota(t *testing.T) {
 	require.Equal(t, 14500, quota)
 }
 
+func TestIncompleteTieredExpressionErrorKeepsConservativeQuota(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyResponsesUsageAuthoritative, false)
+	common.SetContextKey(ctx, constant.ContextKeyLocalCountTokens, true)
+
+	const reservation = 1_000_000
+	relayInfo := &relaycommon.RelayInfo{
+		IsStream:              true,
+		RelayMode:             relayconstant.RelayModeResponses,
+		FinalPreConsumedQuota: reservation,
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo:  hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+		TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+			BillingMode:               "tiered_expr",
+			ExprString:                "invalid expression",
+			EstimatedPromptTokens:     100,
+			EstimatedCompletionTokens: 9_999_900,
+			EstimatedQuotaAfterGroup:  reservation,
+		},
+	}
+	info := relayInfo
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, nil)
+	info.SetEstimatePromptTokens(37)
+
+	usage := &dto.Usage{PromptTokens: 37, CompletionTokens: 500, TotalTokens: 537}
+	params := BuildTieredTokenParams(usage, false, nil)
+	ok, conservativeQuota, result := TryTieredSettleConservative(info, params)
+	require.True(t, ok)
+	require.Nil(t, result)
+	require.Greater(t, conservativeQuota, 0)
+	require.Less(t, conservativeQuota, reservation)
+	require.True(t, shouldUseTieredTextFallback(true, conservativeQuota, result),
+		"bounded conservative quota must not be discarded when expression evaluation fails")
+}
+
 // TestTryTieredSettleRecordsClampOnOverflow guards that an oversized tiered
 // settlement both saturates the quota and records the clamp on RelayInfo, so
 // every consume path (text, audio, WSS) can surface it under admin_info.

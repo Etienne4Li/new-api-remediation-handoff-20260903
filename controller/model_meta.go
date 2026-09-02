@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,10 +24,17 @@ func GetAllModelsMeta(c *gin.Context) {
 		return
 	}
 	// 批量填充附加字段，提升列表接口性能
-	enrichModels(modelsMeta)
+	if err := enrichModels(modelsMeta); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	// 统计供应商计数（全部数据，不受分页影响）
-	vendorCounts, _ := model.GetVendorModelCounts()
+	vendorCounts, err := model.GetVendorModelCounts()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(modelsMeta)
@@ -56,8 +62,15 @@ func SearchModelsMeta(c *gin.Context) {
 		return
 	}
 	// 批量填充附加字段，提升列表接口性能
-	enrichModels(modelsMeta)
-	vendorCounts, _ := model.GetVendorModelCounts()
+	if err := enrichModels(modelsMeta); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	vendorCounts, err := model.GetVendorModelCounts()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(modelsMeta)
 	common.ApiSuccess(c, gin.H{
@@ -82,7 +95,10 @@ func GetModelMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	enrichModels([]*model.Model{&m})
+	if err := enrichModels([]*model.Model{&m}); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	common.ApiSuccess(c, &m)
 }
 
@@ -130,8 +146,13 @@ func UpdateModelMeta(c *gin.Context) {
 
 	if statusOnly {
 		// 只更新状态，防止误清空其他字段
-		if err := model.DB.Model(&model.Model{}).Where("id = ?", m.Id).Update("status", m.Status).Error; err != nil {
-			common.ApiError(c, err)
+		result := model.DB.Model(&model.Model{}).Where("id = ?", m.Id).Update("status", m.Status)
+		if result.Error != nil {
+			common.ApiError(c, result.Error)
+			return
+		}
+		if result.RowsAffected == 0 {
+			common.ApiErrorMsg(c, "模型不存在")
 			return
 		}
 	} else {
@@ -161,8 +182,13 @@ func DeleteModelMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := model.DB.Delete(&model.Model{}, id).Error; err != nil {
-		common.ApiError(c, err)
+	result := model.DB.Delete(&model.Model{}, id)
+	if result.Error != nil {
+		common.ApiError(c, result.Error)
+		return
+	}
+	if result.RowsAffected == 0 {
+		common.ApiErrorMsg(c, "模型不存在")
 		return
 	}
 	model.RefreshPricing()
@@ -170,9 +196,9 @@ func DeleteModelMeta(c *gin.Context) {
 }
 
 // enrichModels 批量填充附加信息：端点、渠道、分组、计费类型，避免 N+1 查询
-func enrichModels(models []*model.Model) {
+func enrichModels(models []*model.Model) error {
 	if len(models) == 0 {
-		return
+		return nil
 	}
 
 	// 1) 拆分精确与规则匹配
@@ -192,7 +218,10 @@ func enrichModels(models []*model.Model) {
 	}
 
 	// 2) 批量查询精确模型的绑定渠道
-	channelsByModel, _ := model.GetBoundChannelsByModelsMap(exactNames)
+	channelsByModel, err := model.GetBoundChannelsByModelsMap(exactNames)
+	if err != nil {
+		return err
+	}
 
 	// 3) 精确模型：端点从缓存、渠道批量映射、分组/计费类型从缓存
 	for name, indices := range exactIdx {
@@ -201,7 +230,7 @@ func enrichModels(models []*model.Model) {
 			mm := models[idx]
 			if mm.Endpoints == "" {
 				eps := model.GetModelSupportEndpointTypes(mm.ModelName)
-				if b, err := json.Marshal(eps); err == nil {
+				if b, err := common.Marshal(eps); err == nil {
 					mm.Endpoints = string(b)
 				}
 			}
@@ -212,7 +241,7 @@ func enrichModels(models []*model.Model) {
 	}
 
 	if len(ruleIndices) == 0 {
-		return
+		return nil
 	}
 
 	// 4) 一次性读取定价缓存，内存匹配所有规则模型
@@ -279,7 +308,10 @@ func enrichModels(models []*model.Model) {
 	for n := range allMatchedSet {
 		allMatched = append(allMatched, n)
 	}
-	matchedChannelsByModel, _ := model.GetBoundChannelsByModelsMap(allMatched)
+	matchedChannelsByModel, err := model.GetBoundChannelsByModelsMap(allMatched)
+	if err != nil {
+		return err
+	}
 
 	// 6) 回填每个规则模型的并集信息
 	for _, idx := range ruleIndices {
@@ -291,7 +323,7 @@ func enrichModels(models []*model.Model) {
 			for et := range es {
 				eps = append(eps, et)
 			}
-			if b, err := json.Marshal(eps); err == nil {
+			if b, err := common.Marshal(eps); err == nil {
 				mm.Endpoints = string(b)
 			}
 		}
@@ -336,4 +368,5 @@ func enrichModels(models []*model.Model) {
 		mm.MatchedModels = names
 		mm.MatchedCount = len(names)
 	}
+	return nil
 }

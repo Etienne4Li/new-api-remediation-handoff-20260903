@@ -2,9 +2,12 @@ package vidu
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +95,12 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	if err != nil {
 		return service.TaskErrorWrapper(err, "get_task_request_failed", http.StatusBadRequest)
 	}
+	// Metadata is merged into the provider payload after the shared request
+	// validator. Validate that merged representation here, before pre-consume,
+	// so metadata.duration cannot bypass the billing/resource boundary.
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
 	action := constant.TaskActionTextGenerate
 	if meatAction, ok := req.Metadata["action"]; ok {
 		action, _ = meatAction.(string)
@@ -163,7 +172,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 }
 
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -172,7 +181,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	var vResp responsePayload
 	err = common.Unmarshal(responseBody, &vResp)
 	if err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrap(err, fmt.Sprintf("%s", responseBody)), "unmarshal_response_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(errors.Wrap(err, fmt.Sprintf("body_meta: %s", common.SensitiveLogBody(responseBody))), "unmarshal_response_failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -191,14 +200,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 }
 
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
 	}
+	escapedTaskID, err := taskcommon.EscapeTaskIDPathSegment(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task_id: %w", err)
+	}
 
-	url := fmt.Sprintf("%s/ent/v2/tasks/%s/creations", baseUrl, taskID)
+	url := fmt.Sprintf("%s/ent/v2/tasks/%s/creations", strings.TrimRight(baseUrl, "/"), escapedTaskID)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -226,11 +246,41 @@ func (a *TaskAdaptor) GetChannelName() string {
 // ============================
 
 func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, info *relaycommon.RelayInfo) (*requestPayload, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if info == nil {
+		return nil, errors.New("relay info is nil")
+	}
+	for key := range req.Metadata {
+		if strings.EqualFold(strings.TrimSpace(key), "model") || strings.EqualFold(strings.TrimSpace(key), "model_name") {
+			return nil, errors.New("can't change model with metadata")
+		}
+	}
+	duration := req.Duration
+	if strings.TrimSpace(req.Seconds) != "" {
+		seconds, err := strconv.Atoi(strings.TrimSpace(req.Seconds))
+		if err != nil {
+			return nil, fmt.Errorf("invalid seconds: %w", err)
+		}
+		if seconds < 0 || seconds > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("seconds must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+		}
+		if duration == 0 {
+			duration = seconds
+		}
+	}
+	if duration < 0 || duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
+	if duration == 0 {
+		duration = 5
+	}
 	r := requestPayload{
 		Model:             taskcommon.DefaultString(info.UpstreamModelName, "viduq1"),
 		Images:            req.Images,
 		Prompt:            req.Prompt,
-		Duration:          taskcommon.DefaultInt(req.Duration, 5),
+		Duration:          duration,
 		Resolution:        taskcommon.DefaultString(req.Size, "1080p"),
 		MovementAmplitude: "auto",
 		Bgm:               false,
@@ -238,7 +288,46 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
+	if r.Duration <= 0 || r.Duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
+	// The channel-selected model is authoritative. UnmarshalMetadata filters
+	// model aliases, but retain an explicit invariant for future decoder changes.
+	expectedModel := taskcommon.DefaultString(info.UpstreamModelName, "viduq1")
+	if r.Model != expectedModel {
+		return nil, errors.New("can't change model with metadata")
+	}
+	if err := validateViduImageReferences(r.Images); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(r.CallbackUrl) != "" {
+		return nil, errors.New("callback_url is not supported")
+	}
 	return &r, nil
+}
+
+func validateViduImageReferences(images []string) error {
+	for index := range images {
+		trimmed := strings.TrimSpace(images[index])
+		if trimmed == "" {
+			return fmt.Errorf("images[%d] is empty", index)
+		}
+		if strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+			images[index] = trimmed
+			continue
+		}
+		parsed, err := url.Parse(trimmed)
+		if err == nil && parsed.Scheme == "" && parsed.Host == "" {
+			// Vidu also accepts raw base64 image data.
+			images[index] = trimmed
+			continue
+		}
+		if err := common.ValidateHTTPURL(trimmed); err != nil {
+			return fmt.Errorf("images[%d]: %w", index, err)
+		}
+		images[index] = trimmed
+	}
+	return nil
 }
 
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
@@ -259,7 +348,11 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	case "success":
 		taskInfo.Status = model.TaskStatusSuccess
 		if len(taskResp.Creations) > 0 {
-			taskInfo.Url = taskResp.Creations[0].URL
+			if normalized, err := taskcommon.NormalizeTaskResultURL(taskResp.Creations[0].URL); err != nil {
+				return nil, fmt.Errorf("invalid vidu video URL: %w", err)
+			} else {
+				taskInfo.Url = normalized
+			}
 		}
 	case "failed":
 		taskInfo.Status = model.TaskStatusFailure

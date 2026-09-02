@@ -27,6 +27,9 @@ import { ComboboxInput } from '@/components/ui/combobox-input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { getUserModels } from '@/lib/api'
+import { readCachedStatus } from '@/lib/status-cache'
+
+import { buildCCSwitchURL } from '../../lib/cc-switch'
 
 const APP_CONFIGS = {
   claude: {
@@ -54,38 +57,9 @@ const APP_CONFIGS = {
 type AppType = keyof typeof APP_CONFIGS
 
 function getServerAddress(): string {
-  try {
-    const raw = localStorage.getItem('status')
-    if (raw) {
-      const status = JSON.parse(raw)
-      if (status.server_address) return status.server_address
-    }
-  } catch {
-    /* empty */
-  }
+  const status = readCachedStatus<Record<string, unknown>>()
+  if (typeof status?.server_address === 'string') return status.server_address
   return window.location.origin
-}
-
-function buildCCSwitchURL(
-  app: string,
-  name: string,
-  models: Record<string, string>,
-  apiKey: string
-): string {
-  const serverAddress = getServerAddress()
-  const endpoint = app === 'codex' ? serverAddress + '/v1' : serverAddress
-  const params = new URLSearchParams()
-  params.set('resource', 'provider')
-  params.set('app', app)
-  params.set('name', name)
-  params.set('endpoint', endpoint)
-  params.set('apiKey', apiKey)
-  for (const [k, v] of Object.entries(models)) {
-    if (v) params.set(k, v)
-  }
-  params.set('homepage', serverAddress)
-  params.set('enabled', 'true')
-  return `ccswitch://v1/import?${params.toString()}`
 }
 
 interface Props {
@@ -137,11 +111,22 @@ export function CCSwitchDialog(props: Props) {
       toast.warning(t('Please select a primary model'))
       return
     }
-    const key = props.tokenKey.startsWith('sk-')
-      ? props.tokenKey
-      : `sk-${props.tokenKey}`
-    const url = buildCCSwitchURL(app, name, models, key)
-    window.open(url, '_blank')
+    const url = buildCCSwitchURL({
+      app,
+      name,
+      models,
+      apiKey: props.tokenKey,
+      serverAddress: getServerAddress(),
+    })
+    if (!url) {
+      toast.error(
+        t(
+          'Unable to generate CC Switch link. Please contact your administrator.'
+        )
+      )
+      return
+    }
+    window.open(url, '_blank', 'noopener,noreferrer')
     props.onOpenChange(false)
   }
 
@@ -196,7 +181,7 @@ export function CCSwitchDialog(props: Props) {
             onValueChange={setName}
             placeholder={currentConfig.defaultName}
             emptyText=''
-            allowCustomValue={true}
+            allowCustomValue
           />
         </div>
 

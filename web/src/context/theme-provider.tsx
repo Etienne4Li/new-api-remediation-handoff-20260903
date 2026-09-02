@@ -70,6 +70,18 @@ function resolveTheme(theme: Theme): ResolvedTheme {
   return theme === 'system' ? getSystemTheme() : theme
 }
 
+function applyDocumentTheme(theme: Theme): ResolvedTheme {
+  const nextResolvedTheme = resolveTheme(theme)
+
+  if (typeof document !== 'undefined') {
+    const root = document.documentElement
+    root.classList.remove('light', 'dark')
+    root.classList.add(nextResolvedTheme)
+  }
+
+  return nextResolvedTheme
+}
+
 function getStoredTheme(storageKey: string, fallback: Theme): Theme {
   const storedTheme = getCookie(storageKey) as Theme | undefined
   return storedTheme && THEMES.has(storedTheme) ? storedTheme : fallback
@@ -89,14 +101,10 @@ export function ThemeProvider({
   )
 
   useEffect(() => {
-    const root = window.document.documentElement
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
 
     const applyTheme = () => {
-      const nextResolvedTheme = theme === 'system' ? getSystemTheme() : theme
-      root.classList.remove('light', 'dark')
-      root.classList.add(nextResolvedTheme)
-      setResolvedTheme(nextResolvedTheme)
+      setResolvedTheme(applyDocumentTheme(theme))
     }
 
     applyTheme()
@@ -109,6 +117,7 @@ export function ThemeProvider({
   const setTheme = useCallback(
     (theme: Theme) => {
       setCookie(storageKey, theme, THEME_COOKIE_MAX_AGE)
+      setResolvedTheme(applyDocumentTheme(theme))
       _setTheme(theme)
     },
     [storageKey]
@@ -116,6 +125,7 @@ export function ThemeProvider({
 
   const resetTheme = useCallback(() => {
     removeCookie(storageKey)
+    setResolvedTheme(applyDocumentTheme(defaultTheme))
     _setTheme(defaultTheme)
   }, [defaultTheme, storageKey])
 

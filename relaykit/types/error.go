@@ -69,14 +69,15 @@ const (
 	ErrorCodeBadRequestBody ErrorCode = "bad_request_body"
 
 	// response error
-	ErrorCodeReadResponseBodyFailed ErrorCode = "read_response_body_failed"
-	ErrorCodeBadResponseStatusCode  ErrorCode = "bad_response_status_code"
-	ErrorCodeBadResponse            ErrorCode = "bad_response"
-	ErrorCodeBadResponseBody        ErrorCode = "bad_response_body"
-	ErrorCodeEmptyResponse          ErrorCode = "empty_response"
-	ErrorCodeAwsInvokeError         ErrorCode = "aws_invoke_error"
-	ErrorCodeModelNotFound          ErrorCode = "model_not_found"
-	ErrorCodePromptBlocked          ErrorCode = "prompt_blocked"
+	ErrorCodeReadResponseBodyFailed      ErrorCode = "read_response_body_failed"
+	ErrorCodeBadResponseStatusCode       ErrorCode = "bad_response_status_code"
+	ErrorCodeBadResponse                 ErrorCode = "bad_response"
+	ErrorCodeBadResponseBody             ErrorCode = "bad_response_body"
+	ErrorCodeEmptyResponse               ErrorCode = "empty_response"
+	ErrorCodeAwsInvokeError              ErrorCode = "aws_invoke_error"
+	ErrorCodeModelNotFound               ErrorCode = "model_not_found"
+	ErrorCodePromptBlocked               ErrorCode = "prompt_blocked"
+	ErrorCodeSessionBlockedByCyberPolicy ErrorCode = "session_blocked_by_cyber_policy"
 
 	// sql error
 	ErrorCodeQueryDataError  ErrorCode = "query_data_error"
@@ -264,6 +265,13 @@ func NewError(err error, errorCode ErrorCode, ops ...NewAPIErrorOptions) *NewAPI
 }
 
 func NewOpenAIError(err error, errorCode ErrorCode, statusCode int, ops ...NewAPIErrorOptions) *NewAPIError {
+	// A nil underlying error can occur when an adaptor reports an empty
+	// response without a concrete cause.  Keep the error-construction helper
+	// total: callers should receive a controlled API error instead of a panic
+	// while trying to call err.Error().
+	if err == nil {
+		err = errors.New(string(errorCode))
+	}
 	var newErr *NewAPIError
 	// 保留深层传递的 new err
 	if errors.As(err, &newErr) {
@@ -399,7 +407,16 @@ func ErrOptionWithStatusCode(statusCode int) NewAPIErrorOptions {
 func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		if kitutil.Debug.Load() {
-			fmt.Printf("ErrOptionWithHideErrMsg: %s, origin error: %s", replaceStr, e.Err)
+			// The original error may contain credentials, signed URLs, request
+			// bodies, or database connection details.  Debug mode must not turn
+			// this option into a secret-bearing stdout/stderr sink; retain only a
+			// bounded length for troubleshooting and let the host correlate the
+			// request through its normal error metadata.
+			originLen := 0
+			if e != nil && e.Err != nil {
+				originLen = len([]byte(e.Err.Error()))
+			}
+			kitutil.LogError(fmt.Sprintf("ErrOptionWithHideErrMsg: replace=%q origin_error_meta=len=%d", replaceStr, originLen))
 		}
 		e.Err = errors.New(replaceStr)
 	}

@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,19 +38,24 @@ func (p *LinuxDOProvider) GetName() string {
 }
 
 func (p *LinuxDOProvider) IsEnabled() bool {
-	return common.LinuxDOOAuthEnabled
+	return common.GetSecurityRuntimeConfig().LinuxDOOAuthEnabled
 }
 
 func (p *LinuxDOProvider) ExchangeToken(ctx context.Context, code string, c *gin.Context) (*OAuthToken, error) {
+	return p.ExchangeTokenWithVerifier(ctx, code, "", c)
+}
+
+func (p *LinuxDOProvider) ExchangeTokenWithVerifier(ctx context.Context, code, codeVerifier string, c *gin.Context) (*OAuthToken, error) {
 	if code == "" {
 		return nil, NewOAuthError(i18n.MsgOAuthInvalidCode, nil)
 	}
 
-	logger.LogDebug(ctx, "[OAuth-LinuxDO] ExchangeToken: code=%s...", code[:min(len(code), 10)])
+	logger.LogDebug(ctx, "[OAuth-LinuxDO] ExchangeToken: code_meta=%s", common.SensitiveLogMeta(code))
+	securityConfig := common.GetSecurityRuntimeConfig()
 
 	// Get access token using Basic auth
 	tokenEndpoint := common.GetEnvOrDefaultString("LINUX_DO_TOKEN_ENDPOINT", "https://connect.linux.do/oauth2/token")
-	credentials := common.LinuxDOClientId + ":" + common.LinuxDOClientSecret
+	credentials := securityConfig.LinuxDOClientID + ":" + securityConfig.LinuxDOClientSecret
 	basicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
 
 	// Get redirect URI from request
@@ -59,14 +63,23 @@ func (p *LinuxDOProvider) ExchangeToken(ctx context.Context, code string, c *gin
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	redirectURI := fmt.Sprintf("%s://%s/api/oauth/linuxdo", scheme, c.Request.Host)
+	// The provider redirects the browser to the frontend callback route. The
+	// frontend then calls /api/oauth/linuxdo, so the token exchange must use the
+	// registered browser URL (without the internal /api prefix).
+	redirectURI := fmt.Sprintf("%s://%s/oauth/linuxdo", scheme, c.Request.Host)
+	if flowRedirectURI := RedirectURIFromContext(ctx); flowRedirectURI != "" {
+		redirectURI = flowRedirectURI
+	}
 
-	logger.LogDebug(ctx, "[OAuth-LinuxDO] ExchangeToken: token_endpoint=%s, redirect_uri=%s", tokenEndpoint, redirectURI)
+	logger.LogDebug(ctx, "[OAuth-LinuxDO] ExchangeToken: token_endpoint_meta=%s, redirect_uri_meta=%s", common.SensitiveLogMeta(tokenEndpoint), common.SensitiveLogMeta(redirectURI))
 
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
 	data.Set("redirect_uri", redirectURI)
+	if codeVerifier != "" {
+		data.Set("code_verifier", codeVerifier)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -76,11 +89,11 @@ func (p *LinuxDOProvider) ExchangeToken(ctx context.Context, code string, c *gin
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{Timeout: 5 * time.Second}
+	client := newOAuthHTTPClient(5 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] ExchangeToken error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Linux DO"}, err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] ExchangeToken error_meta=%s", common.SensitiveLogMeta(err.Error())))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Linux DO"}, common.SensitiveLogMeta(err.Error()))
 	}
 	defer res.Body.Close()
 
@@ -90,14 +103,14 @@ func (p *LinuxDOProvider) ExchangeToken(ctx context.Context, code string, c *gin
 		AccessToken string `json:"access_token"`
 		Message     string `json:"message"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&tokenRes); err != nil {
+	if err := decodeOAuthJSONResponse(res, &tokenRes); err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] ExchangeToken decode error: %s", err.Error()))
 		return nil, err
 	}
 
 	if tokenRes.AccessToken == "" {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] ExchangeToken failed: %s", tokenRes.Message))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthTokenFailed, map[string]any{"Provider": "Linux DO"}, tokenRes.Message)
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] ExchangeToken failed: message_meta=%s", common.SensitiveLogMeta(tokenRes.Message)))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthTokenFailed, map[string]any{"Provider": "Linux DO"}, common.SensitiveLogMeta(tokenRes.Message))
 	}
 
 	logger.LogDebug(ctx, "[OAuth-LinuxDO] ExchangeToken success")
@@ -110,7 +123,7 @@ func (p *LinuxDOProvider) ExchangeToken(ctx context.Context, code string, c *gin
 func (p *LinuxDOProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAuthUser, error) {
 	userEndpoint := common.GetEnvOrDefaultString("LINUX_DO_USER_ENDPOINT", "https://connect.linux.do/api/user")
 
-	logger.LogDebug(ctx, "[OAuth-LinuxDO] GetUserInfo: user_endpoint=%s", userEndpoint)
+	logger.LogDebug(ctx, "[OAuth-LinuxDO] GetUserInfo: user_endpoint_meta=%s", common.SensitiveLogMeta(userEndpoint))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", userEndpoint, nil)
 	if err != nil {
@@ -119,18 +132,18 @@ func (p *LinuxDOProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{Timeout: 5 * time.Second}
+	client := newOAuthHTTPClient(5 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] GetUserInfo error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Linux DO"}, err.Error())
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] GetUserInfo error_meta=%s", common.SensitiveLogMeta(err.Error())))
+		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Linux DO"}, common.SensitiveLogMeta(err.Error()))
 	}
 	defer res.Body.Close()
 
 	logger.LogDebug(ctx, "[OAuth-LinuxDO] GetUserInfo response status: %d", res.StatusCode)
 
 	var linuxdoUser linuxdoUser
-	if err := json.NewDecoder(res.Body).Decode(&linuxdoUser); err != nil {
+	if err := decodeOAuthJSONResponse(res, &linuxdoUser); err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-LinuxDO] GetUserInfo decode error: %s", err.Error()))
 		return nil, err
 	}
@@ -144,11 +157,12 @@ func (p *LinuxDOProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 		linuxdoUser.Id, linuxdoUser.Username, linuxdoUser.Name, linuxdoUser.TrustLevel, linuxdoUser.Active, linuxdoUser.Silenced)
 
 	// Check trust level
-	if linuxdoUser.TrustLevel < common.LinuxDOMinimumTrustLevel {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if linuxdoUser.TrustLevel < securityConfig.LinuxDOMinimumTrustLevel {
 		logger.LogWarn(ctx, fmt.Sprintf("[OAuth-LinuxDO] GetUserInfo: trust level too low (required=%d, current=%d)",
-			common.LinuxDOMinimumTrustLevel, linuxdoUser.TrustLevel))
+			securityConfig.LinuxDOMinimumTrustLevel, linuxdoUser.TrustLevel))
 		return nil, &TrustLevelError{
-			Required: common.LinuxDOMinimumTrustLevel,
+			Required: securityConfig.LinuxDOMinimumTrustLevel,
 			Current:  linuxdoUser.TrustLevel,
 		}
 	}

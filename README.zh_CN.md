@@ -317,13 +317,19 @@ docker run --name new-api -d --restart always \
 | `SESSION_SECRET` | 鉴权签名密钥；所有节点必须保持一致                                           | - |
 | `SESSION_COOKIE_SECURE` | `false`/未配置时关闭 refresh/logout OriginGuard 以兼容本地 HTTP 开发代理；`true` 时启用 Secure Cookie 和严格 Origin 校验 | `false` |
 | `SESSION_COOKIE_TRUSTED_URL` | Secure 模式必填：允许调用 refresh/logout 的精确 HTTPS Origin，多个用英文逗号分隔；不是 relay CORS 白名单 | - |
-| `TRUSTED_PROXIES` | 未配置/留空时信任回环、RFC1918 和 IPv6 ULA 并输出启动告警；`none` 不信任任何代理；显式代理 IP/CIDR 列表完全替代默认值 | `127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` |
+| `CORS_ALLOWED_ORIGINS` | 浏览器跨域 API 的精确 Origin 白名单，多个用英文逗号分隔；留空时仅允许同源请求，不支持通配符、路径或域名后缀匹配 | - |
+| `CORS_ALLOW_CREDENTIALS` | 是否允许白名单 Origin 携带 Cookie/HTTP 凭据 | `true` |
+| `SECURITY_HEADERS_HSTS` | 全局 HSTS 开关；未配置时对非 localhost/IP 主机默认启用 | 自动 |
+| `SECURITY_HEADERS_HSTS_MAX_AGE` | HSTS 的 `max-age` 秒数 | `31536000` |
+| `SECURITY_HEADERS_HSTS_INCLUDE_SUBDOMAINS` | HSTS 是否包含子域名 | `false` |
+| `SECURITY_HEADERS_HSTS_PRELOAD` | 是否附加 HSTS preload 标志 | `false` |
+| `TRUSTED_PROXIES` | 未配置/留空时严格使用 TCP 直连地址并输出启动告警；`none` 同样不信任任何代理；显式 IP/CIDR 列表完全替代默认值（边缘层须清除并重建 X-Forwarded-For） | 空（严格直连） |
 | `USER_SESSION_ACTIVE_LIMIT` | 单用户最大活跃登录 Session 数 | `50` |
 | `USER_SESSION_ISSUANCE_LIMIT` | 单用户在签发窗口内可创建的 Session 总数，包含已撤销 Session | `100` |
 | `USER_SESSION_ISSUANCE_WINDOW_SECONDS` | Session 签发计数窗口（秒）；高于 revoked 保留期时自动钳制 | `86400` |
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | revoked Session 用于审计和签发计数的保留天数 | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | 全局每小时 Session 签发告警阈值；只告警，不拒绝登录 | `5000` |
-| `CRYPTO_SECRET` | 缓存键 HMAC 密钥；共享 Redis 的节点必须使用相同有效值 | 默认跟随 `SESSION_SECRET` |
+| `CRYPTO_SECRET` | 数据库静态凭据加密、指纹和缓存 HMAC 的持久根密钥；共享数据库的节点必须使用同一不可直接轮换的值 | 默认跟随 `SESSION_SECRET` |
 | `SQL_DSN` | 数据库连接字符串                                                     | - |
 | `REDIS_CONN_STRING` | Redis 连接字符串                                                  | - |
 | `STREAMING_TIMEOUT` | 流式超时时间（秒）                                                    | `300` |
@@ -405,7 +411,7 @@ docker run --name new-api -d --restart always \
 
 > [!WARNING]
 > - 所有节点必须使用同一个主数据库，并设置相同的 `SESSION_SECRET`；否则 Access Token、Refresh 会话和临时鉴权流程无法一致校验。
-> - 连接同一个 Redis 的节点还必须设置相同的 `CRYPTO_SECRET`，否则节点生成的缓存键摘要不一致，无法正确共享缓存。
+> - 共享数据库的节点必须长期保持同一个 `CRYPTO_SECRET`；它同时保护数据库静态凭据、凭据指纹和缓存键摘要。没有显式重加密迁移时，不得直接替换现有数据库的该密钥。
 
 登录 Session 和单用户活跃数/签发数限制均以数据库为权威。Redis 中的 Session 仅为短期缓存，TTL 跟随 `SYNC_FREQUENCY`（默认 60 秒），且不会超过 Session 的剩余寿命。
 

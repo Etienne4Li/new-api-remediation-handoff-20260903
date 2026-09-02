@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -11,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,6 +23,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/image/webp"
 )
+
+const maxHEIFBoxDepth = 32
 
 // FileService 统一的文件处理服务
 // 提供文件下载、解码、缓存等功能的统一入口
@@ -156,14 +160,19 @@ func CleanupFileSources(c *gin.Context) {
 // loadFromURL 从 URL 加载文件
 func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFileData, error) {
 	// 下载文件
-	var maxFileSize = constant.MaxFileDownloadMB * 1024 * 1024
+	// The URL is user-controlled and Content-Length may be omitted or wrong.
+	// Use the shared overflow-safe limit and read one sentinel byte so a
+	// chunked response cannot bypass the cap.  The previous int arithmetic
+	// could overflow for a malformed MAX_FILE_DOWNLOAD_MB value and turn the
+	// LimitReader into an effectively unbounded read.
+	maxFileSize := common.GetMaxFileDownloadBytes()
 
 	if common.DebugEnabled {
 		logger.LogDebug(c, "loadFromURL: initiating download")
 	}
 	resp, err := DoDownloadRequest(url, reason...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download file from %s: %w", url, err)
+		return nil, fmt.Errorf("failed to download file from %q: %w", common.SanitizeRequestURIForLog(url), err)
 	}
 	defer resp.Body.Close()
 
@@ -175,19 +184,27 @@ func loadFromURL(c *gin.Context, url string, reason ...string) (*types.CachedFil
 	if common.DebugEnabled {
 		logger.LogDebug(c, "loadFromURL: reading response body")
 	}
-	fileBytes, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxFileSize+1)))
+	fileBytes, err := common.ReadBodyLimited(resp.Body, resp.ContentLength, maxFileSize)
 	if err != nil {
+		if errors.Is(err, common.ErrRequestBodyTooLarge) {
+			return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", maxFileSize>>20)
+		}
 		return nil, fmt.Errorf("failed to read file content: %w", err)
-	}
-	if len(fileBytes) > maxFileSize {
-		return nil, fmt.Errorf("file size exceeds maximum allowed size: %dMB", constant.MaxFileDownloadMB)
 	}
 
 	// 转换为 base64
 	base64Data := base64.StdEncoding.EncodeToString(fileBytes)
 
-	// 智能获取 MIME 类型
-	mimeType := smartDetectMimeType(resp, url, fileBytes)
+	// Resolve the type from the downloaded bytes first. A provider-controlled
+	// header is only a bounded fallback for formats the sniffer cannot identify.
+	mimeType, mimeErr := resolveFileMIME(fileBytes,
+		resp.Header.Get("Content-Type"),
+		mimeFromContentDisposition(resp.Header.Get("Content-Disposition")),
+		guessMimeTypeFromURL(url),
+	)
+	if mimeErr != nil {
+		return nil, fmt.Errorf("unsupported file content: %w", mimeErr)
+	}
 
 	// 判断是否使用磁盘缓存
 	base64Size := int64(len(base64Data))
@@ -247,108 +264,46 @@ func writeToDiskCache(base64Data string) (string, error) {
 
 // smartDetectMimeType 智能检测 MIME 类型
 func smartDetectMimeType(resp *http.Response, url string, fileBytes []byte) string {
-	// 1. 尝试从 Content-Type header 获取
-	mimeType := resp.Header.Get("Content-Type")
-	if idx := strings.Index(mimeType, ";"); idx != -1 {
-		mimeType = strings.TrimSpace(mimeType[:idx])
-	}
-	if mimeType != "" && mimeType != "application/octet-stream" {
-		return mimeType
-	}
-
-	// 2. 尝试从 Content-Disposition header 的 filename 获取
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		parts := strings.Split(cd, ";")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(strings.ToLower(part), "filename=") {
-				name := strings.TrimSpace(strings.TrimPrefix(part, "filename="))
-				// 移除引号
-				if len(name) > 2 && name[0] == '"' && name[len(name)-1] == '"' {
-					name = name[1 : len(name)-1]
-				}
-				if dot := strings.LastIndex(name, "."); dot != -1 && dot+1 < len(name) {
-					ext := strings.ToLower(name[dot+1:])
-					if ext != "" {
-						mt := GetMimeTypeByExtension(ext)
-						if mt != "application/octet-stream" {
-							return mt
-						}
-					}
-				}
-				break
-			}
+	if resp == nil {
+		resolved, err := resolveFileMIME(fileBytes, guessMimeTypeFromURL(url))
+		if err != nil {
+			return "application/octet-stream"
 		}
+		return resolved
 	}
-
-	// 3. 尝试从 URL 路径获取扩展名
-	mt := guessMimeTypeFromURL(url)
-	if mt != "application/octet-stream" {
-		return mt
+	resolved, err := resolveFileMIME(fileBytes,
+		resp.Header.Get("Content-Type"),
+		mimeFromContentDisposition(resp.Header.Get("Content-Disposition")),
+		guessMimeTypeFromURL(url),
+	)
+	if err != nil {
+		return "application/octet-stream"
 	}
-
-	// 4. 使用 http.DetectContentType 内容嗅探
-	if len(fileBytes) > 0 {
-		sniffed := http.DetectContentType(fileBytes)
-		if sniffed != "" && sniffed != "application/octet-stream" {
-			// 去除可能的 charset 参数
-			if idx := strings.Index(sniffed, ";"); idx != -1 {
-				sniffed = strings.TrimSpace(sniffed[:idx])
-			}
-			return sniffed
-		}
-
-		// 4.5 尝试 HEIF/HEIC 检测（Go 标准库不识别）
-		if heifMime := detectHEIF(fileBytes); heifMime != "" {
-			return heifMime
-		}
-	}
-
-	// 5. 尝试作为图片解码获取格式
-	if len(fileBytes) > 0 {
-		if _, format, err := decodeImageConfig(fileBytes); err == nil && format != "" {
-			return "image/" + strings.ToLower(format)
-		}
-	}
-
-	// 最终回退
-	return "application/octet-stream"
+	return resolved
 }
 
 // loadFromBase64 从 base64 字符串加载文件
 func loadFromBase64(base64String string, providedMimeType string) (*types.CachedFileData, error) {
-	var mimeType string
-	var cleanBase64 string
-
-	// 处理 data: 前缀
-	if strings.HasPrefix(base64String, "data:") {
-		idx := strings.Index(base64String, ",")
-		if idx != -1 {
-			header := base64String[:idx]
-			cleanBase64 = base64String[idx+1:]
-
-			if strings.Contains(header, ":") && strings.Contains(header, ";") {
-				mimeStart := strings.Index(header, ":") + 1
-				mimeEnd := strings.Index(header, ";")
-				if mimeStart < mimeEnd {
-					mimeType = header[mimeStart:mimeEnd]
-				}
-			}
-		} else {
-			cleanBase64 = base64String
+	cleanBase64, mimeType, err := parseBase64DataURL(base64String)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(providedMimeType) != "" {
+		mimeType, err = validateFileMIMEDeclaration(providedMimeType)
+		if err != nil {
+			return nil, err
 		}
-	} else {
-		cleanBase64 = base64String
 	}
 
-	if providedMimeType != "" {
-		mimeType = providedMimeType
-	}
-
-	decodedData, err := base64.StdEncoding.DecodeString(cleanBase64)
+	decodedData, err := decodeBase64ImagePayload(cleanBase64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
 	}
+	resolvedMIME, err := resolveFileMIME(decodedData, mimeType)
+	if err != nil {
+		return nil, err
+	}
+	mimeType = resolvedMIME
 
 	base64Size := int64(len(cleanBase64))
 	var cachedData *types.CachedFileData
@@ -398,7 +353,7 @@ func GetImageConfig(c *gin.Context, source types.FileSource) (image.Config, stri
 	if err != nil {
 		return image.Config{}, "", fmt.Errorf("failed to get base64 data: %w", err)
 	}
-	decodedData, err := base64.StdEncoding.DecodeString(base64Str)
+	decodedData, err := decodeBase64ImagePayload(base64Str)
 	if err != nil {
 		return image.Config{}, "", fmt.Errorf("failed to decode base64 for image config: %w", err)
 	}
@@ -467,12 +422,18 @@ func decodeImageConfig(data []byte) (image.Config, string, error) {
 
 	config, format, err := image.DecodeConfig(reader)
 	if err == nil {
+		if dimensionErr := validateImageDimensions(config); dimensionErr != nil {
+			return image.Config{}, "", dimensionErr
+		}
 		return config, format, nil
 	}
 
 	reader.Seek(0, io.SeekStart)
 	config, err = webp.DecodeConfig(reader)
 	if err == nil {
+		if dimensionErr := validateImageDimensions(config); dimensionErr != nil {
+			return image.Config{}, "", dimensionErr
+		}
 		return config, "webp", nil
 	}
 
@@ -483,7 +444,11 @@ func decodeImageConfig(data []byte) (image.Config, string, error) {
 			formatName = "heic"
 		}
 		if w, h, ok := parseHEIFDimensions(data); ok {
-			return image.Config{Width: w, Height: h}, formatName, nil
+			config := image.Config{Width: w, Height: h}
+			if dimensionErr := validateImageDimensions(config); dimensionErr != nil {
+				return image.Config{}, "", dimensionErr
+			}
+			return config, formatName, nil
 		}
 		return image.Config{}, "", fmt.Errorf("failed to decode HEIF/HEIC image dimensions")
 	}
@@ -503,6 +468,8 @@ func detectHEIF(data []byte) string {
 	}
 	brand := string(data[8:12])
 	switch brand {
+	case "avif", "avis":
+		return "image/avif"
 	case "heic", "heix", "hevc", "hevx", "heim", "heis":
 		return "image/heic"
 	case "mif1", "msf1":
@@ -523,25 +490,29 @@ func parseHEIFDimensions(data []byte) (int, int, bool) {
 	// Walk top-level boxes to find "meta"
 	offset := 0
 	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		boxSizeRaw := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
 		boxType := string(data[offset+4 : offset+8])
 		headerLen := 8
 
-		if boxSize == 1 {
+		if boxSizeRaw == 1 {
 			// 64-bit extended size
 			if offset+16 > size {
 				break
 			}
-			boxSize = int(binary.BigEndian.Uint64(data[offset+8 : offset+16]))
+			boxSizeRaw = binary.BigEndian.Uint64(data[offset+8 : offset+16])
 			headerLen = 16
-		} else if boxSize == 0 {
+		} else if boxSizeRaw == 0 {
 			// box extends to end of data
-			boxSize = size - offset
+			boxSizeRaw = uint64(size - offset)
 		}
 
-		if boxSize < headerLen || offset+boxSize > size {
+		// Check against the remaining input before converting to int. An
+		// extended-size box can otherwise wrap on 32-bit/64-bit platforms and
+		// make the offset walk backwards or escape the buffer.
+		if boxSizeRaw < uint64(headerLen) || boxSizeRaw > uint64(size-offset) {
 			break
 		}
+		boxSize := int(boxSizeRaw)
 
 		if boxType == "meta" {
 			// meta is a full box: 4 bytes version/flags after header
@@ -559,27 +530,35 @@ func parseHEIFDimensions(data []byte) (int, int, bool) {
 // findISPE recursively searches for the ispe box within container boxes.
 // Path: meta -> iprp -> ipco -> ispe
 func findISPE(data []byte) (int, int, bool) {
+	return findISPEAtDepth(data, 0)
+}
+
+func findISPEAtDepth(data []byte, depth int) (int, int, bool) {
+	if depth > maxHEIFBoxDepth {
+		return 0, 0, false
+	}
 	offset := 0
 	size := len(data)
 	for offset+8 <= size {
-		boxSize := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		boxSizeRaw := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
 		boxType := string(data[offset+4 : offset+8])
-		if boxSize < 8 || offset+boxSize > size {
+		if boxSizeRaw < 8 || boxSizeRaw > uint64(size-offset) {
 			break
 		}
+		boxSize := int(boxSizeRaw)
 		content := data[offset+8 : offset+boxSize]
 		switch boxType {
 		case "iprp", "ipco":
-			if w, h, ok := findISPE(content); ok {
+			if w, h, ok := findISPEAtDepth(content, depth+1); ok {
 				return w, h, true
 			}
 		case "ispe":
 			// ispe is a full box: 4 bytes version/flags, then 4 bytes width, 4 bytes height
 			if len(content) >= 12 {
-				w := int(binary.BigEndian.Uint32(content[4:8]))
-				h := int(binary.BigEndian.Uint32(content[8:12]))
-				if w > 0 && h > 0 {
-					return w, h, true
+				w := binary.BigEndian.Uint32(content[4:8])
+				h := binary.BigEndian.Uint32(content[8:12])
+				if w > 0 && h > 0 && w <= maxImageDimension && h <= maxImageDimension {
+					return int(w), int(h), true
 				}
 			}
 		}
@@ -589,14 +568,13 @@ func findISPE(data []byte) (int, int, bool) {
 }
 
 // guessMimeTypeFromURL 从 URL 猜测 MIME 类型
-func guessMimeTypeFromURL(url string) string {
-	cleanedURL := url
-	if q := strings.Index(cleanedURL, "?"); q != -1 {
-		cleanedURL = cleanedURL[:q]
+func guessMimeTypeFromURL(rawURL string) string {
+	path := rawURL
+	if parsed, err := neturl.Parse(rawURL); err == nil && parsed.Path != "" {
+		path = parsed.Path
 	}
-
-	if slash := strings.LastIndex(cleanedURL, "/"); slash != -1 && slash+1 < len(cleanedURL) {
-		last := cleanedURL[slash+1:]
+	if slash := strings.LastIndex(path, "/"); slash != -1 && slash+1 < len(path) {
+		last := path[slash+1:]
 		if dot := strings.LastIndex(last, "."); dot != -1 && dot+1 < len(last) {
 			ext := strings.ToLower(last[dot+1:])
 			return GetMimeTypeByExtension(ext)

@@ -16,10 +16,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+
 
 import { SYSTEM_SETTINGS_VIEW } from '../config/system-settings.config'
-import type { NavGroup, SidebarView } from '../types'
+import type { SidebarView } from '../types'
+
+/**
+ * Registered nested sidebar views.
+ *
+ * Each entry describes a contextual sidebar that replaces the root
+ * navigation when the user enters that workspace (Vercel-style
+ * "drill-in" pattern). Add new entries here to register a new view.
+ *
+ * Match priority is array order; the first matching `pathPattern` wins.
+ */
 
 /**
  * Registered nested sidebar views.
@@ -50,10 +60,3 @@ export function resolveSidebarView(pathname: string): SidebarView | null {
  * @returns Nav groups for the matched view, or `null` if no nested view
  *          matches (callers should then fall back to root nav groups).
  */
-export function getNavGroupsForPath(
-  pathname: string,
-  t: TFunction
-): NavGroup[] | null {
-  const view = resolveSidebarView(pathname)
-  return view ? view.getNavGroups(t) : null
-}

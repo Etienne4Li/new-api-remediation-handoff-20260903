@@ -22,12 +22,15 @@ import (
 func ResponseText2Usage(c *gin.Context, responseText string, modeName string, promptTokens int) *dto.Usage {
 	common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 	usage := &dto.Usage{}
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
 	usage.PromptTokens = promptTokens
 	usage.CompletionTokens = EstimateTokenByModel(modeName, responseText)
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	usage.TotalTokens = safeTokenTotal(usage.PromptTokens, usage.CompletionTokens)
 	return usage
 }
 
 func ValidUsage(usage *dto.Usage) bool {
-	return usage != nil && (usage.PromptTokens != 0 || usage.CompletionTokens != 0)
+	return usage != nil && (usage.PromptTokens > 0 || usage.CompletionTokens > 0)
 }

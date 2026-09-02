@@ -290,6 +290,7 @@ func ListLoginSessions(userID int, currentSID string) ([]LoginSessionView, error
 }
 
 func WriteRefreshCookie(c *gin.Context, rawToken string) {
+	cookieConfig := common.GetSessionCookieConfig()
 	expiresAt := time.Now().Add(LoginSessionTTL)
 	if sid, _, ok := splitRefreshToken(rawToken); ok {
 		if session, err := model.GetUserSessionCached(sid); err == nil && session.ExpiresAt > time.Now().Unix() {
@@ -307,12 +308,13 @@ func WriteRefreshCookie(c *gin.Context, rawToken string) {
 		MaxAge:   maxAge,
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   common.SessionCookieSecure,
+		Secure:   cookieConfig.Secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
 func ClearRefreshCookie(c *gin.Context) {
+	cookieConfig := common.GetSessionCookieConfig()
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     RefreshCookieName,
 		Value:    "",
@@ -320,7 +322,7 @@ func ClearRefreshCookie(c *gin.Context) {
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),
 		HttpOnly: true,
-		Secure:   common.SessionCookieSecure,
+		Secure:   cookieConfig.Secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }

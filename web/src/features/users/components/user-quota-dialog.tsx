@@ -49,7 +49,7 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
 
-  const amountValue = parseFloat(amount) || 0
+  const amountValue = Number.parseFloat(amount) || 0
   const quotaValue = parseQuotaFromDollars(Math.abs(amountValue))
 
   const getPreviewText = () => {
@@ -134,28 +134,32 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
         <div className='space-y-2'>
           <Label>{t('Mode')}</Label>
           <div className='flex gap-1'>
-            {(['add', 'subtract', 'override'] as const).map((m) => (
-              <Button
-                key={m}
-                type='button'
-                variant='outline'
-                size='sm'
-                className={cn(
-                  mode === m &&
-                    'bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
-                )}
-                onClick={() => {
-                  setMode(m)
-                  setAmount('')
-                }}
-              >
-                {m === 'add'
-                  ? t('Add')
-                  : m === 'subtract'
-                    ? t('Subtract')
-                    : t('Override')}
-              </Button>
-            ))}
+            {(['add', 'subtract', 'override'] as const).map((m) => {
+              let label = t('Override')
+              if (m === 'add') {
+                label = t('Add')
+              } else if (m === 'subtract') {
+                label = t('Subtract')
+              }
+              return (
+                <Button
+                  key={m}
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  className={cn(
+                    mode === m &&
+                      'bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
+                  )}
+                  onClick={() => {
+                    setMode(m)
+                    setAmount('')
+                  }}
+                >
+                  {label}
+                </Button>
+              )
+            })}
           </div>
         </div>
 

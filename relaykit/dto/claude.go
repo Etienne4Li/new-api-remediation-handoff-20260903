@@ -243,7 +243,7 @@ type OutputConfigForEffort struct {
 func (c *ClaudeRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	maxTokens := 0
 	if c.MaxTokens != nil {
-		maxTokens = int(*c.MaxTokens)
+		maxTokens = types.SaturatingUintToInt(*c.MaxTokens)
 	}
 	var tokenCountMeta = types.TokenCountMeta{
 		TokenType: types.TokenTypeTokenizer,
@@ -413,7 +413,7 @@ func (c *ClaudeRequest) GetTools() []any {
 
 func (c *ClaudeRequest) GetEfforts() string {
 	var OutputConfig OutputConfigForEffort
-	if err := json.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
+	if err := kitutil.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
 		effort := OutputConfig.Effort
 		return effort
 	}
@@ -592,7 +592,7 @@ func (u *ClaudeUsage) GetCacheCreationTotalTokens() int {
 	if u.CacheCreationInputTokens > 0 {
 		return u.CacheCreationInputTokens
 	}
-	return u.GetCacheCreation5mTokens() + u.GetCacheCreation1hTokens()
+	return types.SaturatingAddNonNegativeInt(u.GetCacheCreation5mTokens(), u.GetCacheCreation1hTokens())
 }
 
 type ClaudeServerToolUse struct {

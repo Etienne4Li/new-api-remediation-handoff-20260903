@@ -16,13 +16,30 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import {
+  Activity,
+  AlertCircle,
+  Layers3,
+  Plus,
+  Receipt,
+  RefreshCw,
+  ShieldCheck,
+} from 'lucide-react'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { getSelf } from '@/lib/api'
+import { formatQuota } from '@/lib/format'
 
 import { AffiliateRewardsCard } from './components/affiliate-rewards-card'
 import { BillingHistoryDialog } from './components/dialogs/billing-history-dialog'
@@ -53,16 +70,89 @@ import type {
   PresetAmount,
   CreemProduct,
   WaffoPayMethod,
+  TopupInfo,
 } from './types'
 
 interface WalletProps {
   initialShowHistory?: boolean
 }
 
+function WalletSignalStrip(props: {
+  user: UserWalletData | null
+  topupInfo: TopupInfo | null
+  loading: boolean
+}) {
+  const { t } = useTranslation()
+  const paymentMethodCount =
+    (props.topupInfo?.pay_methods?.length ?? 0) +
+    (props.topupInfo?.waffo_pay_methods?.length ?? 0) +
+    (props.topupInfo?.enable_creem_topup ? 1 : 0)
+  const signals = [
+    {
+      label: t('Current Balance'),
+      value: props.loading
+        ? t('Loading...')
+        : formatQuota(props.user?.quota ?? 0),
+      icon: Activity,
+      tone: 'text-success',
+    },
+    {
+      label: t('API Requests'),
+      value: props.loading
+        ? t('Loading...')
+        : Number(props.user?.request_count ?? 0).toLocaleString(),
+      icon: Layers3,
+      tone: 'text-info',
+    },
+    {
+      label: t('Group'),
+      value: props.loading ? t('Loading...') : props.user?.group || 'default',
+      icon: ShieldCheck,
+      tone: 'text-warning',
+    },
+    {
+      label: t('Payment Method'),
+      value: props.loading ? t('Loading...') : String(paymentMethodCount),
+      icon: Receipt,
+      tone: 'text-primary',
+    },
+  ]
+
+  return (
+    <section
+      aria-label={t('Billing')}
+      className='border-border/80 bg-muted/10 overflow-hidden rounded-lg border'
+    >
+      <dl className='bg-border grid grid-cols-2 gap-px sm:grid-cols-4'>
+        {signals.map((signal) => (
+          <div
+            key={signal.label}
+            className='bg-background/90 flex min-w-0 items-center gap-2.5 px-3 py-2.5 sm:px-4 sm:py-3'
+          >
+            <signal.icon
+              className={`size-4 shrink-0 ${signal.tone}`}
+              aria-hidden='true'
+            />
+            <div className='min-w-0'>
+              <dt className='text-muted-foreground truncate text-[10px] font-medium uppercase'>
+                {signal.label}
+              </dt>
+              <dd className='text-foreground mt-0.5 truncate font-mono text-sm font-semibold tabular-nums'>
+                {signal.value}
+              </dd>
+            </div>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
 export function Wallet(props: WalletProps) {
   const { t } = useTranslation()
   const [user, setUser] = useState<UserWalletData | null>(null)
   const [userLoading, setUserLoading] = useState(true)
+  const [userError, setUserError] = useState(false)
   const [topupAmount, setTopupAmount] = useState(0)
   const [selectedPreset, setSelectedPreset] = useState<number | null>(null)
   const [selectedPaymentMethod, setSelectedPaymentMethod] =
@@ -79,10 +169,17 @@ export function Wallet(props: WalletProps) {
   const [selectedCreemProduct, setSelectedCreemProduct] =
     useState<CreemProduct | null>(null)
   const [showSubscriptionPanel, setShowSubscriptionPanel] = useState(true)
+  const addFundsRef = useRef<HTMLDivElement>(null)
 
   const { status } = useStatus()
   const { currency } = useSystemConfig()
-  const { topupInfo, presetAmounts, loading: topupLoading } = useTopupInfo()
+  const {
+    topupInfo,
+    presetAmounts,
+    loading: topupLoading,
+    error: topupError,
+    refetch: refetchTopupInfo,
+  } = useTopupInfo()
 
   // Calculate effective exchange rate - when display type is USD, use rate of 1
   const effectiveUsdExchangeRate = useMemo(() => {
@@ -113,11 +210,15 @@ export function Wallet(props: WalletProps) {
   const fetchUser = useCallback(async () => {
     try {
       setUserLoading(true)
+      setUserError(false)
       const response = await getSelf()
       if (response.success && response.data) {
         setUser(response.data as UserWalletData)
+      } else {
+        setUserError(true)
       }
     } catch (error) {
+      setUserError(true)
       // eslint-disable-next-line no-console
       console.error('Failed to fetch user data:', error)
     } finally {
@@ -125,12 +226,19 @@ export function Wallet(props: WalletProps) {
     }
   }, [])
 
+  const retryWalletData = useCallback(() => {
+    if (userError) void fetchUser()
+    if (topupError) void refetchTopupInfo()
+  }, [fetchUser, refetchTopupInfo, topupError, userError])
+
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data load owns the loading state
     fetchUser()
   }, [fetchUser])
 
   useEffect(() => {
     if (props.initialShowHistory) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- route state intentionally opens the dialog on mount
       setBillingDialogOpen(true)
       window.history.replaceState({}, '', window.location.pathname)
     }
@@ -282,12 +390,80 @@ export function Wallet(props: WalletProps) {
     []
   )
 
+  const handleShowAddFunds = useCallback(() => {
+    const addFunds = addFundsRef.current
+    if (!addFunds) return
+
+    addFunds.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    window.requestAnimationFrame(() => {
+      const amountInput = addFunds.querySelector<HTMLInputElement>(
+        '#topup-amount:not(:disabled)'
+      )
+      if (amountInput) {
+        amountInput.focus({ preventScroll: true })
+      } else {
+        addFunds.focus({ preventScroll: true })
+      }
+    })
+  }, [])
+
   return (
     <>
       <SectionPageLayout>
         <SectionPageLayout.Title>{t('Wallet')}</SectionPageLayout.Title>
+        <SectionPageLayout.Description>
+          {t('Top up balance and view billing history.')}
+        </SectionPageLayout.Description>
+        <SectionPageLayout.Actions>
+          <Button
+            type='button'
+            size='sm'
+            variant='outline'
+            onClick={() => setBillingDialogOpen(true)}
+          >
+            <Receipt data-icon='inline-start' />
+            {t('Order History')}
+          </Button>
+          <Button type='button' size='sm' onClick={handleShowAddFunds}>
+            <Plus data-icon='inline-start' />
+            {t('Add Funds')}
+          </Button>
+        </SectionPageLayout.Actions>
+        <SectionPageLayout.FeatureStrip>
+          <div className='mt-4'>
+            <WalletSignalStrip
+              user={user}
+              topupInfo={topupInfo}
+              loading={userLoading || topupLoading}
+            />
+          </div>
+        </SectionPageLayout.FeatureStrip>
         <SectionPageLayout.Content>
-          <div className='mx-auto flex w-full max-w-7xl flex-col gap-4 sm:gap-5'>
+          <div className='mx-auto flex w-full max-w-7xl flex-col gap-5'>
+            {(userError || topupError) && (
+              <Alert variant='destructive'>
+                <AlertCircle aria-hidden='true' />
+                <AlertTitle>{t('Unable to load wallet data')}</AlertTitle>
+                <AlertDescription>
+                  {t(
+                    'Some billing data could not be loaded. Retry before making a payment.'
+                  )}
+                </AlertDescription>
+                <AlertAction>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={retryWalletData}
+                    disabled={userLoading || topupLoading}
+                  >
+                    <RefreshCw data-icon='inline-start' />
+                    {t('Retry')}
+                  </Button>
+                </AlertAction>
+              </Alert>
+            )}
+
             <WalletStatsCard user={user} loading={userLoading} />
 
             <div
@@ -297,7 +473,13 @@ export function Wallet(props: WalletProps) {
                   : 'grid gap-4'
               }
             >
-              <div id='wallet-add-funds' className='scroll-mt-4'>
+              <div
+                ref={addFundsRef}
+                id='wallet-add-funds'
+                tabIndex={-1}
+                aria-label={t('Add Funds')}
+                className='scroll-mt-4 outline-none'
+              >
                 <RechargeFormCard
                   topupInfo={topupInfo}
                   presetAmounts={presetAmounts}
@@ -317,7 +499,6 @@ export function Wallet(props: WalletProps) {
                   loading={topupLoading}
                   priceRatio={(status?.price as number) || 1}
                   usdExchangeRate={effectiveUsdExchangeRate}
-                  onOpenBilling={() => setBillingDialogOpen(true)}
                   creemProducts={topupInfo?.creem_products}
                   enableCreemTopup={topupInfo?.enable_creem_topup}
                   onCreemProductSelect={handleCreemProductSelect}

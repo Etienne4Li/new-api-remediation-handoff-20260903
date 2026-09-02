@@ -368,8 +368,12 @@ export function OAuthSection(props: OAuthSectionProps) {
 
       <SettingsSection title={t('OAuth Integrations')}>
         <Form {...form}>
+          {/* React Hook Form reads its refs only when the submit handler runs. */}
+          {/* eslint-disable-next-line react-hooks/refs */}
           <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
             <SettingsPageFormActions
+              // React Hook Form reads its refs only when this handler runs.
+              // eslint-disable-next-line react-hooks/refs
               onSave={form.handleSubmit(onSubmit)}
               onReset={handleReset}
               isSaving={updateOption.isPending}

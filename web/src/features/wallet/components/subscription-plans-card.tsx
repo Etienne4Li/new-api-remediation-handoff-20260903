@@ -224,6 +224,7 @@ export function SubscriptionPlansCard({
   const getRemainingDays = (sub: UserSubscriptionRecord) => {
     const endTime = sub?.subscription?.end_time || 0
     if (!endTime) return 0
+    // eslint-disable-next-line react-hooks/purity -- display-only relative time is evaluated on render
     const now = Date.now() / 1000
     return Math.max(0, Math.ceil((endTime - now) / 86400))
   }
@@ -237,7 +238,13 @@ export function SubscriptionPlansCard({
 
   if (loading) {
     return (
-      <Card data-card-hover='false' className='gap-0 overflow-hidden py-0'>
+      <Card
+        data-card-hover='false'
+        role='status'
+        aria-label={t('Subscription Plans')}
+        aria-busy='true'
+        className='gap-0 overflow-hidden py-0 shadow-sm'
+      >
         <CardHeader className='border-b p-3 !pb-3 sm:p-5 sm:!pb-5'>
           <Skeleton className='h-6 w-32' />
         </CardHeader>
@@ -265,15 +272,23 @@ export function SubscriptionPlansCard({
         icon={<Crown className='h-4 w-4' />}
         iconTone='warning'
         disableHoverEffect
+        className='shadow-sm'
+        headerClassName='bg-muted/10'
         contentClassName='space-y-4 sm:space-y-5'
       >
         {/* My subscriptions & billing preference */}
-        <div className='rounded-xl border p-3 sm:p-4'>
+        <section
+          aria-labelledby='wallet-subscription-status'
+          className='bg-muted/15 rounded-lg border p-3 sm:p-4'
+        >
           <div className='flex flex-wrap items-center justify-between gap-2.5 sm:gap-3'>
             <div className='flex min-w-0 flex-wrap items-center gap-2'>
-              <span className='text-sm font-medium'>
+              <h3
+                id='wallet-subscription-status'
+                className='text-sm font-medium'
+              >
                 {t('My Subscriptions')}
-              </span>
+              </h3>
               <span className='flex items-center gap-1.5 text-xs font-medium'>
                 <span
                   className={cn(
@@ -366,11 +381,14 @@ export function SubscriptionPlansCard({
                 </SelectContent>
               </Select>
               <Button
+                type='button'
                 variant='ghost'
                 size='icon'
                 className='h-8 w-8'
                 onClick={handleRefresh}
                 disabled={refreshing}
+                aria-label={t('Refresh')}
+                title={t('Refresh')}
               >
                 <RefreshCw
                   className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`}
@@ -407,6 +425,7 @@ export function SubscriptionPlansCard({
                     planTitleMap.get(subscription?.plan_id) || ''
                   const remainDays = getRemainingDays(sub)
                   const usagePercent = getUsagePercent(sub)
+                  // eslint-disable-next-line react-hooks/purity -- status is display-only and refreshes with component data
                   const now = Date.now() / 1000
                   const isExpired = (subscription?.end_time || 0) < now
                   const isCancelled = subscription?.status === 'cancelled'
@@ -519,7 +538,7 @@ export function SubscriptionPlansCard({
               {t('Subscribe to a plan for model access')}
             </p>
           )}
-        </div>
+        </section>
 
         {/* Available plans grid */}
         {plans.length > 0 ? (
@@ -549,12 +568,14 @@ export function SubscriptionPlansCard({
               ].filter(Boolean) as string[]
 
               return (
-                <Card
+                <div
                   key={plan.id}
-                  data-card-hover='false'
-                  className={cn(isPopular && 'border-primary/70 shadow-sm')}
+                  className={cn(
+                    'bg-card flex rounded-lg border',
+                    isPopular && 'border-primary/70 shadow-sm'
+                  )}
                 >
-                  <CardContent className='flex h-full flex-col p-3.5 sm:p-4'>
+                  <div className='flex h-full w-full flex-col p-3.5 sm:p-4'>
                     <div className='mb-2 flex items-start justify-between gap-3'>
                       <div className='min-w-0'>
                         <h4 className='truncate font-semibold'>
@@ -601,7 +622,12 @@ export function SubscriptionPlansCard({
                     {reached ? (
                       <Tooltip>
                         <TooltipTrigger render={<div />}>
-                          <Button variant='outline' className='w-full' disabled>
+                          <Button
+                            type='button'
+                            variant='outline'
+                            className='w-full'
+                            disabled
+                          >
                             {t('Limit Reached')}
                           </Button>
                         </TooltipTrigger>
@@ -611,6 +637,7 @@ export function SubscriptionPlansCard({
                       </Tooltip>
                     ) : (
                       <Button
+                        type='button'
                         variant='outline'
                         className='w-full'
                         onClick={() => {
@@ -621,8 +648,8 @@ export function SubscriptionPlansCard({
                         {t('Subscribe Now')}
                       </Button>
                     )}
-                  </CardContent>
-                </Card>
+                  </div>
+                </div>
               )
             })}
           </div>

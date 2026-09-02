@@ -46,7 +46,8 @@ var (
 )
 
 func TelegramBindStart(c *gin.Context) {
-	if !common.TelegramOAuthEnabled {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if !securityConfig.TelegramOAuthEnabled {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "管理员未开启通过 Telegram 登录以及注册",
 			"success": false,
@@ -82,12 +83,13 @@ func TelegramBindStart(c *gin.Context) {
 }
 
 func TelegramBind(c *gin.Context) {
-	if !common.TelegramOAuthEnabled {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if !securityConfig.TelegramOAuthEnabled {
 		telegramBindFailure(c, telegramBindErrorDisabled)
 		return
 	}
 	params := c.Request.URL.Query()
-	telegramId, err := verifyTelegramAuthorization(params, common.TelegramBotToken, time.Now())
+	telegramId, err := verifyTelegramAuthorization(params, securityConfig.TelegramBotToken, time.Now())
 	if err != nil {
 		common.SysLog("TelegramBind authorization failed: " + err.Error())
 		telegramBindFailure(c, telegramBindErrorInvalidRequest)
@@ -234,7 +236,8 @@ func telegramBindFailure(c *gin.Context, errorCode string) {
 }
 
 func TelegramLogin(c *gin.Context) {
-	if !common.TelegramOAuthEnabled {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if !securityConfig.TelegramOAuthEnabled {
 		c.JSON(200, gin.H{
 			"message": "管理员未开启通过 Telegram 登录以及注册",
 			"success": false,
@@ -242,9 +245,9 @@ func TelegramLogin(c *gin.Context) {
 		return
 	}
 	params := c.Request.URL.Query()
-	telegramId, err := verifyTelegramAuthorization(params, common.TelegramBotToken, time.Now())
+	telegramId, err := verifyTelegramAuthorization(params, securityConfig.TelegramBotToken, time.Now())
 	if err != nil {
-		common.SysLog("TelegramLogin authorization failed: " + err.Error())
+		common.SysLog("TelegramLogin authorization failed error_meta=" + common.SensitiveLogMeta(err.Error()))
 		c.JSON(200, gin.H{
 			"message": "无效的请求",
 			"success": false,
@@ -255,7 +258,7 @@ func TelegramLogin(c *gin.Context) {
 	user := model.User{TelegramId: telegramId}
 	if err := user.FillUserByTelegramId(); err != nil {
 		c.JSON(200, gin.H{
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 			"success": false,
 		})
 		return

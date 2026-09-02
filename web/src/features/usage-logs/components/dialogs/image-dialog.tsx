@@ -16,12 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
+import { api } from '@/lib/api'
 
 interface ImageDialogProps {
   imageUrl: string
@@ -39,6 +40,73 @@ export function ImageDialog({
   const { t } = useTranslation()
   const [isLoading, setIsLoading] = useState(true)
   const [hasError, setHasError] = useState(false)
+  const [renderedImageUrl, setRenderedImageUrl] = useState<string>()
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | undefined
+
+    const loadImage = async () => {
+      if (cancelled) return
+
+      setIsLoading(true)
+      setHasError(false)
+      setRenderedImageUrl(undefined)
+
+      if (!open) return
+
+      let parsedUrl: URL
+      try {
+        parsedUrl = new URL(imageUrl, window.location.href)
+      } catch {
+        setHasError(true)
+        setIsLoading(false)
+        return
+      }
+
+      // The MJ image endpoint is authenticated. Fetch only the known proxy path
+      // on the current origin through the shared API client so its current
+      // Bearer token is attached, then render an object URL. Never attach that
+      // token to a third-party URL. The segment check also permits a reverse
+      // proxy prefix (for example /newapi/mj/image/...).
+      const isMidjourneyProxyPath = /\/mj\/image\/[^/]+$/.test(
+        parsedUrl.pathname
+      )
+      if (
+        parsedUrl.origin !== window.location.origin ||
+        !isMidjourneyProxyPath
+      ) {
+        setRenderedImageUrl(imageUrl)
+        return
+      }
+
+      try {
+        const response = await api.get<Blob>(
+          parsedUrl.pathname + parsedUrl.search,
+          {
+            responseType: 'blob',
+            skipErrorHandler: true,
+          }
+        )
+        if (cancelled) return
+        objectUrl = URL.createObjectURL(response.data)
+        setRenderedImageUrl(objectUrl)
+      } catch {
+        if (cancelled) return
+        setHasError(true)
+        setIsLoading(false)
+      }
+    }
+
+    // Defer state initialization until after the effect has committed. This
+    // keeps the effect focused on synchronizing the external image request.
+    void Promise.resolve().then(loadImage)
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [imageUrl, open])
 
   // Reset loading state when dialog opens or image URL changes
   const handleOpenChange = (newOpen: boolean) => {
@@ -80,16 +148,18 @@ export function ImageDialog({
             )}
 
             {/* Actual Image */}
-            <img
-              src={imageUrl}
-              alt={t('Generated image')}
-              className={`max-h-[550px] w-full rounded-lg object-contain ${
-                isLoading || hasError ? 'opacity-0' : 'opacity-100'
-              }`}
-              onLoad={handleImageLoad}
-              onError={handleImageError}
-              loading='lazy'
-            />
+            {renderedImageUrl && (
+              <img
+                src={renderedImageUrl}
+                alt={t('Generated image')}
+                className={`max-h-[550px] w-full rounded-lg object-contain ${
+                  isLoading || hasError ? 'opacity-0' : 'opacity-100'
+                }`}
+                onLoad={handleImageLoad}
+                onError={handleImageError}
+                loading='lazy'
+              />
+            )}
 
             {/* Error text overlay (shown on skeleton) */}
             {hasError && (

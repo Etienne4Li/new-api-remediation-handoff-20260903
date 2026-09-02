@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Plus, Trash2, Save } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -81,12 +81,25 @@ type FAQFormValues = z.infer<typeof faqSchema>
 
 const FAQ_FORM_ID = 'faq-form'
 
+function parseFaqList(data: string): FAQ[] {
+  try {
+    const parsed: unknown = JSON.parse(data || '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item, idx) => ({
+      ...(item as FAQ),
+      id: (item as FAQ).id || idx + 1,
+    }))
+  } catch {
+    return []
+  }
+}
+
 export function FAQSection({ enabled, data }: FAQSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
-  const [faqList, setFaqList] = useState<FAQ[]>([])
-  const [isEnabled, setIsEnabled] = useState(enabled)
-  const [hasChanges, setHasChanges] = useState(false)
+  const parsedFaqList = useMemo(() => parseFaqList(data), [data])
+  const [draftFaqList, setDraftFaqList] = useState<FAQ[] | null>(null)
+  const [isEnabledDraft, setIsEnabledDraft] = useState<boolean | null>(null)
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [showDialog, setShowDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -101,25 +114,8 @@ export function FAQSection({ enabled, data }: FAQSectionProps) {
     },
   })
 
-  useEffect(() => {
-    try {
-      const parsed = JSON.parse(data || '[]')
-      if (Array.isArray(parsed)) {
-        setFaqList(
-          parsed.map((item, idx) => ({
-            ...item,
-            id: item.id || idx + 1,
-          }))
-        )
-      }
-    } catch {
-      setFaqList([])
-    }
-  }, [data])
-
-  useEffect(() => {
-    setIsEnabled(enabled)
-  }, [enabled])
+  const faqList = draftFaqList ?? parsedFaqList
+  const isEnabled = isEnabledDraft ?? enabled
 
   const handleToggleEnabled = async (checked: boolean) => {
     try {
@@ -127,7 +123,7 @@ export function FAQSection({ enabled, data }: FAQSectionProps) {
         key: 'console_setting.faq_enabled',
         value: checked,
       })
-      setIsEnabled(checked)
+      setIsEnabledDraft(checked)
       toast.success(t('Setting saved'))
     } catch {
       toast.error(t('Failed to update setting'))
@@ -169,15 +165,11 @@ export function FAQSection({ enabled, data }: FAQSectionProps) {
 
   const confirmDelete = () => {
     if (deleteTarget === 'single' && editingFaq) {
-      setFaqList((prev) => prev.filter((item) => item.id !== editingFaq.id))
-      setHasChanges(true)
+      setDraftFaqList(faqList.filter((item) => item.id !== editingFaq.id))
       toast.success(t('FAQ deleted. Click "Save Settings" to apply.'))
     } else if (deleteTarget === 'batch') {
-      setFaqList((prev) =>
-        prev.filter((item) => !selectedIds.includes(item.id))
-      )
+      setDraftFaqList(faqList.filter((item) => !selectedIds.includes(item.id)))
       setSelectedIds([])
-      setHasChanges(true)
       toast.success(
         t('{{count}} FAQs deleted. Click "Save Settings" to apply.', {
           count: selectedIds.length,
@@ -190,29 +182,30 @@ export function FAQSection({ enabled, data }: FAQSectionProps) {
 
   const handleSubmitForm = (values: FAQFormValues) => {
     if (editingFaq) {
-      setFaqList((prev) =>
-        prev.map((item) =>
+      setDraftFaqList(
+        faqList.map((item) =>
           item.id === editingFaq.id ? { ...item, ...values } : item
         )
       )
       toast.success(t('FAQ updated. Click "Save Settings" to apply.'))
     } else {
       const newId = Math.max(...faqList.map((item) => item.id), 0) + 1
-      setFaqList((prev) => [...prev, { id: newId, ...values }])
+      setDraftFaqList([...faqList, { id: newId, ...values }])
       toast.success(t('FAQ added. Click "Save Settings" to apply.'))
     }
-    setHasChanges(true)
     setShowDialog(false)
   }
 
   const handleSaveAll = async () => {
     try {
-      await updateOption.mutateAsync({
+      const result = await updateOption.mutateAsync({
         key: 'console_setting.faq',
         value: JSON.stringify(faqList),
       })
-      setHasChanges(false)
-      toast.success(t('FAQ saved successfully'))
+      if (result.success) {
+        setDraftFaqList(null)
+        toast.success(t('FAQ saved successfully'))
+      }
     } catch {
       toast.error(t('Failed to save FAQ'))
     }
@@ -251,7 +244,7 @@ export function FAQSection({ enabled, data }: FAQSectionProps) {
               onClick={handleSaveAll}
               size='sm'
               variant='secondary'
-              disabled={!hasChanges || updateOption.isPending}
+              disabled={draftFaqList === null || updateOption.isPending}
             >
               <Save className='mr-2 h-4 w-4' />
               {updateOption.isPending ? t('Saving...') : t('Save Settings')}

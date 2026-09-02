@@ -6,8 +6,10 @@ import (
 )
 
 func GetCallbackAddress() string {
-	if operation_setting.CustomCallbackAddress == "" {
-		return system_setting.ServerAddress
+	if callbackAddress := operation_setting.GetPaymentRuntimeConfig().CustomCallbackAddress; callbackAddress != "" {
+		return callbackAddress
 	}
-	return operation_setting.CustomCallbackAddress
+	{
+		return system_setting.GetServerAddress()
+	}
 }

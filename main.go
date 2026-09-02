@@ -39,6 +39,15 @@ import (
 	_ "net/http/pprof"
 )
 
+const (
+	// Keep operator-controlled timers finite. These are intentionally generous
+	// for normal deployments but prevent overflow or effectively disabled
+	// workers when a malformed environment value is supplied.
+	maxHTTPTimeoutSeconds            int64 = 24 * 60 * 60
+	maxShutdownTimeoutSeconds        int64 = 24 * 60 * 60
+	maxChannelUpdateFrequencyMinutes       = 7 * 24 * 60
+)
+
 //go:embed web/dist
 var buildFS embed.FS
 
@@ -75,10 +84,6 @@ func main() {
 		}
 	}()
 
-	if common.RedisEnabled {
-		// for compatibility with old versions
-		common.MemoryCacheEnabled = true
-	}
 	if common.MemoryCacheEnabled {
 		common.SysLog("memory cache enabled")
 		common.SysLog(fmt.Sprintf("sync frequency: %d seconds", common.SyncFrequency))
@@ -107,6 +112,10 @@ func main() {
 
 	// 热更新配置
 	go model.SyncOptions(common.SyncFrequency)
+	// Redis is a cache, but quota mutations can race a transient Redis outage.
+	// Run the durable repair queue independently of batch-update mode so stale
+	// entries cannot remain authoritative for an entire cache TTL.
+	model.StartQuotaCacheRepairWorker(common.SyncFrequency)
 
 	// 周期性重载授权策略，保证多节点/多 master 部署下权限变更能传播到每个实例
 	go authz.StartPolicySync(common.SyncFrequency)
@@ -115,10 +124,10 @@ func main() {
 	go model.UpdateQuotaData()
 
 	if os.Getenv("CHANNEL_UPDATE_FREQUENCY") != "" {
-		frequency, err := strconv.Atoi(os.Getenv("CHANNEL_UPDATE_FREQUENCY"))
-		if err != nil {
-			common.FatalLog("failed to parse CHANNEL_UPDATE_FREQUENCY: " + err.Error())
-		}
+		// AutomaticallyUpdateChannels sleeps in minutes. Reject zero, negative,
+		// and impractically large values so a bad setting cannot create a busy
+		// loop or overflow the duration conversion in that worker.
+		frequency := channelUpdateFrequencyFromEnv()
 		go controller.AutomaticallyUpdateChannels(frequency)
 	}
 
@@ -150,19 +159,35 @@ func main() {
 	// switch are enforced inside the runner and each handler's Enabled().
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
+	service.StartSupportTicketNotificationWorker()
 
-	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
-		common.BatchUpdateEnabled = true
+	if common.BatchUpdateEnabled {
 		common.SysLog("batch update enabled with interval " + strconv.Itoa(common.BatchUpdateInterval) + "s")
 		model.InitBatchUpdater()
 	}
 
+	var pprofServer *http.Server
 	if os.Getenv("ENABLE_PPROF") == "true" {
+		pprofAddr := strings.TrimSpace(os.Getenv("PPROF_ADDR"))
+		if pprofAddr == "" {
+			// Profiling endpoints are unauthenticated by net/http/pprof. Keep
+			// them local by default; operators can explicitly bind an internal
+			// address when remote profiling is required.
+			pprofAddr = "127.0.0.1:8005"
+		}
+		pprofServer = newHTTPServer(pprofAddr, http.DefaultServeMux, httpServerTimeouts{
+			ReadHeader: 5 * time.Second,
+			Read:       15 * time.Second,
+			Write:      30 * time.Second,
+			Idle:       60 * time.Second,
+		})
 		gopool.Go(func() {
-			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
+			if err := pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("pprof server stopped: %v", err)
+			}
 		})
 		go common.Monitor()
-		common.SysLog("pprof enabled")
+		common.SysLog("pprof enabled on " + pprofAddr)
 	}
 
 	err = common.StartPyroScope()
@@ -176,20 +201,20 @@ func main() {
 		common.FatalLog("failed to configure trusted proxies: " + err.Error())
 		return
 	}
+	// Normalize/reject forwarding headers before any route middleware reads
+	// ClientIP. This is defense in depth for deployments whose edge proxy
+	// accidentally passes client-supplied XFF/X-Real/CF headers through.
+	server.Use(middleware.SanitizeProxyHeaders())
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
-		common.SysLog(fmt.Sprintf("panic detected: %v", err))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{
-				"message": fmt.Sprintf("Panic detected, error: %v. Please submit a issue here: https://github.com/Calcium-Ion/new-api", err),
-				"type":    "new_api_panic",
-			},
-		})
+		common.SysError(fmt.Sprintf("panic detected meta=%s", common.SensitiveLogMeta(fmt.Sprint(err))))
+		common.WritePanicResponse(c)
 	}))
 	// This will cause SSE not to work!!!
 	//server.Use(gzip.Gzip(gzip.DefaultCompression))
 	server.Use(middleware.RequestId())
 	server.Use(middleware.Version())
 	server.Use(middleware.I18n())
+	server.Use(middleware.SecurityHeaders())
 	middleware.SetUpLogger(server)
 	InjectUmamiAnalytics()
 	InjectGoogleAnalytics()
@@ -204,10 +229,7 @@ func main() {
 		port = strconv.Itoa(*common.Port)
 	}
 
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: server,
-	}
+	srv := newHTTPServer(":"+port, server, httpServerTimeoutsFromEnv())
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -225,17 +247,73 @@ func main() {
 	common.SysLog(fmt.Sprintf("received signal: %v, shutting down...", sig))
 
 	// SSE streams may run for minutes; give them time to finish before forced exit
-	shutdownTimeout := time.Duration(common.GetEnvOrDefault("SHUTDOWN_TIMEOUT_SECONDS", 120)) * time.Second
+	shutdownTimeout := common.GetEnvOrDefaultDurationSeconds(
+		"SHUTDOWN_TIMEOUT_SECONDS", 120, 1, maxShutdownTimeoutSeconds,
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
 	}
+	if pprofServer != nil {
+		if err := pprofServer.Shutdown(ctx); err != nil {
+			common.SysError(fmt.Sprintf("pprof server forced to shutdown: %v", err))
+		}
+	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
-	if common.DataExportEnabled {
+	if common.GetGeneralRuntimeConfig().DataExportEnabled {
 		model.SaveQuotaDataCache()
 	}
 	common.SysLog("server exited")
+}
+
+type httpServerTimeouts struct {
+	ReadHeader time.Duration
+	Read       time.Duration
+	Write      time.Duration
+	Idle       time.Duration
+}
+
+func newHTTPServer(addr string, handler http.Handler, timeouts httpServerTimeouts) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: timeouts.ReadHeader,
+		ReadTimeout:       timeouts.Read,
+		WriteTimeout:      timeouts.Write,
+		IdleTimeout:       timeouts.Idle,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func httpServerTimeoutsFromEnv() httpServerTimeouts {
+	return httpServerTimeouts{
+		ReadHeader: positiveHTTPTimeout("HTTP_READ_HEADER_TIMEOUT_SECONDS", 15),
+		Read:       positiveHTTPTimeout("HTTP_READ_TIMEOUT_SECONDS", 120),
+		// A finite WriteTimeout terminates long-lived SSE responses. The relay
+		// stream writer already applies a per-write deadline, so keep this 0 by
+		// default while allowing deployments without SSE to opt in.
+		Write: nonNegativeHTTPTimeout("HTTP_WRITE_TIMEOUT_SECONDS", 0),
+		Idle:  positiveHTTPTimeout("HTTP_IDLE_TIMEOUT_SECONDS", 120),
+	}
+}
+
+func positiveHTTPTimeout(name string, fallback int) time.Duration {
+	return common.GetEnvOrDefaultDurationSeconds(
+		name, int64(fallback), 1, maxHTTPTimeoutSeconds,
+	)
+}
+
+func nonNegativeHTTPTimeout(name string, fallback int) time.Duration {
+	return common.GetEnvOrDefaultDurationSeconds(
+		name, int64(fallback), 0, maxHTTPTimeoutSeconds,
+	)
+}
+
+func channelUpdateFrequencyFromEnv() int {
+	return common.GetEnvOrDefaultBounded(
+		"CHANNEL_UPDATE_FREQUENCY", 30, 1, maxChannelUpdateFrequencyMinutes,
+	)
 }
 
 func InjectUmamiAnalytics() {
@@ -322,7 +400,9 @@ func InitResources() error {
 			common.SysError("failed to migrate retired frontend options: " + err.Error())
 		}
 	}
-	model.InitOptionMap()
+	if err = model.InitOptionMap(); err != nil {
+		return fmt.Errorf("initialize options: %w", err)
+	}
 
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()

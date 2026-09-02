@@ -45,14 +45,18 @@ func formatRequest(requestBody io.Reader, requestHeader http.Header) (*AwsClaude
 		var tempArray []string
 		tempArray = strings.Split(anthropicBetaValues, ",")
 		if len(tempArray) > 0 {
-			betaJson, err := json.Marshal(tempArray)
+			betaJson, err := common.Marshal(tempArray)
 			if err != nil {
 				return nil, err
 			}
 			awsClaudeRequest.AnthropicBeta = betaJson
 		}
 	}
-	logger.LogJson(context.Background(), "json", awsClaudeRequest)
+	if encoded, err := common.Marshal(awsClaudeRequest); err == nil {
+		// Claude messages/tools may contain user prompts and credentials. Keep
+		// debug output limited to a correlation-safe body fingerprint.
+		logger.LogDebug(context.Background(), "aws claude request body_meta=%s", common.SensitiveLogBody(encoded))
+	}
 	return &awsClaudeRequest, nil
 }
 

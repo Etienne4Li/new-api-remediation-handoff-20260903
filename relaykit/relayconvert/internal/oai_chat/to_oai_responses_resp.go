@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
 const (
@@ -131,7 +132,7 @@ func UsageFromChatUsage(src *dto.Usage) *dto.Usage {
 	if src.TotalTokens != 0 {
 		usage.TotalTokens = src.TotalTokens
 	} else {
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+		usage.TotalTokens = types.SaturatingAddNonNegativeInt(usage.InputTokens, usage.OutputTokens)
 	}
 	if src.PromptTokensDetails.CachedTokens != 0 ||
 		src.PromptTokensDetails.ImageTokens != 0 ||

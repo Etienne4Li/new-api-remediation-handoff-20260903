@@ -16,9 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Link } from '@tanstack/react-router'
+import { Link, useLocation } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -29,7 +30,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 
-import { type TopNavLink } from '../types'
+import { isNavPathActive } from '../lib/url-utils'
+import type { TopNavLink } from '../types'
 
 type TopNavProps = React.HTMLAttributes<HTMLElement> & {
   links: TopNavLink[]
@@ -40,7 +42,13 @@ type TopNavProps = React.HTMLAttributes<HTMLElement> & {
  * 在大屏幕显示水平导航，在小屏幕显示下拉菜单
  */
 export function TopNav({ className, links, ...props }: TopNavProps) {
-  // 规范化链接，确保所有可选属性都有默认值
+  const { t } = useTranslation()
+  const pathname = useLocation({
+    select: (location) => location.pathname,
+  })
+
+  // Normalize links once, then derive active state from the router location.
+  // Explicit `isActive` remains an escape hatch for custom/external links.
   const normalizedLinks = useMemo(
     () =>
       links.map((link) => ({
@@ -48,23 +56,35 @@ export function TopNav({ className, links, ...props }: TopNavProps) {
         disabled: false,
         external: false,
         ...link,
+        isCurrent:
+          link.isActive ??
+          (!link.external && isNavPathActive(pathname, link.href)),
       })),
-    [links]
+    [links, pathname]
   )
+
+  if (normalizedLinks.length === 0) return null
 
   return (
     <>
       {/* 移动端下拉菜单 */}
-      <div className='lg:hidden'>
+      <div className='@7xl/app-header:hidden'>
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger
-            render={<Button size='icon' variant='outline' className='size-7' />}
+            render={
+              <Button
+                size='icon'
+                variant='outline'
+                className='border-foreground/15 size-7 rounded-none'
+                aria-label={t('Toggle navigation menu')}
+              />
+            }
           >
-            <Menu />
+            <Menu aria-hidden='true' />
           </DropdownMenuTrigger>
           <DropdownMenuContent side='bottom' align='start'>
             {normalizedLinks.map(
-              ({ title, href, isActive, disabled, external }) => (
+              ({ title, href, isCurrent, disabled, external }) => (
                 <DropdownMenuItem
                   key={`${title}-${href}`}
                   render={
@@ -73,21 +93,29 @@ export function TopNav({ className, links, ...props }: TopNavProps) {
                         href={href}
                         target='_blank'
                         rel='noopener noreferrer'
-                        className={!isActive ? 'text-muted-foreground' : ''}
+                        aria-current={isCurrent ? 'page' : undefined}
+                        className={cn(
+                          'text-muted-foreground',
+                          isCurrent && 'text-foreground font-medium'
+                        )}
                       >
-                        {title}
+                        {t(title)}
                       </a>
                     ) : (
                       <Link
                         to={href}
-                        className={!isActive ? 'text-muted-foreground' : ''}
+                        aria-current={isCurrent ? 'page' : undefined}
+                        className={cn(
+                          'text-muted-foreground',
+                          isCurrent && 'text-foreground font-medium'
+                        )}
                         disabled={disabled}
                       >
-                        {title}
+                        {t(title)}
                       </Link>
                     )
                   }
-                ></DropdownMenuItem>
+                />
               )
             )}
           </DropdownMenuContent>
@@ -97,30 +125,42 @@ export function TopNav({ className, links, ...props }: TopNavProps) {
       {/* 桌面端水平导航 */}
       <nav
         className={cn(
-          'hidden items-center space-x-4 lg:flex lg:space-x-4 xl:space-x-6',
+          'hidden items-center space-x-4 @7xl/app-header:flex @7xl/app-header:space-x-6',
           className
         )}
         {...props}
       >
-        {normalizedLinks.map(({ title, href, isActive, disabled, external }) =>
+        {normalizedLinks.map(({ title, href, isCurrent, disabled, external }) =>
           external ? (
             <a
               key={`${title}-${href}`}
               href={href}
               target='_blank'
               rel='noopener noreferrer'
-              className={`hover:text-primary text-sm font-medium transition-colors ${isActive ? '' : 'text-muted-foreground'}`}
+              aria-current={isCurrent ? 'page' : undefined}
+              className={cn(
+                'hover:bg-foreground/[0.045] hover:text-foreground inline-flex items-center rounded-none px-2.5 py-1.5 text-sm font-medium transition-colors',
+                isCurrent
+                  ? 'bg-foreground/[0.065] text-foreground font-semibold'
+                  : 'text-muted-foreground'
+              )}
             >
-              {title}
+              {t(title)}
             </a>
           ) : (
             <Link
               key={`${title}-${href}`}
               to={href}
               disabled={disabled}
-              className={`hover:text-primary text-sm font-medium transition-colors ${isActive ? '' : 'text-muted-foreground'}`}
+              aria-current={isCurrent ? 'page' : undefined}
+              className={cn(
+                'hover:bg-foreground/[0.045] hover:text-foreground inline-flex items-center rounded-none px-2.5 py-1.5 text-sm font-medium transition-colors',
+                isCurrent
+                  ? 'bg-foreground/[0.065] text-foreground font-semibold'
+                  : 'text-muted-foreground'
+              )}
             >
-              {title}
+              {t(title)}
             </Link>
           )
         )}

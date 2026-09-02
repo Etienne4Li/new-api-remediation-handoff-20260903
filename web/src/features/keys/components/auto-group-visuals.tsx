@@ -19,7 +19,6 @@ For commercial licensing, please contact support@quantumnous.com
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { GroupBadge } from '@/components/group-badge'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
@@ -51,7 +50,7 @@ type AutoGroupFrameProps = {
   shouldReduceMotion: boolean
 }
 
-export function AutoGroupFrame(props: AutoGroupFrameProps) {
+function AutoGroupFrame(props: AutoGroupFrameProps) {
   return (
     <span
       data-auto-group-frame='true'
@@ -124,17 +123,6 @@ export function GroupRatioBadge(props: GroupRatioBadgeProps) {
       className='max-w-24 sm:max-w-none'
     >
       {badge}
-    </AutoGroupFrame>
-  )
-}
-
-export function AutoGroupBadge(props: AutoGroupFlowBorderProps) {
-  return (
-    <AutoGroupFrame
-      effect='badge'
-      shouldReduceMotion={props.shouldReduceMotion}
-    >
-      <GroupBadge group='auto' />
     </AutoGroupFrame>
   )
 }

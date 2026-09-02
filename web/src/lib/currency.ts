@@ -143,9 +143,7 @@ const DEFAULT_FORMAT_OPTIONS: ResolvedCurrencyFormatOptions = {
 const DISPLAY_TYPE_VALUES = ['USD', 'CNY', 'TOKENS', 'CUSTOM'] as const
 type DisplayTypeLiteral = (typeof DISPLAY_TYPE_VALUES)[number]
 
-export function isCurrencyDisplayType(
-  value: unknown
-): value is CurrencyDisplayType {
+function isCurrencyDisplayType(value: unknown): value is CurrencyDisplayType {
   return (
     typeof value === 'string' &&
     DISPLAY_TYPE_VALUES.includes(value as DisplayTypeLiteral)

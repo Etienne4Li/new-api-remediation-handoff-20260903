@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"strconv"
-
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -16,8 +14,10 @@ import (
 func GetAllTask(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	startTimestamp, endTimestamp, ok := parseOptionalDataTimeRange(c)
+	if !ok {
+		return
+	}
 	// 解析其他查询参数
 	queryParams := model.SyncTaskQueryParams{
 		Platform:       constant.TaskPlatform(c.Query("platform")),
@@ -30,7 +30,11 @@ func GetAllTask(c *gin.Context) {
 	}
 
 	items := model.TaskGetAllTasks(pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
-	total := model.TaskCountAllTasks(queryParams)
+	total, err := model.TaskCountAllTasks(queryParams)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(tasksToDto(items, true))
 	common.ApiSuccess(c, pageInfo)
@@ -41,8 +45,10 @@ func GetUserTask(c *gin.Context) {
 
 	userId := c.GetInt("id")
 
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	startTimestamp, endTimestamp, ok := parseOptionalDataTimeRange(c)
+	if !ok {
+		return
+	}
 
 	queryParams := model.SyncTaskQueryParams{
 		Platform:       constant.TaskPlatform(c.Query("platform")),
@@ -54,7 +60,11 @@ func GetUserTask(c *gin.Context) {
 	}
 
 	items := model.TaskGetAllUserTask(userId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
-	total := model.TaskCountAllUserTask(userId, queryParams)
+	total, err := model.TaskCountAllUserTask(userId, queryParams)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(tasksToDto(items, false))
 	common.ApiSuccess(c, pageInfo)

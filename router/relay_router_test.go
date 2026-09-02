@@ -56,11 +56,6 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 			headerName:    "x-goog-api-key",
 			expectedField: "models",
 		},
-		{
-			name:          "Gemini API key query",
-			path:          "/v1/models?key=modelstestkey",
-			expectedField: "models",
-		},
 	}
 
 	for _, test := range tests {
@@ -87,6 +82,65 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListModelsRejectsGeminiQueryKeyByDefault(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	t.Setenv("GEMINI_QUERY_KEY_AUTH_ENABLED", "false")
+
+	user := model.User{
+		Username: "models-query-user",
+		Status:   common.UserStatusEnabled,
+		Group:    "default",
+		Quota:    100,
+	}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{
+		UserId:         user.Id,
+		Key:            "models-query-key",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}).Error)
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/models?key=models-query-key", nil)
+	engine.ServeHTTP(recorder, request)
+
+	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestListModelsGeminiQueryKeyRequiresExplicitOptIn(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	t.Setenv("GEMINI_QUERY_KEY_AUTH_ENABLED", "true")
+
+	user := model.User{
+		Username: "models-query-optin-user",
+		Status:   common.UserStatusEnabled,
+		Group:    "default",
+		Quota:    100,
+	}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{
+		UserId:         user.Id,
+		Key:            "models-query-optin-key",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}).Error)
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/models?key=models-query-optin-key", nil)
+	engine.ServeHTTP(recorder, request)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	var payload map[string]any
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	assert.Contains(t, payload, "models")
 }
 
 func setupRelayRouterTestDB(t *testing.T) {

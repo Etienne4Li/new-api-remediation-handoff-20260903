@@ -17,16 +17,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient } from '@tanstack/react-query'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { useAuthStore, type AuthBundle } from '../stores/auth-store'
 import {
+  applyAuthBundle,
   applyAuthRotation,
   bootstrapAuthentication,
   clearAuthenticatedClientState,
+  createAuthRefreshCoordinator,
   createRefreshRunner,
   isAuthBundle,
+  refreshAuthentication,
   type AuthRefreshRuntime,
+  type RefreshOutcome,
 } from './auth-session'
 
 const bundle: AuthBundle = {
@@ -50,11 +54,85 @@ const bundle: AuthBundle = {
   },
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+  return { promise, resolve, reject }
+}
+
 afterEach(() => {
   useAuthStore.getState().auth.reset('idle')
 })
 
 describe('authentication session coordination', () => {
+  test('keeps the underlying refresh running after its only waiter aborts', async () => {
+    const operation = deferred<RefreshOutcome>()
+    let operationCount = 0
+    const coordinateRefresh = createAuthRefreshCoordinator(() => {
+      operationCount += 1
+      return operation.promise
+    })
+    const abortController = new AbortController()
+    const cancellation = new Error('GitHub login timed out')
+
+    const outcome = coordinateRefresh(abortController.signal)
+    await Promise.resolve()
+    abortController.abort(cancellation)
+
+    await expect(outcome).rejects.toBe(cancellation)
+
+    const laterWaiter = coordinateRefresh()
+    operation.resolve({ kind: 'anonymous' })
+    await expect(laterWaiter).resolves.toEqual({ kind: 'anonymous' })
+    expect(operationCount).toBe(1)
+  })
+
+  test('keeps a shared refresh running for a consumer that did not cancel', async () => {
+    const operation = deferred<RefreshOutcome>()
+    let operationCount = 0
+    const coordinateRefresh = createAuthRefreshCoordinator(() => {
+      operationCount += 1
+      return operation.promise
+    })
+    const abortController = new AbortController()
+    const cancellation = new Error('GitHub login timed out')
+
+    const cancelledOutcome = coordinateRefresh(abortController.signal)
+    const persistentOutcome = coordinateRefresh()
+    await Promise.resolve()
+    abortController.abort(cancellation)
+
+    await expect(cancelledOutcome).rejects.toBe(cancellation)
+
+    operation.resolve({ kind: 'authenticated', bundle })
+    await expect(persistentOutcome).resolves.toEqual({
+      kind: 'authenticated',
+      bundle,
+    })
+    expect(operationCount).toBe(1)
+  })
+
+  test('does not start a refresh for a waiter that is already cancelled', async () => {
+    const performRefresh = vi.fn(
+      async (): Promise<RefreshOutcome> => ({
+        kind: 'anonymous',
+      })
+    )
+    const coordinateRefresh = createAuthRefreshCoordinator(performRefresh)
+    const abortController = new AbortController()
+    const cancellation = new Error('GitHub login timed out')
+    abortController.abort(cancellation)
+
+    await expect(coordinateRefresh(abortController.signal)).rejects.toBe(
+      cancellation
+    )
+    expect(performRefresh).not.toHaveBeenCalled()
+  })
+
   test('bootstrap distinguishes a completed anonymous check from an active session', async () => {
     useAuthStore.getState().auth.reset('complete')
     expect(await bootstrapAuthentication()).toEqual({ kind: 'anonymous' })
@@ -241,6 +319,84 @@ describe('authentication session coordination', () => {
 
     expect(outcome.kind).toBe('transient_error')
     expect(accepted).toBe(false)
+  })
+
+  test('a cancelled waiter does not discard a late authentication bundle', async () => {
+    const response = deferred<{
+      status: number
+      data: { success: boolean; data: AuthBundle }
+    }>()
+    const abortController = new AbortController()
+    let requestCount = 0
+    let acceptedCount = 0
+    const runtime: AuthRefreshRuntime = {
+      request: () => {
+        requestCount += 1
+        return response.promise
+      },
+      getExpectedSID: () => bundle.session.sid,
+      parseBundle: (value) => (isAuthBundle(value) ? value : null),
+      acceptBundle: () => {
+        acceptedCount += 1
+      },
+      clear: () => undefined,
+      markTransient: () => undefined,
+      wait: async () => undefined,
+    }
+
+    const coordinateRefresh = createAuthRefreshCoordinator(() =>
+      createRefreshRunner(runtime)()
+    )
+    const cancelledOutcome = coordinateRefresh(abortController.signal)
+    await Promise.resolve()
+    const cancellation = new Error('GitHub login timed out')
+    abortController.abort(cancellation)
+    await expect(cancelledOutcome).rejects.toBe(cancellation)
+
+    const persistentOutcome = coordinateRefresh()
+    response.resolve({
+      status: 200,
+      data: { success: true, data: bundle },
+    })
+
+    await expect(persistentOutcome).resolves.toEqual({
+      kind: 'authenticated',
+      bundle,
+    })
+    expect(requestCount).toBe(1)
+    expect(acceptedCount).toBe(1)
+  })
+
+  test('does not let an old browser lock failure overwrite newer authentication', async () => {
+    const lockError = new Error('Web Locks unavailable')
+    const lockRequest = deferred<never>()
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks')
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: {
+        request: () => lockRequest.promise,
+      },
+    })
+
+    try {
+      const outcome = refreshAuthentication()
+      await Promise.resolve()
+      applyAuthBundle(bundle, false)
+      lockRequest.reject(lockError)
+
+      await expect(outcome).resolves.toEqual({
+        kind: 'transient_error',
+        error: lockError,
+      })
+      expect(useAuthStore.getState().auth.bootstrapState).toBe('complete')
+      expect(useAuthStore.getState().auth.accessToken).toBe(bundle.access_token)
+    } finally {
+      if (originalLocks) {
+        Object.defineProperty(navigator, 'locks', originalLocks)
+      } else {
+        Reflect.deleteProperty(navigator, 'locks')
+      }
+    }
   })
 
   test('explicit rotations update only the current session', () => {

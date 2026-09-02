@@ -30,6 +30,7 @@ import (
 
 const (
 	defaultTimeoutSeconds       = 10
+	maxTimeoutSeconds           = 24 * 60 * 60
 	defaultEndpoint             = "/api/pricing"
 	maxConcurrentFetches        = 8
 	maxRatioConfigBytes         = 10 << 20 // 10MB
@@ -44,6 +45,43 @@ const (
 	modelsDevPath               = "/api.json"
 	modelsDevInputCostRatioBase = 1000.0
 )
+
+func newRatioSyncHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
+	if common.TLSInsecureSkipVerify {
+		transport.TLSClientConfig = common.InsecureTLSConfig
+	}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		// 对 github.io 优先尝试 IPv4，失败则回退 IPv6
+		if strings.HasSuffix(host, "github.io") {
+			if conn, err := dialer.DialContext(ctx, "tcp4", addr); err == nil {
+				return conn, nil
+			}
+			return dialer.DialContext(ctx, "tcp6", addr)
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+	return &http.Client{
+		Transport: transport,
+		// OpenRouter requests below carry a bearer token. A 307/308 redirect
+		// would replay the GET and Authorization header to another origin, so
+		// provider pricing endpoints must be explicit.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 func nearlyEqual(a, b float64) bool {
 	if a > b {
@@ -147,7 +185,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 		return
 	}
 
-	if req.Timeout <= 0 {
+	if req.Timeout <= 0 || req.Timeout > maxTimeoutSeconds {
 		req.Timeout = defaultTimeoutSeconds
 	}
 
@@ -196,26 +234,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 
 	sem := make(chan struct{}, maxConcurrentFetches)
 
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	transport := &http.Transport{MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: 1 * time.Second, ResponseHeaderTimeout: 10 * time.Second}
-	if common.TLSInsecureSkipVerify {
-		transport.TLSClientConfig = common.InsecureTLSConfig
-	}
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			host = addr
-		}
-		// 对 github.io 优先尝试 IPv4，失败则回退 IPv6
-		if strings.HasSuffix(host, "github.io") {
-			if conn, err := dialer.DialContext(ctx, "tcp4", addr); err == nil {
-				return conn, nil
-			}
-			return dialer.DialContext(ctx, "tcp6", addr)
-		}
-		return dialer.DialContext(ctx, network, addr)
-	}
-	client := &http.Client{Transport: transport}
+	client := newRatioSyncHTTPClient()
 
 	for _, chn := range upstreams {
 		wg.Add(1)
@@ -306,8 +325,10 @@ func FetchUpstreamRatios(c *gin.Context) {
 			if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(strings.ToLower(ct), "application/json") {
 				logger.LogWarn(c.Request.Context(), "unexpected content-type from "+chItem.Name+": "+ct)
 			}
-			limited := io.LimitReader(resp.Body, maxRatioConfigBytes)
-			bodyBytes, err := io.ReadAll(limited)
+			// Read one sentinel byte past the limit.  A chunked response (or a
+			// lying Content-Length header) must fail instead of being silently
+			// truncated and parsed as a partial pricing document.
+			bodyBytes, err := common.ReadBodyLimited(resp.Body, resp.ContentLength, maxRatioConfigBytes)
 			if err != nil {
 				logger.LogWarn(c.Request.Context(), "read response failed from "+chItem.Name+": "+err.Error())
 				ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
@@ -989,7 +1010,7 @@ func GetSyncableChannels(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}

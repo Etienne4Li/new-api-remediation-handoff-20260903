@@ -22,7 +22,7 @@ import type { ChatCompletionChunk } from '../../types'
 const STREAM_DONE_MESSAGE = '[DONE]'
 const STREAM_CLOSED_READY_STATE = 2
 
-export type StreamUpdateType = 'reasoning' | 'content'
+type StreamUpdateType = 'reasoning' | 'content'
 
 export type StreamMessageUpdate = {
   type: StreamUpdateType

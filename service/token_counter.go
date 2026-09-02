@@ -108,6 +108,9 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 		}
 		return 0, errors.New(fmt.Sprintf("fail to decode image config: %s", fileMeta.GetIdentifier()))
 	}
+	if dimensionErr := validateImageDimensions(config); dimensionErr != nil {
+		return 0, dimensionErr
+	}
 
 	width := config.Width
 	height := config.Height
@@ -115,13 +118,22 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 
 	if isPatchBased {
 		// 32x32 patch-based calculation with 1536 cap and model multiplier
-		ceilDiv := func(a, b int) int { return (a + b - 1) / b }
+		// The (a+b-1) formulation is vulnerable to integer overflow for a
+		// malformed image header. Subtract before dividing instead.
+		ceilDiv := func(a, b int) int {
+			if a <= 0 || b <= 0 {
+				return 0
+			}
+			return (a-1)/b + 1
+		}
 		rawPatchesW := ceilDiv(width, 32)
 		rawPatchesH := ceilDiv(height, 32)
-		rawPatches := rawPatchesW * rawPatchesH
+		rawPatches := safeTokenProduct(rawPatchesW, rawPatchesH)
 		if rawPatches > 1536 {
 			// scale down
-			area := float64(width * height)
+			// Convert operands before multiplying; width*height can wrap before
+			// it is converted to float64.
+			area := float64(width) * float64(height)
 			r := math.Sqrt(float64(32*32*1536) / area)
 			wScaled := float64(width) * r
 			hScaled := float64(height) * r
@@ -136,7 +148,7 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 			hScaled = float64(height) * r
 			patchesW := math.Ceil(wScaled / 32.0)
 			patchesH := math.Ceil(hScaled / 32.0)
-			imageTokens := int(patchesW * patchesH)
+			imageTokens := common.QuotaRound(patchesW * patchesH)
 			if imageTokens > 1536 {
 				imageTokens = 1536
 			}
@@ -167,13 +179,19 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	finalH := int(math.Round(float64(fitH) * shortScale))
 
 	// Count 512px tiles
-	tilesW := (finalW + 512 - 1) / 512
-	tilesH := (finalH + 512 - 1) / 512
-	tiles := tilesW * tilesH
+	tilesW := (finalW-1)/512 + 1
+	tilesH := (finalH-1)/512 + 1
+	tiles := safeTokenProduct(tilesW, tilesH)
 
 	logger.LogDebug(c, "image token scaled size: width=%d, height=%d, tiles=%d", finalW, finalH, tiles)
 
-	return tiles*tileTokens + baseTokens, nil
+	return safeTokenTotal(safeTokenProduct(tiles, tileTokens), baseTokens), nil
+}
+
+// safeTokenProduct multiplies non-negative token/count values while keeping
+// malformed metadata from wrapping into a negative estimate.
+func safeTokenProduct(value, multiplier int) int {
+	return common.SaturatingMulNonNegativeInt(value, multiplier)
 }
 
 func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relaycommon.RelayInfo) (int, error) {
@@ -214,25 +232,28 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 				duration = 0
 			}
 			// 一分钟 1000 token，与 $price / minute 对齐。
-			totalAudioToken += common.QuotaRound(math.Ceil(duration) / 60.0 * 1000)
+			totalAudioToken = safeTokenTotal(totalAudioToken, common.QuotaRound(math.Ceil(duration)/60.0*1000))
 		}
 		return totalAudioToken, nil
 	}
 
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	tkm := 0
+	addTokens := func(value int) {
+		tkm = safeTokenTotal(tkm, value)
+	}
 
 	if meta.TokenType == types.TokenTypeTextNumber {
-		tkm += utf8.RuneCountInString(meta.CombineText)
+		addTokens(utf8.RuneCountInString(meta.CombineText))
 	} else {
-		tkm += CountTextToken(meta.CombineText, model)
+		addTokens(CountTextToken(meta.CombineText, model))
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
-		tkm += meta.ToolsCount * 8
-		tkm += meta.MessagesCount * 3 // 每条消息的格式化token数量
-		tkm += meta.NameCount * 3
-		tkm += 3
+		addTokens(safeTokenProduct(meta.ToolsCount, 8))
+		addTokens(safeTokenProduct(meta.MessagesCount, 3)) // 每条消息的格式化token数量
+		addTokens(safeTokenProduct(meta.NameCount, 3))
+		addTokens(3)
 	}
 
 	shouldFetchFiles := true
@@ -281,18 +302,18 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 				if err != nil {
 					return 0, fmt.Errorf("error counting image token, media index[%d], identifier[%s], err: %v", i, file.GetIdentifier(), err)
 				}
-				tkm += token
+				addTokens(token)
 			} else {
-				tkm += 520
+				addTokens(520)
 			}
 		case types.FileTypeAudio:
-			tkm += 256
+			addTokens(256)
 		case types.FileTypeVideo:
-			tkm += 4096 * 2
+			addTokens(4096 * 2)
 		case types.FileTypeFile:
-			tkm += 4096
+			addTokens(4096)
 		default:
-			tkm += 4096 // Default case for unknown file types
+			addTokens(4096) // Default case for unknown file types
 		}
 	}
 
@@ -303,11 +324,17 @@ func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *rela
 func CountTokenRealtime(info *relaycommon.RelayInfo, request dto.RealtimeEvent, model string) (int, int, error) {
 	audioToken := 0
 	textToken := 0
+	addAudio := func(value int) {
+		audioToken = safeTokenTotal(audioToken, value)
+	}
+	addText := func(value int) {
+		textToken = safeTokenTotal(textToken, value)
+	}
 	switch request.Type {
 	case dto.RealtimeEventTypeSessionUpdate:
 		if request.Session != nil {
 			msgTokens := CountTextToken(request.Session.Instructions, model)
-			textToken += msgTokens
+			addText(msgTokens)
 		}
 	case dto.RealtimeEventResponseAudioDelta:
 		// count audio token
@@ -315,18 +342,18 @@ func CountTokenRealtime(info *relaycommon.RelayInfo, request dto.RealtimeEvent, 
 		if err != nil {
 			return 0, 0, fmt.Errorf("error counting audio token: %v", err)
 		}
-		audioToken += atk
+		addAudio(atk)
 	case dto.RealtimeEventResponseAudioTranscriptionDelta, dto.RealtimeEventResponseFunctionCallArgumentsDelta:
 		// count text token
 		tkm := CountTextToken(request.Delta, model)
-		textToken += tkm
+		addText(tkm)
 	case dto.RealtimeEventInputAudioBufferAppend:
 		// count audio token
 		atk, err := CountAudioTokenInput(request.Audio, info.InputAudioFormat)
 		if err != nil {
 			return 0, 0, fmt.Errorf("error counting audio token: %v", err)
 		}
-		audioToken += atk
+		addAudio(atk)
 	case dto.RealtimeEventConversationItemCreated:
 		if request.Item != nil {
 			switch request.Item.Type {
@@ -334,7 +361,7 @@ func CountTokenRealtime(info *relaycommon.RelayInfo, request dto.RealtimeEvent, 
 				for _, content := range request.Item.Content {
 					if content.Type == "input_text" {
 						tokens := CountTextToken(content.Text, model)
-						textToken += tokens
+						addText(tokens)
 					}
 				}
 			}
@@ -345,8 +372,8 @@ func CountTokenRealtime(info *relaycommon.RelayInfo, request dto.RealtimeEvent, 
 			if info.RealtimeTools != nil && len(info.RealtimeTools) > 0 {
 				for _, tool := range info.RealtimeTools {
 					toolTokens := CountTokenInput(tool, model)
-					textToken += 8
-					textToken += toolTokens
+					addText(8)
+					addText(toolTokens)
 				}
 			}
 		}

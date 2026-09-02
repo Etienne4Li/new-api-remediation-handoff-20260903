@@ -426,10 +426,14 @@ For commercial licensing, please contact support@quantumnous.com
  *   - `anthropic`: warm cream surfaces are a brand choice, NOT a primary-mix
  *     derivation (the Anthropic system deliberately uses warm neutrals for
  *     cards/borders rather than tinting them with the clay accent).
- *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces. */
+ *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces.
+ *   - `enterprise-gold`: uses the reference site's explicit warm surfaces
+ *     and gold border ladder rather than a primary-mix derivation. */
 [data-theme-preset]:not([data-theme-preset='default']):not(
   [data-theme-preset='anthropic']
-):not([data-theme-preset='simple-large']) {
+):not([data-theme-preset='simple-large']):not(
+  [data-theme-preset='enterprise-gold']
+) {
   --card: color-mix(in oklch, var(--primary) 3%, var(--background));
   --popover: color-mix(in oklch, var(--primary) 5%, var(--background));
   --muted: color-mix(in oklch, var(--primary) 7%, var(--background));
@@ -454,7 +458,9 @@ For commercial licensing, please contact support@quantumnous.com
 .dark
   [data-theme-preset]:not([data-theme-preset='default']):not(
     [data-theme-preset='anthropic']
-  ):not([data-theme-preset='simple-large']) {
+  ):not([data-theme-preset='simple-large']):not(
+    [data-theme-preset='enterprise-gold']
+  ) {
   --card: color-mix(in oklch, var(--primary) 8%, var(--background));
   --popover: color-mix(in oklch, var(--primary) 12%, var(--background));
   --muted: color-mix(in oklch, var(--primary) 12%, var(--background));
@@ -610,6 +616,104 @@ For commercial licensing, please contact support@quantumnous.com
 
   --skeleton-base: oklch(0.305 0.004 60);
   --skeleton-highlight: oklch(0.41 0.004 60);
+}
+
+/* ── Enterprise Gold ─────────────────────────────────────────────────────
+ * Token names and values mirror the reference site's enterprise badge
+ * palette. Hex fallbacks keep older browsers usable while LAB values
+ * preserve the source palette where supported. */
+:root {
+  --enterprise-badge-gold: #d5b877;
+  --enterprise-badge-gold-foreground: #141519;
+  --enterprise-badge-gold-line: var(--enterprise-badge-gold);
+  --enterprise-badge-gold-wash: var(--enterprise-badge-gold);
+  --enterprise-badge-gold-wash-strong: var(--enterprise-badge-gold);
+  --enterprise-badge-surface: #faf9f7;
+  --enterprise-badge-sunken: #f4f1ea;
+  --enterprise-badge-surface-foreground: #1a1b1f;
+  --enterprise-badge-accent: #7f611b;
+}
+@supports (color: lab(0% 0 0)) {
+  :root {
+    --enterprise-badge-gold: lab(76.2395% 4.39844 37.0007);
+    --enterprise-badge-gold-foreground: lab(6.7916% 0.31054 -2.94084);
+    --enterprise-badge-surface: lab(97.9585% 0.0844002 1.10114);
+    --enterprise-badge-sunken: lab(95.2307% 0.137776 3.74606);
+    --enterprise-badge-surface-foreground: lab(9.79032% 0.321992 -2.95035);
+    --enterprise-badge-accent: lab(43.295% 7.2912 42.1353);
+  }
+}
+@supports (color: color-mix(in lab, red, red)) {
+  :root {
+    --enterprise-badge-gold-line: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 40%,
+      transparent
+    );
+    --enterprise-badge-gold-wash: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 10%,
+      transparent
+    );
+    --enterprise-badge-gold-wash-strong: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 20%,
+      transparent
+    );
+  }
+}
+
+.dark {
+  --enterprise-badge-surface: #1c1d22;
+  --enterprise-badge-sunken: #141519;
+  --enterprise-badge-surface-foreground: #f3efe6;
+  --enterprise-badge-accent: #e3c98a;
+}
+@supports (color: lab(0% 0 0)) {
+  .dark {
+    --enterprise-badge-surface: lab(10.8167% 0.528179 -3.60057);
+    --enterprise-badge-sunken: lab(6.7916% 0.31054 -2.94084);
+    --enterprise-badge-surface-foreground: lab(94.5803% 0.238091 4.8601);
+    --enterprise-badge-accent: lab(82.1107% 3.08603 35.0351);
+  }
+}
+
+[data-theme-preset='enterprise-gold'] {
+  --primary: var(--enterprise-badge-gold);
+  --primary-foreground: var(--enterprise-badge-gold-foreground);
+  --ring: var(--enterprise-badge-gold);
+  --card: var(--enterprise-badge-surface);
+  --card-foreground: var(--enterprise-badge-surface-foreground);
+  --popover: var(--enterprise-badge-surface);
+  --popover-foreground: var(--enterprise-badge-surface-foreground);
+  --border: var(--enterprise-badge-gold);
+  --sidebar: var(--enterprise-badge-sunken);
+  --sidebar-foreground: var(--enterprise-badge-surface-foreground);
+  --sidebar-primary: var(--enterprise-badge-gold);
+  --sidebar-primary-foreground: var(--enterprise-badge-gold-foreground);
+  --sidebar-accent: var(--enterprise-badge-gold);
+  --sidebar-accent-foreground: var(--enterprise-badge-accent);
+  --sidebar-border: var(--enterprise-badge-gold);
+  --sidebar-ring: var(--enterprise-badge-gold);
+}
+@supports (color: color-mix(in lab, red, red)) {
+  [data-theme-preset='enterprise-gold'] {
+    --border: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 20%,
+      transparent
+    );
+    --sidebar-accent: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 12%,
+      transparent
+    );
+    --sidebar-border: color-mix(
+      in oklch,
+      var(--enterprise-badge-gold) 20%,
+      transparent
+    );
+  }
 }
 
 /* ── Font axis ────────────────────────────────────────────────────────────

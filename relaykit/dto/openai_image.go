@@ -14,6 +14,20 @@ import (
 // wrapped-negative n overflows quota calculation into a negative charge.
 const MaxImageN = 128
 
+// BoundedImageN returns the effective image count used by provider adaptors.
+// A missing or explicit zero count keeps the OpenAI-compatible default of one;
+// non-zero values above MaxImageN are rejected so direct adaptor calls cannot
+// overflow an int conversion or inflate billing outside the HTTP validator.
+func BoundedImageN(n *uint) (uint, bool) {
+	if n == nil || *n == 0 {
+		return 1, true
+	}
+	if *n > MaxImageN {
+		return 0, false
+	}
+	return *n, true
+}
+
 type ImageRequest struct {
 	Model             string          `json:"model"`
 	Prompt            string          `json:"prompt" binding:"required"`
@@ -157,6 +171,12 @@ func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {
 	imageN := uint(1)
 	if i.N != nil && *i.N > 0 {
 		imageN = *i.N
+	}
+	// GetTokenCountMeta has no error return and is also callable by relaykit
+	// consumers that bypass the HTTP validator. Keep this public conversion
+	// from exposing an unbounded billing multiplier in that case.
+	if imageN > MaxImageN {
+		imageN = MaxImageN
 	}
 
 	// Keep n separate from ImagePriceRatio so size/quality and count remain

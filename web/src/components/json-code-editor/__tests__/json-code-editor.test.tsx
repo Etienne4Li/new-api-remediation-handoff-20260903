@@ -73,6 +73,32 @@ describe('JsonCodeEditor component', () => {
     expect(onBlur).toHaveBeenCalledOnce()
   })
 
+  test('calls the latest onBlur callback after rerender', () => {
+    const firstOnBlur = vi.fn()
+    const latestOnBlur = vi.fn()
+    const rendered = render(
+      <JsonCodeEditor
+        value='{}'
+        onChange={() => undefined}
+        onBlur={firstOnBlur}
+        ariaLabel='Model configuration'
+      />
+    )
+
+    rendered.rerender(
+      <JsonCodeEditor
+        value='{}'
+        onChange={() => undefined}
+        onBlur={latestOnBlur}
+        ariaLabel='Model configuration'
+      />
+    )
+    fireEvent.blur(screen.getByRole('textbox', { name: 'Model configuration' }))
+
+    expect(firstOnBlur).not.toHaveBeenCalled()
+    expect(latestOnBlur).toHaveBeenCalledOnce()
+  })
+
   test('emits user edits and synchronizes a controlled value', () => {
     const onChange = vi.fn()
     const rendered = render(

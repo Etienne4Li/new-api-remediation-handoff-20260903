@@ -74,7 +74,7 @@ func refreshCodexOAuthToken(
 		ExpiresIn    int    `json:"expires_in"`
 	}
 
-	if err := common.DecodeJson(resp.Body, &payload); err != nil {
+	if err := common.DecodeJsonLimited(resp.Body, DefaultProviderResponseBodyLimitBytes, &payload); err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -98,10 +98,21 @@ func getCodexOAuthHTTPClient(proxyURL string) (*http.Client, error) {
 		return nil, err
 	}
 	if baseClient == nil {
-		return &http.Client{Timeout: defaultHTTPTimeout}, nil
+		return &http.Client{
+			Timeout: defaultHTTPTimeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}, nil
 	}
 	clientCopy := *baseClient
 	clientCopy.Timeout = defaultHTTPTimeout
+	// The refresh token is sent in the POST body. The general relay redirect
+	// policy strips sensitive headers, but cannot remove body credentials from a
+	// 307/308 replay, so the token endpoint must reject redirects outright.
+	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &clientCopy, nil
 }
 

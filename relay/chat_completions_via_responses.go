@@ -114,7 +114,7 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 	convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *responsesReq)
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		return nil, responsesRequestConversionError(err)
 	}
 	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
@@ -136,7 +136,6 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 	jsonData = nil
 	var requestBody io.Reader = body
 
-	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
@@ -147,7 +146,10 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	httpResp = resp.(*http.Response)
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return nil, contractErr
+	}
 	clientStream := info.IsStream
 	upstreamStream := isResponsesEventStreamContentType(httpResp.Header.Get("Content-Type"))
 	info.IsStream = clientStream || upstreamStream
@@ -160,6 +162,7 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 	if upstreamStream && clientStream {
 		usage, newApiErr := openaichannel.OaiResponsesToChatStreamHandler(c, info, httpResp)
 		if newApiErr != nil {
+			settlePartialResponsesUsage(c, info, usage)
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return nil, newApiErr
 		}
@@ -185,4 +188,21 @@ func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, ad
 
 func isResponsesEventStreamContentType(contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+}
+
+// settlePartialResponsesUsage closes the billing gap on compatibility routes.
+// Those routes return an error directly from TextHelper, so the normal success
+// settlement is bypassed.  A bridge adapter may nevertheless have exposed
+// billable output before a protocol/client error; its marker and usage must be
+// settled exactly once before the outer deferred refund runs.
+func settlePartialResponsesUsage(c *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage) {
+	if c == nil || info == nil || usage == nil ||
+		!common.GetContextKeyBool(c, constant.ContextKeyResponsesPartialUsage) {
+		return
+	}
+	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
+		service.PostAudioConsumeQuota(c, info, usage, "partial Responses bridge usage")
+	} else {
+		service.PostTextConsumeQuota(c, info, usage, []string{"partial Responses bridge usage"})
+	}
 }

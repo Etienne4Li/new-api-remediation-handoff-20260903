@@ -1,14 +1,8 @@
 package service
 
 import (
-	"bytes"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
-	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -23,114 +17,41 @@ import (
 func GetFileTypeFromUrl(c *gin.Context, url string, reason ...string) (string, error) {
 	response, err := DoDownloadRequest(url, []string{"get_mime_type", strings.Join(reason, ", ")}...)
 	if err != nil {
-		common.SysLog(fmt.Sprintf("fail to get file type from url: %s, error: %s", url, err.Error()))
+		common.SysLog(fmt.Sprintf("fail to get file type from url_meta=%s, error: %s", common.SensitiveLogMeta(url), err.Error()))
 		return "", err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != 200 {
-		logger.LogError(c, fmt.Sprintf("failed to download file from %s, status code: %d", url, response.StatusCode))
+		message := fmt.Sprintf("failed to download file from url_meta=%s, status code: %d", common.SensitiveLogMeta(url), response.StatusCode)
+		if c != nil {
+			logger.LogError(c, message)
+		} else {
+			common.SysLog(message)
+		}
 		return "", fmt.Errorf("failed to download file, status code: %d", response.StatusCode)
 	}
 
-	if headerType := strings.TrimSpace(response.Header.Get("Content-Type")); headerType != "" {
-		if i := strings.Index(headerType, ";"); i != -1 {
-			headerType = headerType[:i]
-		}
-		if headerType != "application/octet-stream" {
-			return headerType, nil
-		}
+	// Read a bounded prefix before looking at any provider declaration. A
+	// Content-Type header is untrusted input and must not override a concrete
+	// signature (for example HTML labelled as image/png).
+	const probeLimit int64 = 64 * 1024
+	readData, readErr := io.ReadAll(io.LimitReader(response.Body, probeLimit))
+	if readErr != nil {
+		return "", fmt.Errorf("failed to inspect file content: %w", readErr)
 	}
-
-	if cd := response.Header.Get("Content-Disposition"); cd != "" {
-		parts := strings.Split(cd, ";")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if strings.HasPrefix(strings.ToLower(part), "filename=") {
-				name := strings.TrimSpace(strings.TrimPrefix(part, "filename="))
-				if len(name) > 2 && name[0] == '"' && name[len(name)-1] == '"' {
-					name = name[1 : len(name)-1]
-				}
-				if dot := strings.LastIndex(name, "."); dot != -1 && dot+1 < len(name) {
-					ext := strings.ToLower(name[dot+1:])
-					if ext != "" {
-						mt := GetMimeTypeByExtension(ext)
-						if mt != "application/octet-stream" {
-							return mt, nil
-						}
-					}
-				}
-				break
-			}
-		}
+	if c != nil {
+		logger.LogDebug(c, "Inspected %d bytes to determine file type", len(readData))
 	}
-
-	cleanedURL := url
-	if q := strings.Index(cleanedURL, "?"); q != -1 {
-		cleanedURL = cleanedURL[:q]
+	resolved, resolveErr := resolveFileMIME(readData,
+		response.Header.Get("Content-Type"),
+		mimeFromContentDisposition(response.Header.Get("Content-Disposition")),
+		guessMimeTypeFromURL(url),
+	)
+	if resolveErr != nil {
+		return "", resolveErr
 	}
-	if slash := strings.LastIndex(cleanedURL, "/"); slash != -1 && slash+1 < len(cleanedURL) {
-		last := cleanedURL[slash+1:]
-		if dot := strings.LastIndex(last, "."); dot != -1 && dot+1 < len(last) {
-			ext := strings.ToLower(last[dot+1:])
-			if ext != "" {
-				mt := GetMimeTypeByExtension(ext)
-				if mt != "application/octet-stream" {
-					return mt, nil
-				}
-			}
-		}
-	}
-
-	var readData []byte
-	limits := []int{512, 8 * 1024, 24 * 1024, 64 * 1024}
-	for _, limit := range limits {
-		logger.LogDebug(c, "Trying to read %d bytes to determine file type", limit)
-		if len(readData) < limit {
-			need := limit - len(readData)
-			tmp := make([]byte, need)
-			n, _ := io.ReadFull(response.Body, tmp)
-			if n > 0 {
-				readData = append(readData, tmp[:n]...)
-			}
-		}
-
-		if len(readData) == 0 {
-			continue
-		}
-
-		sniffed := http.DetectContentType(readData)
-		if sniffed != "" && sniffed != "application/octet-stream" {
-			return sniffed, nil
-		}
-
-		// Try HEIF/HEIC detection (Go standard library doesn't recognize it)
-		if heifMime := detectHEIF(readData); heifMime != "" {
-			return heifMime, nil
-		}
-
-		if _, format, err := image.DecodeConfig(bytes.NewReader(readData)); err == nil {
-			switch strings.ToLower(format) {
-			case "jpeg", "jpg":
-				return "image/jpeg", nil
-			case "png":
-				return "image/png", nil
-			case "gif":
-				return "image/gif", nil
-			case "bmp":
-				return "image/bmp", nil
-			case "tiff":
-				return "image/tiff", nil
-			default:
-				if format != "" {
-					return "image/" + strings.ToLower(format), nil
-				}
-			}
-		}
-	}
-
-	// Fallback
-	return "application/octet-stream", nil
+	return resolved, nil
 }
 
 // GetFileBase64FromUrl 从 URL 获取文件的 base64 编码数据

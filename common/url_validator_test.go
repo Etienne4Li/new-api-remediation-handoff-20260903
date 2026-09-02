@@ -122,6 +122,76 @@ func TestValidateRedirectURL(t *testing.T) {
 	}
 }
 
+func TestValidateHTTPURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{name: "https", url: "https://cdn.example.test/image.png"},
+		{name: "uppercase scheme", url: "HTTPS://cdn.example.test/image.png"},
+		{name: "custom port", url: "http://cdn.example.test:8080/image.png"},
+		{name: "missing host", url: "https:///image.png", wantErr: "host"},
+		{name: "unsupported scheme", url: "file:///tmp/image.png", wantErr: "scheme"},
+		{name: "userinfo", url: "https://user:secret@cdn.example.test/image.png", wantErr: "userinfo"},
+		{name: "invalid port", url: "https://cdn.example.test:65536/image.png", wantErr: "port"},
+		{name: "empty port", url: "https://cdn.example.test:", wantErr: "port"},
+		{name: "fragment", url: "https://cdn.example.test/image.png#secret", wantErr: "fragment"},
+		{name: "opaque URL", url: "https:cdn.example.test/image.png", wantErr: "host"},
+		{name: "control character", url: "https://cdn.example.test/image.png\x7f", wantErr: "control"},
+		{name: "oversized URL", url: "https://cdn.example.test/" + strings.Repeat("x", MaxHTTPURLLength), wantErr: "long"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateHTTPURL(tt.url)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateHTTPURL(%q) unexpected error: %v", tt.url, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.wantErr)) {
+				t.Fatalf("ValidateHTTPURL(%q) error = %v, want substring %q", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateCredentialFreeURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{name: "ordinary query", url: "https://provider.example/v1?api-version=2024-02-01&alt=sse"},
+		{name: "local Ollama endpoint", url: "http://127.0.0.1:11434/v1?api-version=local"},
+		{name: "GLM endpoint identifier", url: "glm-coding-plan"},
+		{name: "Kimi endpoint identifier", url: "kimi-coding-plan"},
+		{name: "Doubao endpoint identifier", url: "doubao-coding-plan"},
+		{name: "userinfo", url: "https://user:password@provider.example/v1", wantErr: "userinfo"},
+		{name: "API key", url: "https://provider.example/v1?api_key=secret", wantErr: "credential query"},
+		{name: "encoded API key name", url: "https://provider.example/v1?API%5FKEY=secret", wantErr: "credential query"},
+		{name: "generic credential", url: "https://provider.example/v1?credential=secret", wantErr: "credential query"},
+		{name: "subscription key", url: "https://provider.example/v1?subscription-key=secret", wantErr: "credential query"},
+		{name: "Google API key", url: "https://provider.example/v1?X-Goog-API-Key=secret", wantErr: "credential query"},
+		{name: "token variant", url: "https://provider.example/v1?custom-token=secret", wantErr: "credential query"},
+		{name: "fragment", url: "https://provider.example/v1#access_token=secret", wantErr: "fragment"},
+		{name: "malformed query", url: "https://provider.example/v1?api-version=1;alt=sse", wantErr: "query"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCredentialFreeURL(tt.url)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
 func resetSessionCookieSettingsAfterTest(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {

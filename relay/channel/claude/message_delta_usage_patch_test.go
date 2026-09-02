@@ -1,10 +1,12 @@
 package claude
 
 import (
+	"fmt"
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,13 +50,12 @@ func TestPatchClaudeMessageDeltaUsageDataZeroValueChecks(t *testing.T) {
 func TestShouldSkipClaudeMessageDeltaUsagePatch(t *testing.T) {
 	originGlobalPassThrough := model_setting.GetGlobalSettings().PassThroughRequestEnabled
 	t.Cleanup(func() {
-		model_setting.GetGlobalSettings().PassThroughRequestEnabled = originGlobalPassThrough
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"global.pass_through_request_enabled": fmt.Sprintf("%t", originGlobalPassThrough)})
 	})
-
-	model_setting.GetGlobalSettings().PassThroughRequestEnabled = true
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"global.pass_through_request_enabled": "true"}))
 	assert.True(t, shouldSkipClaudeMessageDeltaUsagePatch(&relaycommon.RelayInfo{}))
 
-	model_setting.GetGlobalSettings().PassThroughRequestEnabled = false
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"global.pass_through_request_enabled": "false"}))
 	assert.True(t, shouldSkipClaudeMessageDeltaUsagePatch(&relaycommon.RelayInfo{
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelSetting: dto.ChannelSettings{PassThroughBodyEnabled: true}},
 	}))

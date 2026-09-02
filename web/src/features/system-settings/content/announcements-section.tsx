@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Plus, Trash2, Save } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -129,15 +129,33 @@ const typeOptions = [
   },
 ]
 
+function parseAnnouncements(data: string): Announcement[] {
+  try {
+    const parsed: unknown = JSON.parse(data || '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((item, idx) => ({
+      ...(item as Announcement),
+      id: (item as Announcement).id || idx + 1,
+    }))
+  } catch {
+    return []
+  }
+}
+
 export function AnnouncementsSection({
   enabled,
   data,
 }: AnnouncementsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
-  const [announcements, setAnnouncements] = useState<Announcement[]>([])
-  const [isEnabled, setIsEnabled] = useState(enabled)
-  const [hasChanges, setHasChanges] = useState(false)
+  const parsedAnnouncements = useMemo(() => parseAnnouncements(data), [data])
+  const [draftAnnouncements, setDraftAnnouncements] = useState<
+    Announcement[] | null
+  >(null)
+  const [isEnabledDraft, setIsEnabledDraft] = useState<{
+    value: boolean
+    base: boolean
+  } | null>(null)
   const [selectedIds, setSelectedIds] = useState<number[]>([])
   const [showDialog, setShowDialog] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -155,25 +173,17 @@ export function AnnouncementsSection({
     },
   })
 
-  useEffect(() => {
-    try {
-      const parsed = JSON.parse(data || '[]')
-      if (Array.isArray(parsed)) {
-        setAnnouncements(
-          parsed.map((item, idx) => ({
-            ...item,
-            id: item.id || idx + 1,
-          }))
-        )
-      }
-    } catch {
-      setAnnouncements([])
-    }
-  }, [data])
+  const announcements = draftAnnouncements ?? parsedAnnouncements
+  const isEnabled =
+    isEnabledDraft && enabled === isEnabledDraft.base
+      ? isEnabledDraft.value
+      : enabled
 
-  useEffect(() => {
-    setIsEnabled(enabled)
-  }, [enabled])
+  const updateAnnouncements = (
+    update: (items: Announcement[]) => Announcement[]
+  ) => {
+    setDraftAnnouncements(update(announcements))
+  }
 
   const handleToggleEnabled = async (checked: boolean) => {
     try {
@@ -181,7 +191,7 @@ export function AnnouncementsSection({
         key: 'console_setting.announcements_enabled',
         value: checked,
       })
-      setIsEnabled(checked)
+      setIsEnabledDraft({ value: checked, base: enabled })
       toast.success(t('Setting saved'))
     } catch {
       toast.error(t('Failed to update setting'))
@@ -227,17 +237,15 @@ export function AnnouncementsSection({
 
   const confirmDelete = () => {
     if (deleteTarget === 'single' && editingAnnouncement) {
-      setAnnouncements((prev) =>
+      updateAnnouncements((prev) =>
         prev.filter((item) => item.id !== editingAnnouncement.id)
       )
-      setHasChanges(true)
       toast.success(t('Announcement deleted. Click "Save Settings" to apply.'))
     } else if (deleteTarget === 'batch') {
-      setAnnouncements((prev) =>
+      updateAnnouncements((prev) =>
         prev.filter((item) => !selectedIds.includes(item.id))
       )
       setSelectedIds([])
-      setHasChanges(true)
       toast.success(
         t('{{count}} announcements deleted. Click "Save Settings" to apply.', {
           count: selectedIds.length,
@@ -250,7 +258,7 @@ export function AnnouncementsSection({
 
   const handleSubmitForm = (values: AnnouncementFormValues) => {
     if (editingAnnouncement) {
-      setAnnouncements((prev) =>
+      updateAnnouncements((prev) =>
         prev.map((item) =>
           item.id === editingAnnouncement.id ? { ...item, ...values } : item
         )
@@ -258,21 +266,22 @@ export function AnnouncementsSection({
       toast.success(t('Announcement updated. Click "Save Settings" to apply.'))
     } else {
       const newId = Math.max(...announcements.map((item) => item.id), 0) + 1
-      setAnnouncements((prev) => [...prev, { id: newId, ...values }])
+      updateAnnouncements((prev) => [...prev, { id: newId, ...values }])
       toast.success(t('Announcement added. Click "Save Settings" to apply.'))
     }
-    setHasChanges(true)
     setShowDialog(false)
   }
 
   const handleSaveAll = async () => {
     try {
-      await updateOption.mutateAsync({
+      const result = await updateOption.mutateAsync({
         key: 'console_setting.announcements',
         value: JSON.stringify(announcements),
       })
-      setHasChanges(false)
-      toast.success(t('Announcements saved successfully'))
+      if (result.success) {
+        setDraftAnnouncements(null)
+        toast.success(t('Announcements saved successfully'))
+      }
     } catch {
       toast.error(t('Failed to save announcements'))
     }
@@ -332,7 +341,7 @@ export function AnnouncementsSection({
               onClick={handleSaveAll}
               size='sm'
               variant='secondary'
-              disabled={!hasChanges || updateOption.isPending}
+              disabled={draftAnnouncements === null || updateOption.isPending}
             >
               <Save className='mr-2 h-4 w-4' />
               {updateOption.isPending ? t('Saving...') : t('Save Settings')}

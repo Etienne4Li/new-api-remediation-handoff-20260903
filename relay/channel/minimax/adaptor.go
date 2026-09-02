@@ -2,12 +2,12 @@ package minimax
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -24,7 +24,7 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
@@ -56,12 +56,12 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 	// 同步扩展字段的厂商自定义metadata
 	if len(request.Metadata) > 0 {
-		if err := json.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
+		if err := common.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
 			return nil, fmt.Errorf("error unmarshalling metadata to minimax request: %w", err)
 		}
 	}
 
-	jsonData, err := json.Marshal(minimaxRequest)
+	jsonData, err := common.Marshal(minimaxRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling minimax request: %w", err)
 	}
@@ -81,7 +81,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	if info.RelayMode != constant.RelayModeImagesGenerations {
 		return nil, fmt.Errorf("unsupported image relay mode: %d", info.RelayMode)
 	}
-	return oaiImage2MiniMaxImageRequest(request), nil
+	return oaiImage2MiniMaxImageRequest(request)
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -105,7 +105,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, nil
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
@@ -113,7 +113,7 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

@@ -43,8 +43,9 @@ type tokenResponse struct {
 }
 
 func maxTokenQuota() int {
+	quotaPerUnit := common.GetQuotaPerUnit()
 	quota, err := common.WalletQuotaFromDecimalStrict(
-		decimal.NewFromInt(1_000_000_000).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		decimal.NewFromInt(1_000_000_000).Mul(decimal.NewFromFloat(quotaPerUnit)),
 	)
 	if err != nil {
 		return common.MaxWalletQuota
@@ -135,7 +136,11 @@ func GetAllTokens(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	total, _ := model.CountUserTokens(userId)
+	total, err := model.CountUserTokens(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
 	common.ApiSuccess(c, pageInfo)
@@ -224,29 +229,37 @@ func GetTokenStatus(c *gin.Context) {
 }
 
 func GetTokenUsage(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
+	// TokenAuthReadOnly has already authenticated and owner-scoped the request.
+	// Reuse its authoritative snapshot: re-parsing Authorization here used to
+	// disagree with middleware key handling and could select a different row;
+	// re-querying by ID also lost Redis-backed quota freshness in batch mode.
+	var token *model.Token
+	if value, ok := c.Get("authenticated_token"); ok {
+		token, _ = value.(*model.Token)
+	}
+	if token == nil {
+		tokenID := c.GetInt("token_id")
+		userID := c.GetInt("id")
+		if tokenID <= 0 || userID <= 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "Invalid token context",
+			})
+			return
+		}
+		var err error
+		token, err = model.GetTokenByIds(tokenID, userID)
+		if err != nil {
+			common.SysError("failed to get token by id: " + err.Error())
+			common.ApiErrorI18n(c, i18n.MsgTokenGetInfoFailed)
+			return
+		}
+	}
+	if token == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"success": false,
-			"message": "No Authorization header",
+			"message": "Invalid token context",
 		})
-		return
-	}
-
-	parts := strings.Split(authHeader, " ")
-	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"success": false,
-			"message": "Invalid Bearer token",
-		})
-		return
-	}
-	tokenKey := parts[1]
-
-	token, err := model.GetTokenByKey(strings.TrimPrefix(tokenKey, "sk-"), false)
-	if err != nil {
-		common.SysError("failed to get token by key: " + err.Error())
-		common.ApiErrorI18n(c, i18n.MsgTokenGetInfoFailed)
 		return
 	}
 
@@ -259,9 +272,12 @@ func GetTokenUsage(c *gin.Context) {
 		"code":    true,
 		"message": "ok",
 		"data": gin.H{
-			"object":               "token_usage",
-			"name":                 token.Name,
-			"total_granted":        token.RemainQuota + token.UsedQuota,
+			"object": "token_usage",
+			"name":   token.Name,
+			// Token quota fields are stored as ints. Saturate the sum so a
+			// corrupted or legacy row cannot wrap when both values are near the
+			// platform int boundary.
+			"total_granted":        common.SaturatingAddNonNegativeInt(token.RemainQuota, token.UsedQuota),
 			"total_used":           token.UsedQuota,
 			"total_available":      token.RemainQuota,
 			"unlimited_quota":      token.UnlimitedQuota,
@@ -316,7 +332,10 @@ func AddToken(c *gin.Context) {
 		}
 	} else {
 		token.CrossGroupRetry = false
-		_ = token.SetAutoGroups(nil)
+		if err := token.SetAutoGroups(nil); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	key, err := common.GenerateKey()
 	if err != nil {
@@ -352,9 +371,13 @@ func AddToken(c *gin.Context) {
 }
 
 func DeleteToken(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
+		common.ApiErrorMsg(c, "无效的令牌ID")
+		return
+	}
 	userId := c.GetInt("id")
-	err := model.DeleteTokenById(id, userId)
+	err = model.DeleteTokenById(id, userId)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -420,7 +443,10 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 		if token.Group != "auto" {
 			cleanToken.CrossGroupRetry = false
-			_ = cleanToken.SetAutoGroups(nil)
+			if err := cleanToken.SetAutoGroups(nil); err != nil {
+				common.ApiError(c, err)
+				return
+			}
 		} else if request.AutoGroups.Set {
 			if !setTokenAutoGroups(c, cleanToken, request.AutoGroups.Groups) {
 				return

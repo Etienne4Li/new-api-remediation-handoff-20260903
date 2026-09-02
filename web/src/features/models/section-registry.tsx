@@ -49,4 +49,3 @@ const modelsRegistry = createSectionRegistry<
 
 export const MODELS_SECTION_IDS = modelsRegistry.sectionIds
 export const MODELS_DEFAULT_SECTION = modelsRegistry.defaultSection
-export const getModelsSectionNavItems = modelsRegistry.getSectionNavItems

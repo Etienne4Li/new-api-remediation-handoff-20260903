@@ -2,6 +2,7 @@ package jimeng
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +73,10 @@ type responseTask struct {
 const (
 	// 即梦限制单个文件最大4.7MB https://www.volcengine.com/docs/85621/1747301
 	MaxFileSize int64 = 4*1024*1024 + 700*1024 // 4.7MB (4MB + 724KB)
+	// Jimeng uses 24 frames per second plus the first frame. Keep the frame
+	// bound tied to the shared duration cap so metadata cannot request an
+	// unbounded generation while the normal duration fields remain valid.
+	maxTaskFrames = relaycommon.MaxTaskDurationSeconds*24 + 1
 )
 
 // ============================
@@ -99,7 +105,19 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 // ValidateRequestAndSetAction parses body, validates fields and sets default action.
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
-	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+	if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate); taskErr != nil {
+		return taskErr
+	}
+	// Metadata is merged into the provider payload after common validation.
+	// Validate the merged frame count and req_key before pre-consume.
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToRequestPayload(&req, info); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
 }
 
 // BuildRequestURL constructs the upstream URL.
@@ -143,20 +161,29 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 			// 将上传的文件转换为base64格式
 			var images []string
 
-			for _, fileHeader := range files {
+			for index, fileHeader := range files {
+				if fileHeader == nil {
+					return nil, fmt.Errorf("input_reference file %d is missing", index)
+				}
 				// 检查文件大小
-				if fileHeader.Size > MaxFileSize {
-					return nil, fmt.Errorf("文件 %s 大小超过限制，最大允许 %d MB", fileHeader.Filename, MaxFileSize/(1024*1024))
+				if fileHeader.Size < 0 || fileHeader.Size > MaxFileSize {
+					return nil, fmt.Errorf("input_reference file %d exceeds maximum allowed size of %d bytes", index, MaxFileSize)
 				}
 
 				file, err := fileHeader.Open()
 				if err != nil {
-					continue
+					return nil, fmt.Errorf("open input_reference file %d failed: %w", index, err)
 				}
-				fileBytes, err := io.ReadAll(file)
-				file.Close()
+				fileBytes, err := common.ReadBodyLimited(file, fileHeader.Size, MaxFileSize)
+				_ = file.Close()
 				if err != nil {
-					continue
+					if errors.Is(err, common.ErrRequestBodyTooLarge) {
+						return nil, fmt.Errorf("input_reference file %d exceeds maximum allowed size of %d bytes", index, MaxFileSize)
+					}
+					return nil, fmt.Errorf("read input_reference file %d failed: %w", index, err)
+				}
+				if _, err := service.ResolveImageMIME(fileBytes); err != nil {
+					return nil, fmt.Errorf("input_reference file %d is not a supported image: %w", index, err)
 				}
 				// 将文件内容转换为base64
 				base64Str := base64.StdEncoding.EncodeToString(fileBytes)
@@ -184,7 +211,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response, returns taskID etc.
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -194,12 +221,12 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	// Parse Jimeng response
 	var jResp responsePayload
 	if err := common.Unmarshal(responseBody, &jResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body_meta: %s", common.SensitiveLogBody(responseBody)), "unmarshal_response_body_failed", http.StatusInternalServerError)
 		return
 	}
 
 	if jResp.Code != 10000 {
-		taskErr = service.TaskErrorWrapper(fmt.Errorf("%s", jResp.Message), fmt.Sprintf("%d", jResp.Code), http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("jimeng upstream task error: code=%d message_meta=%s", jResp.Code, common.SensitiveLogMeta(jResp.Message)), fmt.Sprintf("%d", jResp.Code), http.StatusInternalServerError)
 		return
 	}
 
@@ -214,6 +241,13 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 // FetchTask fetch task status
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
@@ -232,7 +266,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		return nil, errors.Wrap(err, "marshal fetch task payload failed")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, uri, bytes.NewBuffer(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +308,8 @@ func (a *TaskAdaptor) signRequest(req *http.Request, accessKey, secretKey string
 	var err error
 
 	if req.Body != nil {
-		bodyBytes, err = io.ReadAll(req.Body)
+		maxRequestBytes := common.GetMaxRequestBodyBytes()
+		bodyBytes, err = common.ReadBodyLimited(req.Body, req.ContentLength, maxRequestBytes)
 		if err != nil {
 			return errors.Wrap(err, "read request body failed")
 		}
@@ -380,12 +415,44 @@ func hmacSHA256(key []byte, data []byte) []byte {
 }
 
 func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, info *relaycommon.RelayInfo) (*requestPayload, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if info == nil {
+		return nil, errors.New("relay info is nil")
+	}
+	expectedReqKey := ""
+	if info.ChannelMeta != nil {
+		expectedReqKey = strings.TrimSpace(info.UpstreamModelName)
+	}
+	if expectedReqKey == "" {
+		expectedReqKey = strings.TrimSpace(req.Model)
+	}
+	if expectedReqKey == "" {
+		return nil, errors.New("model is required")
+	}
 	r := requestPayload{
-		ReqKey: info.UpstreamModelName,
+		ReqKey: expectedReqKey,
 		Prompt: req.Prompt,
 	}
 
-	switch req.Duration {
+	duration := req.Duration
+	if duration < 0 || duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
+	if raw := strings.TrimSpace(req.Seconds); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid seconds: %w", err)
+		}
+		if seconds < 0 || seconds > relaycommon.MaxTaskDurationSeconds {
+			return nil, fmt.Errorf("seconds must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+		}
+		if duration == 0 {
+			duration = seconds
+		}
+	}
+	switch duration {
 	case 10:
 		r.Frames = 241 // 24*10+1 = 241
 	default:
@@ -394,14 +461,32 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 
 	// Handle one-of image_urls or binary_data_base64
 	if req.HasImage() {
-		if strings.HasPrefix(req.Images[0], "http") {
-			r.ImageUrls = req.Images
-		} else {
-			r.BinaryDataBase64 = req.Images
+		for index, raw := range req.Images {
+			normalized, isURL, err := normalizeJimengImageInput(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid image %d: %w", index, err)
+			}
+			if isURL {
+				r.ImageUrls = append(r.ImageUrls, normalized)
+			} else {
+				r.BinaryDataBase64 = append(r.BinaryDataBase64, normalized)
+			}
+		}
+		if len(r.ImageUrls) > 0 && len(r.BinaryDataBase64) > 0 {
+			return nil, errors.New("image inputs must all use URLs or base64")
 		}
 	}
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
+	}
+	if strings.TrimSpace(r.ReqKey) != expectedReqKey {
+		return nil, errors.New("can't change req_key with metadata")
+	}
+	if err := validateJimengPayloadImages(&r); err != nil {
+		return nil, err
+	}
+	if r.Frames <= 0 || r.Frames > maxTaskFrames {
+		return nil, fmt.Errorf("frames must be between 1 and %d", maxTaskFrames)
 	}
 
 	// 即梦视频3.0 ReqKey转换
@@ -426,6 +511,71 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 	return &r, nil
 }
 
+// normalizeJimengImageInput validates a user-provided image reference. URLs
+// are restricted to HTTP(S); data/raw-base64 inputs are decoded and checked
+// against the actual image signature before being sent to Jimeng.
+func normalizeJimengImageInput(raw string) (string, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false, errors.New("image input is empty")
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" &&
+		(strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) {
+		return raw, true, nil
+	}
+	encodedPayload := raw
+	if strings.HasPrefix(strings.ToLower(raw), "data:") {
+		comma := strings.IndexByte(raw, ',')
+		if comma < 0 {
+			return "", false, errors.New("invalid image data URL")
+		}
+		encodedPayload = raw[comma+1:]
+	}
+	// Jimeng limits each binary image to MaxFileSize. Enforce the equivalent
+	// bound for JSON/base64 inputs too; otherwise a caller could bypass the
+	// multipart limit and force a large allocation before upload.
+	maxEncoded := ((MaxFileSize + 2) / 3) * 4
+	if int64(len(encodedPayload)) > maxEncoded {
+		return "", false, fmt.Errorf("image payload exceeds maximum allowed size of %d bytes", MaxFileSize)
+	}
+	decoded, err := common.DecodeBase64Limited(encodedPayload, MaxFileSize)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid image base64: %w", err)
+	}
+	if _, err := service.ResolveImageMIME(decoded); err != nil {
+		return "", false, fmt.Errorf("invalid image base64: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(decoded), false, nil
+}
+
+func validateJimengPayloadImages(payload *requestPayload) error {
+	if payload == nil {
+		return errors.New("request payload is nil")
+	}
+	if len(payload.ImageUrls) > 0 && len(payload.BinaryDataBase64) > 0 {
+		return errors.New("image inputs must all use URLs or base64")
+	}
+	for i, imageURL := range payload.ImageUrls {
+		if _, isURL, err := normalizeJimengImageInput(imageURL); err != nil || !isURL {
+			if err != nil {
+				return fmt.Errorf("invalid image URL %d: %w", i, err)
+			}
+			return fmt.Errorf("invalid image URL %d", i)
+		}
+	}
+	for i, imageData := range payload.BinaryDataBase64 {
+		normalized, isURL, err := normalizeJimengImageInput(imageData)
+		if err != nil {
+			return fmt.Errorf("invalid image base64 %d: %w", i, err)
+		}
+		if isURL {
+			return fmt.Errorf("image base64 %d must not be a URL", i)
+		}
+		payload.BinaryDataBase64[i] = normalized
+	}
+	return nil
+}
+
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
 	resTask := responseTask{}
 	if err := common.Unmarshal(respBody, &resTask); err != nil {
@@ -439,6 +589,12 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Reason = resTask.Message
 		taskResult.Status = model.TaskStatusFailure
 		taskResult.Progress = "100%"
+		// An explicit provider error is authoritative. Do not let a stale or
+		// malformed nested status (for example `done`) turn this into success.
+		if taskResult.Reason == "" {
+			taskResult.Reason = "jimeng task failed"
+		}
+		return &taskResult, nil
 	}
 	switch resTask.Data.Status {
 	case "in_queue":
@@ -448,7 +604,13 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Status = model.TaskStatusSuccess
 		taskResult.Progress = "100%"
 	}
-	taskResult.Url = resTask.Data.VideoUrl
+	if taskResult.Status == model.TaskStatusSuccess {
+		if normalized, err := taskcommon.NormalizeTaskResultURL(resTask.Data.VideoUrl); err != nil {
+			return nil, fmt.Errorf("invalid jimeng video URL: %w", err)
+		} else {
+			taskResult.Url = normalized
+		}
+	}
 	return &taskResult, nil
 }
 

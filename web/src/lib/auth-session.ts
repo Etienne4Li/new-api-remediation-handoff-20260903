@@ -35,7 +35,7 @@ export type RefreshOutcome =
   | { kind: 'transient_error'; error: unknown }
   | { kind: 'out_of_sync'; code?: string }
 
-export interface AuthRefreshHTTPResponse {
+interface AuthRefreshHTTPResponse {
   status: number
   data?: unknown
   error?: unknown
@@ -52,14 +52,14 @@ export interface AuthRefreshRuntime {
   isCurrent?: () => boolean
 }
 
-export interface AuthTokenRotation {
+interface AuthTokenRotation {
   access_token: string
   token_type: string
   access_expires_at: number
   session: LoginSession
 }
 
-export class AuthRotationError extends Error {
+class AuthRotationError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'AuthRotationError'
@@ -75,13 +75,19 @@ const authClient = axios.create({
 })
 
 const refreshRaceDelays = [80, 200, 500] as const
-let refreshPromise: Promise<RefreshOutcome> | null = null
 let authEpoch = 0
 
 class AuthRefreshSupersededError extends Error {
   constructor() {
     super('Authentication refresh was superseded')
     this.name = 'AuthRefreshSupersededError'
+  }
+}
+
+class AuthRefreshWaitCancelledError extends Error {
+  constructor() {
+    super('Authentication refresh wait was cancelled')
+    this.name = 'AbortError'
   }
 }
 
@@ -317,27 +323,90 @@ async function performRefreshWithBrowserLock(
 ): Promise<RefreshOutcome> {
   try {
     if (typeof navigator === 'undefined' || !navigator.locks) {
-      return runRefresh(refreshEpoch)
+      return await runRefresh(refreshEpoch)
     }
-    return navigator.locks.request(
+    return await navigator.locks.request(
       'new-api:auth-refresh',
       { mode: 'exclusive' },
       () => runRefresh(refreshEpoch)
     )
   } catch (error: unknown) {
-    useAuthStore.getState().auth.setBootstrapState('idle')
+    if (authEpoch === refreshEpoch) {
+      useAuthStore.getState().auth.setBootstrapState('idle')
+    }
     return { kind: 'transient_error', error }
   }
 }
 
-export function refreshAuthentication(): Promise<RefreshOutcome> {
-  if (!refreshPromise) {
-    const refreshEpoch = authEpoch
-    refreshPromise = performRefreshWithBrowserLock(refreshEpoch).finally(() => {
-      refreshPromise = null
+function refreshWaitAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new AuthRefreshWaitCancelledError()
+}
+
+export function createAuthRefreshCoordinator(
+  performRefresh: () => Promise<RefreshOutcome>
+): (signal?: AbortSignal) => Promise<RefreshOutcome> {
+  let currentOperation: Promise<RefreshOutcome> | null = null
+
+  return (signal?: AbortSignal) => {
+    if (signal?.aborted) {
+      return Promise.reject(refreshWaitAbortReason(signal))
+    }
+
+    if (!currentOperation) {
+      let pending: Promise<RefreshOutcome>
+      try {
+        pending = performRefresh()
+      } catch (error: unknown) {
+        pending = Promise.reject(error)
+      }
+
+      const operation = pending.finally(() => {
+        if (currentOperation === operation) currentOperation = null
+      })
+      currentOperation = operation
+    }
+
+    const operation = currentOperation
+    if (!signal) return operation
+    const waitSignal = signal
+
+    return new Promise<RefreshOutcome>((resolve, reject) => {
+      let settled = false
+
+      function finish(settle: () => void) {
+        if (settled) return
+        settled = true
+        waitSignal.removeEventListener('abort', handleAbort)
+        settle()
+      }
+
+      function handleAbort() {
+        finish(() => reject(refreshWaitAbortReason(waitSignal)))
+      }
+
+      waitSignal.addEventListener('abort', handleAbort, { once: true })
+
+      void operation.then(
+        (outcome) => {
+          finish(() => resolve(outcome))
+        },
+        (error: unknown) => {
+          finish(() => reject(error))
+        }
+      )
+      if (waitSignal.aborted) handleAbort()
     })
   }
-  return refreshPromise
+}
+
+const coordinateAuthRefresh = createAuthRefreshCoordinator(() =>
+  performRefreshWithBrowserLock(authEpoch)
+)
+
+export function refreshAuthentication(
+  signal?: AbortSignal
+): Promise<RefreshOutcome> {
+  return coordinateAuthRefresh(signal)
 }
 
 function currentValidAuthBundle(): AuthBundle | null {
@@ -377,7 +446,7 @@ export async function bootstrapAuthentication(): Promise<RefreshOutcome> {
   return refreshAuthentication()
 }
 
-export function getCommonHeaders(): Record<string, string> {
+function getCommonHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }

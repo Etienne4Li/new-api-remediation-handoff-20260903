@@ -28,13 +28,7 @@ import {
 // Types
 // ============================================================================
 
-export interface DialogHandlers {
-  open: () => void
-  close: () => void
-  toggle: () => void
-}
-
-export interface DialogStateHandlers {
+interface DialogStateHandlers {
   reset: () => void
   isOpen: boolean
 }
@@ -53,33 +47,6 @@ export interface DialogsHandlers<T extends string> {
 // ============================================================================
 
 /**
- * Simple hook for managing a single dialog state with boolean value
- * @param initialOpen Initial dialog open state (default: false)
- * @returns Tuple of [isOpen, handlers]
- * @example
- * const [isOpen, handlers] = useDialog()
- * handlers.open()
- * handlers.close()
- * handlers.toggle()
- */
-export function useDialog(
-  initialOpen = false
-): readonly [boolean, DialogHandlers] {
-  const [isOpen, setIsOpen] = useState(initialOpen)
-
-  const handlers: DialogHandlers = useMemo(
-    () => ({
-      open: () => setIsOpen(true),
-      close: () => setIsOpen(false),
-      toggle: () => setIsOpen((prev) => !prev),
-    }),
-    []
-  )
-
-  return [isOpen, handlers] as const
-}
-
-/**
  * Hook for managing dialog state with custom value types
  * Useful for dialogs that need to track which item is being edited/viewed
  * @param initialState Initial dialog state (default: null)
@@ -94,7 +61,7 @@ export function useDialog(
  * const [user, setUser, handlers] = useDialogState<User>()
  * setUser({ id: 1, name: 'John' })
  */
-export function useDialogState<T = unknown>(
+export default function useDialogState<T = unknown>(
   initialState: T | null = null
 ): readonly [
   T | null,
@@ -179,8 +146,3 @@ export function useDialogs<T extends string>(): DialogsHandlers<T> {
     [open, close, toggle, openDialogs, closeAll, hasAnyOpen]
   )
 }
-
-/**
- * @deprecated Use named import useDialogState instead
- */
-export default useDialogState

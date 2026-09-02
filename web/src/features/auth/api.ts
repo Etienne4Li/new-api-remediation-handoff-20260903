@@ -30,6 +30,7 @@ import type {
   TwoFAPayload,
   RegisterPayload,
   ApiResponse,
+  OAuthFlowStart,
 } from './types'
 
 // ============================================================================
@@ -44,12 +45,12 @@ import type {
 export async function login(payload: LoginPayload) {
   const turnstile = payload.turnstile ?? ''
   const res = await api.post<LoginResponse>(
-    `/api/user/login?turnstile=${turnstile}`,
+    '/api/user/login',
     {
       username: payload.username,
       password: payload.password,
     },
-    { skipAuthRefresh: true }
+    { params: { turnstile }, skipAuthRefresh: true }
   )
   return res.data
 }
@@ -64,17 +65,24 @@ export async function login2fa(payload: TwoFAPayload) {
 
 interface LogoutRuntime {
   getExpectedSID: () => string | undefined
-  request: (expectedSID?: string) => Promise<ApiResponse>
-  refresh: () => Promise<RefreshOutcome>
+  request: (expectedSID?: string, signal?: AbortSignal) => Promise<ApiResponse>
+  refresh: (signal?: AbortSignal) => Promise<RefreshOutcome>
 }
 
 export async function executeLogout(
   runtime: LogoutRuntime,
-  allowMismatchRecovery = true
+  allowMismatchRecovery = true,
+  signal?: AbortSignal
 ): Promise<ApiResponse> {
+  if (signal?.aborted) throw signal.reason
+
   try {
-    return await runtime.request(runtime.getExpectedSID())
+    const response = await runtime.request(runtime.getExpectedSID(), signal)
+    if (signal?.aborted) throw signal.reason
+    return response
   } catch (error: unknown) {
+    if (signal?.aborted) throw signal.reason
+
     const code = axios.isAxiosError(error)
       ? error.response?.data?.code
       : undefined
@@ -84,9 +92,10 @@ export async function executeLogout(
       error.response?.status === 409 &&
       code === 'AUTH_SESSION_MISMATCH'
     ) {
-      const outcome = await runtime.refresh()
+      const outcome = await runtime.refresh(signal)
+      if (signal?.aborted) throw signal.reason
       if (outcome.kind === 'authenticated') {
-        return executeLogout(runtime, false)
+        return executeLogout(runtime, false, signal)
       }
       if (outcome.kind === 'anonymous') {
         return { success: true, message: '' }
@@ -97,19 +106,24 @@ export async function executeLogout(
 }
 
 // User logout
-export async function logout(): Promise<ApiResponse> {
-  return executeLogout({
-    getExpectedSID: () => useAuthStore.getState().auth.session?.sid,
-    request: async (sid) => {
-      const res = await api.post('/api/user/auth/logout', undefined, {
-        headers: sid ? { 'X-Auth-Session': sid } : undefined,
-        skipAuthRefresh: true,
-        skipErrorHandler: true,
-      })
-      return res.data
+export async function logout(signal?: AbortSignal): Promise<ApiResponse> {
+  return executeLogout(
+    {
+      getExpectedSID: () => useAuthStore.getState().auth.session?.sid,
+      request: async (sid, requestSignal) => {
+        const res = await api.post('/api/user/auth/logout', undefined, {
+          headers: sid ? { 'X-Auth-Session': sid } : undefined,
+          signal: requestSignal,
+          skipAuthRefresh: true,
+          skipErrorHandler: true,
+        })
+        return res.data
+      },
+      refresh: refreshAuthentication,
     },
-    refresh: refreshAuthentication,
-  })
+    true,
+    signal
+  )
 }
 
 // ----------------------------------------------------------------------------
@@ -132,29 +146,49 @@ export async function sendPasswordResetEmail(
 // ----------------------------------------------------------------------------
 
 // Start GitHub OAuth flow
-export async function githubOAuthStart(clientId: string, state: string) {
-  const url = `https://github.com/login/oauth/authorize?client_id=${clientId}&state=${state}&scope=user:email`
-  window.open(url)
-}
 
 // Get OAuth state for CSRF protection
 export async function createOAuthFlow(
   provider: string,
-  intent: 'login' | 'bind'
-): Promise<string> {
+  intent: 'login' | 'bind',
+  signal?: AbortSignal
+): Promise<OAuthFlowStart> {
   const aff = intent === 'login' ? getAffiliateCode() : ''
-  const res = await api.post(
+  const res = await api.post<ApiResponse<OAuthFlowStart | string>>(
     '/api/oauth/state',
     { provider, intent, aff: aff || undefined },
-    { skipAuthRefresh: intent === 'login' }
+    {
+      signal,
+      skipAuthRefresh: intent === 'login',
+      skipErrorHandler: true,
+    }
   )
-  if (res.data?.success) {
-    if (typeof res.data.data === 'string') return res.data.data
-    if (typeof res.data.data?.flow_token === 'string') {
-      return res.data.data.flow_token
+  if (res.data?.success && res.data.data && typeof res.data.data === 'object') {
+    const data = res.data.data as Partial<OAuthFlowStart>
+    if (
+      typeof data.flow_token === 'string' &&
+      typeof data.code_challenge === 'string' &&
+      data.code_challenge.length > 0
+    ) {
+      return {
+        flow_token: data.flow_token,
+        code_challenge: data.code_challenge,
+        code_challenge_method:
+          data.code_challenge_method === 'S256'
+            ? data.code_challenge_method
+            : 'S256',
+        redirect_uri:
+          typeof data.redirect_uri === 'string' && data.redirect_uri.length > 0
+            ? data.redirect_uri
+            : undefined,
+        expires_at:
+          typeof data.expires_at === 'number' ? data.expires_at : undefined,
+      }
     }
   }
-  throw new Error(res.data?.message || 'Failed to initialize OAuth')
+  throw new Error(
+    res.data?.message || 'OAuth PKCE challenge is missing; please retry'
+  )
 }
 
 // WeChat login by authorization code
@@ -200,13 +234,3 @@ export async function sendEmailVerification(
 }
 
 // Bind email to OAuth account
-export async function bindEmail(
-  email: string,
-  code: string
-): Promise<ApiResponse> {
-  const res = await api.post('/api/oauth/email/bind', {
-    email,
-    code,
-  })
-  return res.data
-}

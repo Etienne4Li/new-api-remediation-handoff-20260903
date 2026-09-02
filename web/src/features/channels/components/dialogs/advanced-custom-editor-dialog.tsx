@@ -196,7 +196,7 @@ function getRouteConverters(
   return [...converters.values()]
 }
 
-export function RouteModeBadges(props: { routes: AdvancedCustomRoute[] }) {
+function RouteModeBadges(props: { routes: AdvancedCustomRoute[] }) {
   const { t } = useTranslation()
   return getRouteConverters(props.routes).map((item) => (
     <Badge

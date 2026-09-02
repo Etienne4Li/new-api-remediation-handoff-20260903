@@ -24,13 +24,26 @@ import (
 const (
 	upstreamModelsURL  = "https://basellm.github.io/llm-metadata/api/newapi/models.json"
 	upstreamVendorsURL = "https://basellm.github.io/llm-metadata/api/newapi/vendors.json"
+
+	// Sync metadata is small and should complete quickly. Keep environment
+	// controls finite so a typo cannot create an effectively unbounded response
+	// allocation, retry storm, or duration overflow.
+	maxSyncHTTPTimeoutSeconds int64 = 24 * 60 * 60
+	maxSyncHTTPRetries              = 10
+	maxSyncHTTPResponseMB           = 64
 )
 
 func normalizeLocale(locale string) (string, bool) {
 	l := strings.ToLower(strings.TrimSpace(locale))
 	switch l {
-	case "en", "zh-CN", "zh-TW", "ja":
-		return l, true
+	case "en":
+		return "en", true
+	case "zh-cn":
+		return "zh-CN", true
+	case "zh-tw":
+		return "zh-TW", true
+	case "ja":
+		return "ja", true
 	default:
 		return "", false
 	}
@@ -90,14 +103,14 @@ type syncRequest struct {
 }
 
 func newHTTPClient() *http.Client {
-	timeoutSec := common.GetEnvOrDefault("SYNC_HTTP_TIMEOUT_SECONDS", 10)
-	dialer := &net.Dialer{Timeout: time.Duration(timeoutSec) * time.Second}
+	timeout := syncHTTPTimeout(10)
+	dialer := &net.Dialer{Timeout: timeout}
 	transport := &http.Transport{
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   time.Duration(timeoutSec) * time.Second,
+		TLSHandshakeTimeout:   timeout,
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: time.Duration(timeoutSec) * time.Second,
+		ResponseHeaderTimeout: timeout,
 	}
 	if common.TLSInsecureSkipVerify {
 		transport.TLSClientConfig = common.InsecureTLSConfig
@@ -115,7 +128,29 @@ func newHTTPClient() *http.Client {
 		}
 		return dialer.DialContext(ctx, network, addr)
 	}
-	return &http.Client{Transport: transport}
+	return &http.Client{
+		Transport: transport,
+		// Metadata synchronization is expected to use the configured URL
+		// directly. Refusing redirects prevents a compromised endpoint or
+		// proxy from silently changing the data source.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func syncHTTPTimeout(defaultSeconds int64) time.Duration {
+	return common.GetEnvOrDefaultDurationSeconds(
+		"SYNC_HTTP_TIMEOUT_SECONDS", defaultSeconds, 1, maxSyncHTTPTimeoutSeconds,
+	)
+}
+
+func getSyncHTTPRetryCount() int {
+	return common.GetEnvOrDefaultBounded("SYNC_HTTP_RETRY", 3, 1, maxSyncHTTPRetries)
+}
+
+func getSyncHTTPResponseLimitMB() int {
+	return common.GetEnvOrDefaultBounded("SYNC_HTTP_MAX_MB", 10, 1, maxSyncHTTPResponseMB)
 }
 
 var (
@@ -132,14 +167,13 @@ func getHTTPClient() *http.Client {
 
 func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T]) error {
 	var lastErr error
-	attempts := common.GetEnvOrDefault("SYNC_HTTP_RETRY", 3)
-	if attempts < 1 {
-		attempts = 1
-	}
+	attempts := getSyncHTTPRetryCount()
 	baseDelay := 200 * time.Millisecond
-	maxMB := common.GetEnvOrDefault("SYNC_HTTP_MAX_MB", 10)
+	maxMB := getSyncHTTPResponseLimitMB()
 	maxBytes := int64(maxMB) << 20
 	for attempt := 0; attempt < attempts; attempt++ {
+		// Clear data from a prior attempt before decoding a retry response.
+		*out = upstreamEnvelope[T]{}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
@@ -154,19 +188,19 @@ func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T])
 		resp, err := getHTTPClient().Do(req)
 		if err != nil {
 			lastErr = err
-			// backoff with jitter
-			sleep := baseDelay * time.Duration(1<<attempt)
-			jitter := time.Duration(rand.Intn(150)) * time.Millisecond
-			time.Sleep(sleep + jitter)
+			if attempt+1 < attempts && !waitSyncRetry(ctx, baseDelay, attempt) {
+				return ctx.Err()
+			}
 			continue
 		}
 		func() {
 			defer resp.Body.Close()
 			switch resp.StatusCode {
 			case http.StatusOK:
-				// read body into buffer for caching and flexible decode
-				limited := io.LimitReader(resp.Body, maxBytes)
-				buf, err := io.ReadAll(limited)
+				// Read one sentinel byte past the configured limit so chunked or
+				// otherwise inaccurate Content-Length responses are rejected rather
+				// than silently truncated and cached as valid metadata.
+				buf, err := common.ReadBodyLimited(resp.Body, resp.ContentLength, maxBytes)
 				if err != nil {
 					lastErr = err
 					return
@@ -180,10 +214,10 @@ func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T])
 				cacheMutex.Unlock()
 
 				// Try decode as envelope first
-				if err := json.Unmarshal(buf, out); err != nil {
+				if err := common.Unmarshal(buf, out); err != nil {
 					// Try decode as pure array
 					var arr []T
-					if err2 := json.Unmarshal(buf, &arr); err2 != nil {
+					if err2 := common.Unmarshal(buf, &arr); err2 != nil {
 						lastErr = err
 						return
 					}
@@ -205,9 +239,9 @@ func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T])
 					lastErr = errors.New("cache miss for 304 response")
 					return
 				}
-				if err := json.Unmarshal(buf, out); err != nil {
+				if err := common.Unmarshal(buf, out); err != nil {
 					var arr []T
-					if err2 := json.Unmarshal(buf, &arr); err2 != nil {
+					if err2 := common.Unmarshal(buf, &arr); err2 != nil {
 						lastErr = err
 						return
 					}
@@ -227,24 +261,43 @@ func fetchJSON[T any](ctx context.Context, url string, out *upstreamEnvelope[T])
 		if lastErr == nil {
 			return nil
 		}
-		sleep := baseDelay * time.Duration(1<<attempt)
-		jitter := time.Duration(rand.Intn(150)) * time.Millisecond
-		time.Sleep(sleep + jitter)
+		if attempt+1 < attempts && !waitSyncRetry(ctx, baseDelay, attempt) {
+			return ctx.Err()
+		}
 	}
 	return lastErr
 }
 
-func ensureVendorID(vendorName string, vendorByName map[string]upstreamVendor, vendorIDCache map[string]int, createdVendors *int) int {
+func waitSyncRetry(ctx context.Context, baseDelay time.Duration, attempt int) bool {
+	// attempts is bounded above, so the shift and multiplication remain
+	// representable. The timer/select makes cancellation prompt during backoff.
+	sleep := baseDelay * time.Duration(1<<attempt)
+	jitter := time.Duration(rand.Intn(150)) * time.Millisecond
+	timer := time.NewTimer(sleep + jitter)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func ensureVendorID(vendorName string, vendorByName map[string]upstreamVendor, vendorIDCache map[string]int, createdVendors *int) (int, error) {
 	if vendorName == "" {
-		return 0
+		return 0, nil
 	}
 	if id, ok := vendorIDCache[vendorName]; ok {
-		return id
+		return id, nil
 	}
 	var existing model.Vendor
-	if err := model.DB.Where("name = ?", vendorName).First(&existing).Error; err == nil {
+	lookupErr := model.DB.Where("name = ?", vendorName).First(&existing).Error
+	if lookupErr == nil {
 		vendorIDCache[vendorName] = existing.Id
-		return existing.Id
+		return existing.Id, nil
+	}
+	if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		return 0, fmt.Errorf("lookup vendor %q: %w", vendorName, lookupErr)
 	}
 	uv := vendorByName[vendorName]
 	v := &model.Vendor{
@@ -256,10 +309,10 @@ func ensureVendorID(vendorName string, vendorByName map[string]upstreamVendor, v
 	if err := v.Insert(); err == nil {
 		*createdVendors++
 		vendorIDCache[vendorName] = v.Id
-		return v.Id
+		return v.Id, nil
+	} else {
+		return 0, fmt.Errorf("create vendor %q: %w", vendorName, err)
 	}
-	vendorIDCache[vendorName] = 0
-	return 0
 }
 
 // SyncUpstreamModels 同步上游模型与供应商：
@@ -267,8 +320,12 @@ func ensureVendorID(vendorName string, vendorByName map[string]upstreamVendor, v
 // - 可通过 overwrite 选择性覆盖更新本地已有模型的字段（前提：sync_official <> 0）
 func SyncUpstreamModels(c *gin.Context) {
 	var req syncRequest
-	// 允许空体
-	_ = c.ShouldBindJSON(&req)
+	// An empty body is equivalent to the default request, but malformed JSON
+	// must be rejected before any synchronization work starts.
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		common.ApiError(c, err)
+		return
+	}
 	// 1) 获取未配置模型列表
 	missing, err := model.GetMissingModels()
 	if err != nil {
@@ -300,30 +357,31 @@ func SyncUpstreamModels(c *gin.Context) {
 	}
 
 	// 2) 拉取上游 vendors 与 models
-	timeoutSec := common.GetEnvOrDefault("SYNC_HTTP_TIMEOUT_SECONDS", 15)
-	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), syncHTTPTimeout(15))
 	defer cancel()
 
 	modelsURL, vendorsURL := getUpstreamURLs(req.Locale)
 	var vendorsEnv upstreamEnvelope[upstreamVendor]
 	var modelsEnv upstreamEnvelope[upstreamModel]
-	var fetchErr error
+	var modelsErr error
+	var vendorsErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		// vendor 失败不拦截
-		_ = fetchJSON(ctx, vendorsURL, &vendorsEnv)
+		vendorsErr = fetchJSON(ctx, vendorsURL, &vendorsEnv)
 	}()
 	go func() {
 		defer wg.Done()
-		if err := fetchJSON(ctx, modelsURL, &modelsEnv); err != nil {
-			fetchErr = err
-		}
+		modelsErr = fetchJSON(ctx, modelsURL, &modelsEnv)
 	}()
 	wg.Wait()
-	if fetchErr != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取上游模型失败: " + fetchErr.Error(), "locale": req.Locale, "source_urls": gin.H{"models_url": modelsURL, "vendors_url": vendorsURL}})
+	if modelsErr != nil || vendorsErr != nil {
+		fetchErr := modelsErr
+		if fetchErr == nil {
+			fetchErr = vendorsErr
+		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": common.MaskSensitiveInfo("获取上游元数据失败: " + fetchErr.Error()), "locale": req.Locale, "source_urls": gin.H{"models_url": common.MaskSensitiveInfo(modelsURL), "vendors_url": common.MaskSensitiveInfo(vendorsURL)}})
 		return
 	}
 
@@ -361,15 +419,23 @@ func SyncUpstreamModels(c *gin.Context) {
 
 		// 若本地已存在且设置为不同步，则跳过（极端情况：缺失列表与本地状态不同步时）
 		var existing model.Model
-		if err := model.DB.Where("model_name = ?", name).First(&existing).Error; err == nil {
+		lookupErr := model.DB.Where("model_name = ?", name).First(&existing).Error
+		if lookupErr == nil {
 			if existing.SyncOfficial == 0 {
 				skipped = append(skipped, name)
 				continue
 			}
+		} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			common.ApiError(c, fmt.Errorf("lookup model %q: %w", name, lookupErr))
+			return
 		}
 
 		// 确保 vendor 存在
-		vendorID := ensureVendorID(up.VendorName, vendorByName, vendorIDCache, &createdVendors)
+		vendorID, vendorErr := ensureVendorID(up.VendorName, vendorByName, vendorIDCache, &createdVendors)
+		if vendorErr != nil {
+			common.ApiError(c, vendorErr)
+			return
+		}
 
 		// 创建模型
 		mi := &model.Model{
@@ -385,7 +451,8 @@ func SyncUpstreamModels(c *gin.Context) {
 			createdModels++
 			createdList = append(createdList, name)
 		} else {
-			skipped = append(skipped, name)
+			common.ApiError(c, fmt.Errorf("create model %q: %w", name, err))
+			return
 		}
 	}
 
@@ -399,6 +466,10 @@ func SyncUpstreamModels(c *gin.Context) {
 			}
 			var local model.Model
 			if err := model.DB.Where("model_name = ?", ow.ModelName).First(&local).Error; err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					common.ApiError(c, fmt.Errorf("lookup model %q: %w", ow.ModelName, err))
+					return
+				}
 				continue
 			}
 
@@ -408,10 +479,15 @@ func SyncUpstreamModels(c *gin.Context) {
 			}
 
 			// 映射 vendor
-			newVendorID := ensureVendorID(up.VendorName, vendorByName, vendorIDCache, &createdVendors)
+			newVendorID, vendorErr := ensureVendorID(up.VendorName, vendorByName, vendorIDCache, &createdVendors)
+			if vendorErr != nil {
+				common.ApiError(c, vendorErr)
+				return
+			}
 
 			// 应用字段覆盖（事务）
-			_ = model.DB.Transaction(func(tx *gorm.DB) error {
+			updated := false
+			if err := model.DB.Transaction(func(tx *gorm.DB) error {
 				needUpdate := false
 				if containsField(ow.Fields, "description") {
 					local.Description = up.Description
@@ -440,13 +516,25 @@ func SyncUpstreamModels(c *gin.Context) {
 				if !needUpdate {
 					return nil
 				}
-				if err := tx.Save(&local).Error; err != nil {
-					return err
+				result := tx.Model(&model.Model{}).Where("id = ?", local.Id).
+					Select("description", "icon", "tags", "vendor_id", "name_rule", "status", "updated_time").
+					Updates(&local)
+				if result.Error != nil {
+					return result.Error
 				}
+				if result.RowsAffected == 0 {
+					return gorm.ErrRecordNotFound
+				}
+				updated = true
+				return nil
+			}); err != nil {
+				common.ApiError(c, fmt.Errorf("update model %q: %w", ow.ModelName, err))
+				return
+			}
+			if updated {
 				updatedModels++
 				updatedList = append(updatedList, ow.ModelName)
-				return nil
-			})
+			}
 		}
 	}
 
@@ -498,8 +586,7 @@ func chooseStatus(primary, fallback int) int {
 // SyncUpstreamPreview 预览上游与本地的差异（仅用于弹窗选择）
 func SyncUpstreamPreview(c *gin.Context) {
 	// 1) 拉取上游数据
-	timeoutSec := common.GetEnvOrDefault("SYNC_HTTP_TIMEOUT_SECONDS", 15)
-	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), syncHTTPTimeout(15))
 	defer cancel()
 
 	locale := c.Query("locale")
@@ -507,22 +594,25 @@ func SyncUpstreamPreview(c *gin.Context) {
 
 	var vendorsEnv upstreamEnvelope[upstreamVendor]
 	var modelsEnv upstreamEnvelope[upstreamModel]
-	var fetchErr error
+	var modelsErr error
+	var vendorsErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_ = fetchJSON(ctx, vendorsURL, &vendorsEnv)
+		vendorsErr = fetchJSON(ctx, vendorsURL, &vendorsEnv)
 	}()
 	go func() {
 		defer wg.Done()
-		if err := fetchJSON(ctx, modelsURL, &modelsEnv); err != nil {
-			fetchErr = err
-		}
+		modelsErr = fetchJSON(ctx, modelsURL, &modelsEnv)
 	}()
 	wg.Wait()
-	if fetchErr != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取上游模型失败: " + fetchErr.Error(), "locale": locale, "source_urls": gin.H{"models_url": modelsURL, "vendors_url": vendorsURL}})
+	if modelsErr != nil || vendorsErr != nil {
+		fetchErr := modelsErr
+		if fetchErr == nil {
+			fetchErr = vendorsErr
+		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": common.MaskSensitiveInfo("获取上游元数据失败: " + fetchErr.Error()), "locale": locale, "source_urls": gin.H{"models_url": common.MaskSensitiveInfo(modelsURL), "vendors_url": common.MaskSensitiveInfo(vendorsURL)}})
 		return
 	}
 
@@ -544,7 +634,10 @@ func SyncUpstreamPreview(c *gin.Context) {
 	// 2) 本地已有模型
 	var locals []model.Model
 	if len(upstreamNames) > 0 {
-		_ = model.DB.Where("model_name IN ? AND sync_official <> 0", upstreamNames).Find(&locals).Error
+		if err := model.DB.Where("model_name IN ? AND sync_official <> 0", upstreamNames).Find(&locals).Error; err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 
 	// 本地 vendor 名称映射
@@ -561,14 +654,21 @@ func SyncUpstreamPreview(c *gin.Context) {
 	idToVendorName := make(map[int]string)
 	if len(vendorIDs) > 0 {
 		var dbVendors []model.Vendor
-		_ = model.DB.Where("id IN ?", vendorIDs).Find(&dbVendors).Error
+		if err := model.DB.Where("id IN ?", vendorIDs).Find(&dbVendors).Error; err != nil {
+			common.ApiError(c, err)
+			return
+		}
 		for _, v := range dbVendors {
 			idToVendorName[v.Id] = v.Name
 		}
 	}
 
 	// 3) 缺失且上游存在的模型
-	missingList, _ := model.GetMissingModels()
+	missingList, err := model.GetMissingModels()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	var missing []string
 	for _, name := range missingList {
 		if _, ok := modelByName[name]; ok {

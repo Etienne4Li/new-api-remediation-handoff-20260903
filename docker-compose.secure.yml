@@ -1,0 +1,232 @@
+# Hardened production-oriented Compose baseline.
+#
+# This file intentionally requires immutable image references and secret files.
+# It is separate from docker-compose.yml so the latter remains a convenient
+# development quick-start.  See docs/deployment/secure-compose.md before use.
+
+services:
+  new-api:
+    image: ${NEW_API_IMAGE:?Set NEW_API_IMAGE to an immutable image@sha256:digest}
+    container_name: new-api-secure
+    labels:
+      com.newapi.stack: secure
+      com.newapi.environment: production
+    restart: unless-stopped
+    init: true
+    command: ["--log-dir", "/app/logs"]
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run:rw,noexec,nosuid,size=16m
+    ports:
+      # Keep the application private to the host; terminate TLS and expose it
+      # through the edge proxy. Override NEWAPI_BIND_ADDRESS only when a
+      # deliberately public listener is required.
+      - "${NEWAPI_BIND_ADDRESS:-127.0.0.1}:3000:3000"
+    volumes:
+      - ${NEWAPI_DATA_DIR:-./secure-data}:/data
+      - ${NEWAPI_LOG_DIR:-./secure-logs}:/app/logs
+    secrets:
+      - session_secret
+      - crypto_secret
+      - sql_dsn
+      - redis_conn_string
+    environment:
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      CRYPTO_SECRET_FILE: /run/secrets/crypto_secret
+      SQL_DSN_FILE: /run/secrets/sql_dsn
+      REDIS_CONN_STRING_FILE: /run/secrets/redis_conn_string
+      TZ: ${TZ:-UTC}
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+      NODE_NAME: ${NODE_NAME:-new-api-secure-1}
+      # The application performs bounded, resumable cleanup only when this is
+      # explicitly enabled. Pick retention values that satisfy local legal and
+      # audit requirements before enabling it.
+      RETENTION_CLEANUP_ENABLED: ${RETENTION_CLEANUP_ENABLED:-false}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
+      SYSTEM_TASK_RETENTION_DAYS: ${SYSTEM_TASK_RETENTION_DAYS:-30}
+      RETENTION_CLEANUP_INTERVAL_HOURS: ${RETENTION_CLEANUP_INTERVAL_HOURS:-24}
+      RETENTION_CLEANUP_BATCH_SIZE: ${RETENTION_CLEANUP_BATCH_SIZE:-100}
+      RETENTION_CLEANUP_MAX_BATCHES: ${RETENTION_CLEANUP_MAX_BATCHES:-100}
+      LOG_MAX_SIZE_MB: ${LOG_MAX_SIZE_MB:-100}
+      LOG_MAX_FILES: ${LOG_MAX_FILES:-30}
+      # Keep these bounded in production; the values are examples, not
+      # substitutes for capacity testing.
+      SQL_MAX_IDLE_CONNS: ${SQL_MAX_IDLE_CONNS:-20}
+      SQL_MAX_OPEN_CONNS: ${SQL_MAX_OPEN_CONNS:-100}
+      SQL_MAX_LIFETIME: ${SQL_MAX_LIFETIME:-300}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - edge
+      - backend
+    mem_limit: ${NEWAPI_MEMORY_LIMIT:-1g}
+    cpus: ${NEWAPI_CPUS:-2.0}
+    pids_limit: ${NEWAPI_PIDS_LIMIT:-512}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:3000/api/status | grep -q '"success"[[:space:]]*:[[:space:]]*true'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+
+  redis:
+    image: ${NEWAPI_REDIS_IMAGE:?Set NEWAPI_REDIS_IMAGE to an immutable redis image@sha256:digest}
+    container_name: new-api-secure-redis
+    labels:
+      com.newapi.stack: secure
+      com.newapi.environment: production
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    secrets:
+      - redis_password
+    environment:
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-256mb}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pass="$$(cat /run/secrets/redis_password)"
+        test -n "$$pass"
+        # Passwords are generated as hex in the deployment runbook. Reject
+        # whitespace/control characters so the generated ACL cannot be
+        # truncated or interpreted as multiple rules.
+        printf '%s' "$$pass" | grep -Eq '^[A-Za-z0-9._~-]{32,}$'
+        umask 077
+        # Keep this an explicit command allow-list.  Redis command categories
+        # such as @read/@write/@scripting also include administrative or
+        # destructive commands (for example KEYS, FLUSHDB, MIGRATE, CONFIG,
+        # FUNCTION and CLIENT).  The list below covers the commands used by
+        # NewAPI's go-redis client and its Lua scripts; add a command here only
+        # after reviewing its key access and side effects.  The rate limiter
+        # uses EVALSHA with an EVAL fallback, so SCRIPT LOAD is intentionally
+        # not granted (Lua script caches are lost on Redis restart).
+        printf '%s\n' \
+          'user default off' \
+          "user newapi on >$$pass ~* +auth +select +ping +quit +hello +get +set +setnx +setex +getdel +del +unlink +exists +expire +pexpire +expireat +pexpireat +persist +ttl +pttl +hget +hgetall +hset +hsetnx +hdel +hexists +hmget +hmset +hincrby +mget +incr +incrby +decr +decrby +llen +lindex +lpush +ltrim +scan +eval +evalsha +watch +multi +exec +discard +unwatch +time" \
+          > /tmp/users.acl
+        exec redis-server \
+          --aclfile /tmp/users.acl \
+          --protected-mode yes \
+          --bind 0.0.0.0 \
+          --appendonly yes \
+          --appendfsync everysec \
+          --auto-aof-rewrite-percentage 100 \
+          --auto-aof-rewrite-min-size 64mb \
+          --save 900 1 --save 300 10 --save 60 10000 \
+          --maxmemory "$$REDIS_MAXMEMORY" \
+          --maxmemory-policy volatile-lru \
+          --dir /data
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    mem_limit: ${REDIS_MEMORY_LIMIT:-384m}
+    cpus: ${REDIS_CPUS:-1.0}
+    pids_limit: ${REDIS_PIDS_LIMIT:-128}
+    logging: *default-logging
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$(cat /run/secrets/redis_password)" redis-cli --user newapi ping | grep -q PONG
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  postgres:
+    image: ${NEWAPI_POSTGRES_IMAGE:?Set NEWAPI_POSTGRES_IMAGE to an immutable postgres image@sha256:digest}
+    container_name: new-api-secure-postgres
+    labels:
+      com.newapi.stack: secure
+      com.newapi.environment: production
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run/postgresql:rw,noexec,nosuid,size=16m
+    secrets:
+      - postgres_password
+    environment:
+      POSTGRES_USER: newapi
+      POSTGRES_DB: new-api
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    cpus: ${POSTGRES_CPUS:-2.0}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-256}
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newapi -d new-api"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 60s
+
+secrets:
+  # Keep this directory outside the repository and mode 0700.  The files are
+  # mounted read-only at /run/secrets by Compose and are never placed in the
+  # service environment.
+  session_secret:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/session_secret
+  crypto_secret:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/crypto_secret
+  sql_dsn:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/sql_dsn
+  redis_conn_string:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/redis_conn_string
+  redis_password:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/redis_password
+  postgres_password:
+    file: ${NEWAPI_SECRET_DIR:-./secrets}/postgres_password
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  # The edge network is only for the API container and the local reverse
+  # proxy.  Databases have no route to the host or the public network.
+  edge:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true

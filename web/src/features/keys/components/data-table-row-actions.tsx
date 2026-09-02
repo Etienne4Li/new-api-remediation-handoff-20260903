@@ -48,10 +48,15 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { useChatPresets } from '@/features/chat/hooks/use-chat-presets'
-import { resolveChatUrl, type ChatPreset } from '@/features/chat/lib/chat-links'
+import {
+  chatLinkRequiresApiKey,
+  resolveChatUrl,
+  type ChatPreset,
+} from '@/features/chat/lib/chat-links'
 import { sendToFluent } from '@/features/chat/lib/send-to-fluent'
 import { encodeChannelConnectionInfo } from '@/lib/channel-connection-info'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
+import { readCachedStatus } from '@/lib/status-cache'
 
 import { updateApiKeyStatus } from '../api'
 import { API_KEY_STATUS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
@@ -59,15 +64,8 @@ import { apiKeySchema } from '../types'
 import { useApiKeys } from './api-keys-provider'
 
 function getServerAddress(): string {
-  try {
-    const raw = localStorage.getItem('status')
-    if (raw) {
-      const status = JSON.parse(raw)
-      if (status.server_address) return status.server_address as string
-    }
-  } catch {
-    /* empty */
-  }
+  const status = readCachedStatus<Record<string, unknown>>()
+  if (typeof status?.server_address === 'string') return status.server_address
   return window.location.origin
 }
 
@@ -116,10 +114,19 @@ export function DataTableRowActions<TData>({
 
   const handleOpenChatPreset = useCallback(
     async (preset: ChatPreset) => {
-      const realKey = await resolveRealKey(apiKey.id)
-      if (!realKey) return
+      // Chat presets are untrusted destinations. Do not resolve or inject a
+      // long-lived key into either a web URL or a custom-protocol URL. Users
+      // can still copy a key explicitly from the key-management actions.
+      if (chatLinkRequiresApiKey(preset.url)) {
+        toast.error(
+          t('For security, chat links that include an API key are disabled.')
+        )
+        return
+      }
 
       if (preset.type === 'fluent') {
+        const realKey = await resolveRealKey(apiKey.id)
+        if (!realKey) return
         const success = sendToFluent(realKey, serverAddress)
         if (success) {
           toast.success(t('Sent the API key to FluentRead.'))
@@ -135,7 +142,6 @@ export function DataTableRowActions<TData>({
 
       const resolvedUrl = resolveChatUrl({
         template: preset.url,
-        apiKey: realKey,
         serverAddress,
       })
 

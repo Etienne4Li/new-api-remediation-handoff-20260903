@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 
@@ -42,7 +41,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 			if service.SundaySearch(data, "usage") {
 				var simpleResponse dto.SimpleResponse
 				if err := common.Unmarshal([]byte(data), &simpleResponse); err != nil {
-					logger.LogError(c, err.Error())
+					logger.LogError(c, "failed to decode TTS usage event: error_meta="+common.SensitiveLogMeta(err.Error()))
 					sr.Error(err)
 				} else if simpleResponse.Usage.TotalTokens != 0 {
 					usage.PromptTokens = simpleResponse.Usage.InputTokens
@@ -57,9 +56,10 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	} else {
 		common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		// 读取响应体到缓冲区
-		bodyBytes, err := io.ReadAll(resp.Body)
+		maxBytes := common.GetMaxFileDownloadBytes()
+		bodyBytes, err := service.ReadProviderResponseBody(resp, maxBytes)
 		if err != nil {
-			logger.LogError(c, fmt.Sprintf("failed to read TTS response body: %v", err))
+			logger.LogError(c, fmt.Sprintf("failed to read TTS response body: error_meta=%s", common.SensitiveLogMeta(err.Error())))
 			c.Writer.WriteHeaderNow()
 			return usage
 		}
@@ -68,7 +68,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		c.Writer.WriteHeaderNow()
 		_, err = c.Writer.Write(bodyBytes)
 		if err != nil {
-			logger.LogError(c, fmt.Sprintf("failed to write TTS response: %v", err))
+			logger.LogError(c, fmt.Sprintf("failed to write TTS response: error_meta=%s", common.SensitiveLogMeta(err.Error())))
 		}
 
 		// 计算音频时长并更新 usage
@@ -96,7 +96,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		usage.PromptTokensDetails.TextTokens = usage.PromptTokens
 
 		if durationErr != nil {
-			logger.LogWarn(c, fmt.Sprintf("failed to get audio duration: %v", durationErr))
+			logger.LogWarn(c, fmt.Sprintf("failed to get audio duration: error_meta=%s", common.SensitiveLogMeta(durationErr.Error())))
 			// 如果无法获取时长，则设置保底的 CompletionTokens，根据body大小计算
 			sizeInKB := float64(len(bodyBytes)) / 1000.0
 			estimatedTokens := int(math.Ceil(sizeInKB)) // 粗略估算每KB约等于1 token
@@ -109,7 +109,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 			usage.CompletionTokens = completionTokens
 			usage.CompletionTokenDetails.AudioTokens = completionTokens
 		}
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	}
 
 	return usage
@@ -118,7 +118,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, responseFormat string) (*types.NewAPIError, *dto.Usage) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
@@ -144,6 +144,6 @@ func OpenaiSTTHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 	usage := &dto.Usage{}
 	usage.PromptTokens = info.GetEstimatePromptTokens()
 	usage.CompletionTokens = 0
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	return nil, usage
 }

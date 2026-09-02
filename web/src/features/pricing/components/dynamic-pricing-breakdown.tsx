@@ -217,7 +217,7 @@ export function DynamicPricingBreakdown({
       <section className={cn('min-w-0', !compact && 'py-4')}>
         {!compact && (
           <div className='mb-3 flex items-center gap-2'>
-            <span className='inline-flex size-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 shadow-sm dark:bg-amber-500/20 dark:text-amber-300'>
+            <span className='inline-flex size-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'>
               <TagIcon className='size-3.5' />
             </span>
             <div>
@@ -230,7 +230,7 @@ export function DynamicPricingBreakdown({
             </div>
           </div>
         )}
-        <div className='text-muted-foreground mb-1 text-[10px] font-medium tracking-wider uppercase'>
+        <div className='text-muted-foreground mb-1 text-[10px] font-medium uppercase'>
           {t('Raw expression')}
         </div>
         <code className='text-muted-foreground block text-xs break-all'>
@@ -254,7 +254,7 @@ export function DynamicPricingBreakdown({
     <section className={cn('min-w-0', !compact && 'py-3 sm:py-4')}>
       {!compact && (
         <div className='mb-3 flex items-start gap-2 sm:mb-4'>
-          <span className='mt-0.5 inline-flex size-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 shadow-sm dark:bg-amber-500/20 dark:text-amber-300'>
+          <span className='mt-0.5 inline-flex size-6 items-center justify-center rounded-lg bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'>
             <TagIcon className='size-3.5' />
           </span>
           <div>
@@ -326,7 +326,7 @@ export function DynamicPricingBreakdown({
                       )
                       return (
                         <div key={v.field} className='min-w-0'>
-                          <div className='text-muted-foreground truncate text-[10px] font-medium tracking-wider uppercase'>
+                          <div className='text-muted-foreground truncate text-[10px] font-medium uppercase'>
                             {t(v.shortLabel)}
                           </div>
                           <div

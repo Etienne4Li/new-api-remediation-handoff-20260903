@@ -3,7 +3,6 @@ package gemini
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,11 +20,11 @@ import (
 func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	logger.LogDebug(c, "Gemini responses response body: %s", responseBody)
+	logger.LogDebug(c, "Gemini responses response_meta=%s", common.SensitiveLogBody(responseBody))
 
 	var geminiResponse dto.GeminiChatResponse
 	if err := common.Unmarshal(responseBody, &geminiResponse); err != nil {
@@ -94,6 +93,7 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 	toolCallIndexByChoice := make(map[int]map[string]int)
 	nextToolCallIndexByChoice := make(map[int]int)
 	var streamErr *types.NewAPIError
+	observation := &relaycommon.ResponsesStreamBillingObservation{}
 
 	sendEvent := func(event relayconvert.ChatToResponsesStreamEvent) bool {
 		data, err := common.Marshal(event.Payload)
@@ -124,6 +124,7 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 	}
 
 	usage, streamAPIError := geminiStreamHandler(c, info, resp, func(data string, geminiResponse *dto.GeminiChatResponse) bool {
+		observation.ObserveGeminiResponse(geminiResponse)
 		response, isStop := streamResponseGeminiChat2OpenAI(geminiResponse)
 		response.Id = responseID
 		response.Created = created
@@ -163,10 +164,17 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 		}
 		return true
 	})
+	// Gemini's native stream uses candidate.finishReason as its terminal
+	// protocol signal. Publish it before finalization so a client disconnect or
+	// scanner EOF cannot be mistaken for a synthetic Responses completion.
+	observation.ApplyResponsesStreamBillingMarkers(c, info, streamAPIError != nil || streamErr != nil, false)
 	if streamAPIError != nil {
 		return usage, streamAPIError
 	}
 	if streamErr != nil {
+		if observation.ObservedOutput || observation.HasUpstreamUsage {
+			return usage, streamErr
+		}
 		return nil, streamErr
 	}
 

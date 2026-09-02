@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -296,7 +296,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		// 没有做排除3.5Haiku等，要出问题再加吧，最佳兼容性（不是
 		if request.THINKING != nil && strings.HasPrefix(info.UpstreamModelName, "anthropic") {
 			var thinking dto.Thinking // Claude标准Thinking格式
-			if err := json.Unmarshal(request.THINKING, &thinking); err != nil {
+			if err := common.Unmarshal(request.THINKING, &thinking); err != nil {
 				return nil, fmt.Errorf("error Unmarshal thinking: %w", err)
 			}
 
@@ -393,8 +393,9 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 			return nil, fmt.Errorf("error parsing multipart form: %w", err2)
 		}
 
-		// 打印类似 curl 命令格式的信息
-		logger.LogDebug(c.Request.Context(), "--form 'model=\"%s\"'", request.Model)
+		// Form fields can contain prompts, URLs, or credentials. Log only
+		// metadata so debug logging cannot expose the multipart payload.
+		logger.LogDebug(c.Request.Context(), "multipart form field=model value_meta=%s", common.SensitiveLogMeta(request.Model))
 
 		// 遍历表单字段并打印输出
 		for key, values := range formData.Value {
@@ -403,7 +404,7 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 			}
 			for _, value := range values {
 				writer.WriteField(key, value)
-				logger.LogDebug(c.Request.Context(), "--form '%s=\"%s\"'", key, value)
+				logger.LogDebug(c.Request.Context(), "multipart form field=%s value_meta=%s", key, common.SensitiveLogMeta(value))
 			}
 		}
 
@@ -412,28 +413,67 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		if len(fileHeaders) == 0 {
 			return nil, errors.New("file is required")
 		}
+		if len(fileHeaders) != 1 {
+			return nil, errors.New("exactly one audio file is required")
+		}
+		for key, headers := range formData.File {
+			if key != "file" && len(headers) > 0 {
+				return nil, fmt.Errorf("unexpected multipart file field %q", key)
+			}
+		}
 
 		// 使用 formData 中的第一个文件
 		fileHeader := fileHeaders[0]
-		logger.LogDebug(c.Request.Context(), "--form 'file=@\"%s\"' (size: %d bytes, content-type: %s)",
-			fileHeader.Filename, fileHeader.Size, fileHeader.Header.Get("Content-Type"))
+		maxFileBytes := common.GetMaxFileDownloadBytes()
+		if fileHeader == nil || fileHeader.Size < 0 || fileHeader.Size > maxFileBytes {
+			return nil, fmt.Errorf("audio file exceeds maximum allowed size of %d bytes", maxFileBytes)
+		}
+		logger.LogDebug(c.Request.Context(), "multipart form file filename_meta=%s size=%d content-type=%s",
+			common.SensitiveLogMeta(fileHeader.Filename), fileHeader.Size, fileHeader.Header.Get("Content-Type"))
 
 		file, err := fileHeader.Open()
 		if err != nil {
 			return nil, fmt.Errorf("error opening audio file: %v", err)
 		}
-		defer file.Close()
+		fileBytes, readErr := common.ReadBodyLimited(file, fileHeader.Size, maxFileBytes)
+		_ = file.Close()
+		if readErr != nil {
+			if errors.Is(readErr, common.ErrRequestBodyTooLarge) {
+				return nil, fmt.Errorf("audio file exceeds maximum allowed size of %d bytes", maxFileBytes)
+			}
+			return nil, fmt.Errorf("failed to read audio file: %w", readErr)
+		}
 
-		part, err := writer.CreateFormFile("file", fileHeader.Filename)
+		detectedMIME, detectErr := service.ResolveAudioMIME(fileBytes)
+		if detectErr != nil {
+			return nil, fmt.Errorf("unsupported audio file: %w", detectErr)
+		}
+
+		// Do not reflect the caller-controlled filename into a multipart header;
+		// CR/LF or path components can corrupt the request headers. Derive a
+		// canonical extension from the detected container instead.
+		filename := openAIAudioFilenameFromMIME(detectedMIME)
+		partHeader := make(textproto.MIMEHeader)
+		disposition := mime.FormatMediaType("form-data", map[string]string{
+			"name": "file", "filename": filename,
+		})
+		if disposition == "" {
+			return nil, errors.New("failed to format audio multipart disposition")
+		}
+		partHeader.Set("Content-Disposition", disposition)
+		partHeader.Set("Content-Type", detectedMIME)
+		part, err := writer.CreatePart(partHeader)
 		if err != nil {
 			return nil, errors.New("create form file failed")
 		}
-		if _, err := io.Copy(part, file); err != nil {
+		if _, err := part.Write(fileBytes); err != nil {
 			return nil, errors.New("copy file failed")
 		}
 
 		// 关闭 multipart 编写器以设置分界线
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("close multipart writer failed: %w", err)
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		logger.LogDebug(c.Request.Context(), "--header 'Content-Type: %s'", writer.FormDataContentType())
 		return &requestBody, nil
@@ -502,23 +542,44 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 			// Process all image files
 			for i, fileHeader := range imageFiles {
+				maxFileBytes := common.GetMaxFileDownloadBytes()
+				if fileHeader == nil || fileHeader.Size < 0 || fileHeader.Size > maxFileBytes {
+					return nil, fmt.Errorf("image file %d exceeds maximum allowed size of %d bytes", i, maxFileBytes)
+				}
 				file, err := fileHeader.Open()
 				if err != nil {
 					return nil, fmt.Errorf("failed to open image file %d: %w", i, err)
 				}
 
-				// If multiple images, use image[] as the field name
+				fileBytes, err := common.ReadBodyLimited(file, fileHeader.Size, maxFileBytes)
+				_ = file.Close()
+				if err != nil {
+					if errors.Is(err, common.ErrRequestBodyTooLarge) {
+						return nil, fmt.Errorf("image file %d exceeds maximum allowed size of %d bytes", i, maxFileBytes)
+					}
+					return nil, fmt.Errorf("failed to read image file %d: %w", i, err)
+				}
+				mimeType, err := service.ResolveImageMIME(fileBytes)
+				if err != nil {
+					return nil, fmt.Errorf("image file %d has unsupported content: %w", i, err)
+				}
+
+				// If multiple images, use image[] as the field name.
 				fieldName := "image"
 				if len(imageFiles) > 1 {
 					fieldName = "image[]"
 				}
 
-				// Determine MIME type based on file extension
-				mimeType := detectImageMimeType(fileHeader.Filename)
-
-				// Create a form file with the appropriate content type
+				// Never reflect the client filename into Content-Disposition. It can
+				// contain CR/LF or path components and is not needed by the API.
 				h := make(textproto.MIMEHeader)
-				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, fileHeader.Filename))
+				disposition := mime.FormatMediaType("form-data", map[string]string{
+					"name": fieldName, "filename": "image." + openAIImageExtension(mimeType),
+				})
+				if disposition == "" {
+					return nil, errors.New("failed to format image multipart disposition")
+				}
+				h.Set("Content-Disposition", disposition)
 				h.Set("Content-Type", mimeType)
 
 				part, err := writer.CreatePart(h)
@@ -526,28 +587,43 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 					return nil, fmt.Errorf("create form part failed for image %d: %w", i, err)
 				}
 
-				if _, err := io.Copy(part, file); err != nil {
+				if _, err := part.Write(fileBytes); err != nil {
 					return nil, fmt.Errorf("copy file failed for image %d: %w", i, err)
 				}
-
-				// 复制完立即关闭，避免在循环内使用 defer 占用资源
-				_ = file.Close()
 			}
 
 			// Handle mask file if present
 			if maskFiles, exists := mf.File["mask"]; exists && len(maskFiles) > 0 {
+				maxFileBytes := common.GetMaxFileDownloadBytes()
+				if maskFiles[0] == nil || maskFiles[0].Size < 0 || maskFiles[0].Size > maxFileBytes {
+					return nil, fmt.Errorf("mask file exceeds maximum allowed size of %d bytes", maxFileBytes)
+				}
 				maskFile, err := maskFiles[0].Open()
 				if err != nil {
 					return nil, errors.New("failed to open mask file")
 				}
-				// 复制完立即关闭，避免在循环内使用 defer 占用资源
+				maskBytes, err := common.ReadBodyLimited(maskFile, maskFiles[0].Size, maxFileBytes)
+				_ = maskFile.Close()
+				if err != nil {
+					if errors.Is(err, common.ErrRequestBodyTooLarge) {
+						return nil, fmt.Errorf("mask file exceeds maximum allowed size of %d bytes", maxFileBytes)
+					}
+					return nil, fmt.Errorf("failed to read mask file: %w", err)
+				}
+				mimeType, err := service.ResolveImageMIME(maskBytes)
+				if err != nil {
+					return nil, fmt.Errorf("mask file has unsupported content: %w", err)
+				}
 
-				// Determine MIME type for mask file
-				mimeType := detectImageMimeType(maskFiles[0].Filename)
-
-				// Create a form file with the appropriate content type
+				// Create a form file with a fixed, safe filename.
 				h := make(textproto.MIMEHeader)
-				h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="mask"; filename="%s"`, maskFiles[0].Filename))
+				disposition := mime.FormatMediaType("form-data", map[string]string{
+					"name": "mask", "filename": "mask." + openAIImageExtension(mimeType),
+				})
+				if disposition == "" {
+					return nil, errors.New("failed to format mask multipart disposition")
+				}
+				h.Set("Content-Disposition", disposition)
 				h.Set("Content-Type", mimeType)
 
 				maskPart, err := writer.CreatePart(h)
@@ -555,17 +631,18 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 					return nil, errors.New("create form file failed for mask")
 				}
 
-				if _, err := io.Copy(maskPart, maskFile); err != nil {
-					return nil, errors.New("copy mask file failed")
+				if _, err := maskPart.Write(maskBytes); err != nil {
+					return nil, fmt.Errorf("copy mask file failed: %w", err)
 				}
-				_ = maskFile.Close()
 			}
 		} else {
 			return nil, errors.New("no multipart form data found")
 		}
 
 		// 关闭 multipart 编写器以设置分界线
-		writer.Close()
+		if err := writer.Close(); err != nil {
+			return nil, fmt.Errorf("close multipart writer failed: %w", err)
+		}
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
 		return &requestBody, nil
 
@@ -581,24 +658,56 @@ func isJSONRequest(c *gin.Context) bool {
 	return strings.HasPrefix(c.Request.Header.Get("Content-Type"), "application/json")
 }
 
-// detectImageMimeType determines the MIME type based on the file extension
-func detectImageMimeType(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".webp":
-		return "image/webp"
+func openAIImageExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "image/bmp":
+		return "bmp"
+	case "image/tiff":
+		return "tiff"
+	case "image/heic":
+		return "heic"
+	case "image/heif":
+		return "heif"
+	case "image/avif":
+		return "avif"
+	case "image/x-icon":
+		return "ico"
 	default:
-		// Try to detect from extension if possible
-		if strings.HasPrefix(ext, ".jp") {
-			return "image/jpeg"
-		}
-		// Default to png as a fallback
-		return "image/png"
+		return "img"
 	}
+}
+
+func openAIAudioFilenameFromMIME(mediaType string) string {
+	extension := "bin"
+	switch mediaType {
+	case "audio/mpeg":
+		extension = "mp3"
+	case "audio/mp4":
+		extension = "m4a"
+	case "audio/wav":
+		extension = "wav"
+	case "audio/webm":
+		extension = "webm"
+	case "audio/ogg":
+		extension = "ogg"
+	case "audio/opus":
+		extension = "opus"
+	case "audio/flac":
+		extension = "flac"
+	case "audio/aac":
+		extension = "aac"
+	case "audio/aiff":
+		extension = "aiff"
+	}
+	return "audio." + extension
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {

@@ -1,12 +1,12 @@
 package jimeng
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -21,12 +21,11 @@ type Adaptor struct {
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	//TODO implement me
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatClaude))
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -37,7 +36,30 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *relaycommon.RelayInfo) error {
-	return errors.New("not implemented")
+	if header == nil {
+		return errors.New("jimeng adaptor: request header is nil")
+	}
+	if info == nil {
+		return errors.New("jimeng adaptor: relay info is nil")
+	}
+	if info.ApiKey == "" {
+		return errors.New("jimeng adaptor: api key is required")
+	}
+	if c == nil || c.Request == nil {
+		return errors.New("jimeng adaptor: request context is required")
+	}
+	// Jimeng uses Volcengine HMAC signing. The signature depends on the final
+	// URL and body, so DoRequest applies it after constructing the request;
+	// this method still provides the ordinary transport headers for callers
+	// that build the request through the shared channel helper.
+	channel.SetupApiRequestHeader(info, c, header)
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/json")
+	}
+	if header.Get("Accept") == "" {
+		header.Set("Accept", "application/json")
+	}
+	return nil
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
@@ -79,7 +101,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	if len(request.ExtraFields) > 0 {
-		if err := json.Unmarshal(request.ExtraFields, &payload); err != nil {
+		if err := common.Unmarshal(request.ExtraFields, &payload); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal extra fields: %w", err)
 		}
 	}
@@ -88,19 +110,19 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatEmbedding))
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIAudio))
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	return nil, errors.New("not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {

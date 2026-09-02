@@ -18,12 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
 
-// Catalog / pair / save admin endpoints. Match
+// Catalog / pair / save admin endpoints. Catalog credentials are sent in a
+// POST body rather than a query string so private keys never become part of a
+// URL that can be copied into access logs, browser history, or referrers. Match
 // controller/topup_waffo_pancake.go: empty body creds make the backend
 // fall back to persisted OptionMap values, so returning admins don't
 // have to re-paste the private key (stripped from GET /api/option/).
 
-export interface CatalogProduct {
+interface CatalogProduct {
   id: string
   name: string
   status: string
@@ -64,9 +66,12 @@ export async function listWaffoPancakeCatalog(
   merchantID: string,
   privateKey: string
 ): Promise<CatalogResponse> {
-  const res = await api.get<CatalogResponse>(
+  const res = await api.post<CatalogResponse>(
     '/api/option/waffo-pancake/catalog',
-    { params: { merchant_id: merchantID, private_key: privateKey } }
+    {
+      merchant_id: merchantID,
+      private_key: privateKey,
+    }
   )
   return res.data
 }

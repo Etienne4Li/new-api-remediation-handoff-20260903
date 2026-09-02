@@ -29,7 +29,7 @@ export type TimeGranularity = 'hour' | 'day' | 'week'
 /**
  * Convert Date object to Unix timestamp (seconds)
  */
-export function dateToUnixTimestamp(date: Date): number {
+function dateToUnixTimestamp(date: Date): number {
   return Math.floor(date.getTime() / 1000)
 }
 
@@ -37,7 +37,7 @@ export function dateToUnixTimestamp(date: Date): number {
  * Get start of day for a Unix timestamp (seconds)
  * Sets time to 00:00:00
  */
-export function toStartOfDay(tsSec: number): number {
+function toStartOfDay(tsSec: number): number {
   const d = new Date(tsSec * 1000)
   d.setHours(0, 0, 0, 0)
   return Math.floor(d.getTime() / 1000)
@@ -47,21 +47,11 @@ export function toStartOfDay(tsSec: number): number {
  * Get start of day for a Date object
  * Returns new Date with time set to 00:00:00
  */
-export function getStartOfDay(date: Date = new Date()): Date {
-  const d = new Date(date)
-  d.setHours(0, 0, 0, 0)
-  return d
-}
 
 /**
  * Get end of day for a Date object
  * Returns new Date with time set to 23:59:59.999
  */
-export function getEndOfDay(date: Date = new Date()): Date {
-  const d = new Date(date)
-  d.setHours(23, 59, 59, 999)
-  return d
-}
 
 /**
  * Calculate date range with start and end of day normalization
@@ -69,19 +59,6 @@ export function getEndOfDay(date: Date = new Date()): Date {
  * @param fromDate Starting point (defaults to now)
  * @returns Object with normalized start (00:00:00) and end (23:59:59) dates
  */
-export function getNormalizedDateRange(
-  days: number,
-  fromDate: Date = new Date()
-): { start: Date; end: Date } {
-  const end = new Date(fromDate)
-  const start = new Date(fromDate)
-  start.setDate(end.getDate() - days)
-
-  return {
-    start: getStartOfDay(start),
-    end: getEndOfDay(end),
-  }
-}
 
 /**
  * Calculate a rolling date range ending at the current moment.
@@ -142,9 +119,6 @@ export function computeTimeRange(
 /**
  * Format Unix timestamp (seconds) to YYYY-MM-DD
  */
-export function formatDate(tsSec: number): string {
-  return dayjs(tsSec * 1000).format('YYYY-MM-DD')
-}
 
 /**
  * Format Date object to YYYY-MM-DD HH:mm:ss

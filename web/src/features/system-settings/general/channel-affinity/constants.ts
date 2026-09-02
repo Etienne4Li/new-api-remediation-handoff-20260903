@@ -129,6 +129,6 @@ export function makeUniqueName(
   return `${base}-${Date.now()}`
 }
 
-export function cloneTemplate<T>(template: T): T {
-  return JSON.parse(JSON.stringify(template))
+export function cloneTemplate(template: RuleTemplate): RuleTemplate {
+  return structuredClone(template)
 }

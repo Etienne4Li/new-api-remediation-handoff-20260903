@@ -146,7 +146,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		// 使用 ConvertGeminiRequest 转换请求格式
 		convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			return requestConversionError(err)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -162,7 +162,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			}
 		}
 
-		logger.LogDebug(c, "Gemini request body: %s", jsonData)
+		logger.LogDebug(c, "Gemini request body_meta=%s", common.SensitiveLogBody(jsonData))
 
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
@@ -175,31 +175,36 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
-		logger.LogError(c, "Do gemini request failed: "+err.Error())
+		logger.LogError(c, "Do gemini request failed: error_meta="+common.SensitiveLogMeta(err.Error()))
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	var httpResp *http.Response
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
+	info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		// reset status code 重置状态码
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
 	}
 
-	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
+	usage, openaiErr := adaptor.DoResponse(c, httpResp, info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }
 
@@ -267,7 +272,7 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 			return newAPIErrorFromParamOverride(err)
 		}
 	}
-	logger.LogDebug(c, "Gemini embedding request body: %s", jsonData)
+	logger.LogDebug(c, "Gemini embedding request body_meta=%s", common.SensitiveLogBody(jsonData))
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -278,27 +283,32 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
-		logger.LogError(c, "Do gemini request failed: "+err.Error())
+		logger.LogError(c, "Do gemini request failed: error_meta="+common.SensitiveLogMeta(err.Error()))
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
-	var httpResp *http.Response
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
 	}
 
-	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
+	usage, openaiErr := adaptor.DoResponse(c, httpResp, info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

@@ -143,6 +143,11 @@ const paymentSchema = z.object({
   }),
   StripeApiSecret: z.string(),
   StripeWebhookSecret: z.string(),
+  StripeAccountId: z
+    .string()
+    .refine((value) => !value.trim() || value.trim().startsWith('acct_'), {
+      message: 'Stripe account ID must start with acct_',
+    }),
   StripePriceId: z.string(),
   StripeUnitPrice: z.coerce.number().min(0),
   StripeMinTopUp: z.coerce.number().min(0),
@@ -429,6 +434,7 @@ export function PaymentSettingsSection({
       AmountDiscount: values.AmountDiscount.trim(),
       StripeApiSecret: values.StripeApiSecret.trim(),
       StripeWebhookSecret: values.StripeWebhookSecret.trim(),
+      StripeAccountId: values.StripeAccountId.trim(),
       StripePriceId: values.StripePriceId.trim(),
       StripeUnitPrice: values.StripeUnitPrice,
       StripeMinTopUp: values.StripeMinTopUp,
@@ -473,6 +479,7 @@ export function PaymentSettingsSection({
       AmountDiscount: initialRef.current.AmountDiscount.trim(),
       StripeApiSecret: initialRef.current.StripeApiSecret.trim(),
       StripeWebhookSecret: initialRef.current.StripeWebhookSecret.trim(),
+      StripeAccountId: initialRef.current.StripeAccountId.trim(),
       StripePriceId: initialRef.current.StripePriceId.trim(),
       StripeUnitPrice: initialRef.current.StripeUnitPrice,
       StripeMinTopUp: initialRef.current.StripeMinTopUp,
@@ -576,6 +583,13 @@ export function PaymentSettingsSection({
       updates.push({
         key: 'StripeWebhookSecret',
         value: sanitized.StripeWebhookSecret,
+      })
+    }
+
+    if (sanitized.StripeAccountId !== initial.StripeAccountId) {
+      updates.push({
+        key: 'StripeAccountId',
+        value: sanitized.StripeAccountId,
       })
     }
 
@@ -1297,7 +1311,7 @@ export function PaymentSettingsSection({
                   </ul>
                 </div>
 
-                <div className='grid gap-6 md:grid-cols-3'>
+                <div className='grid gap-6 md:grid-cols-2'>
                   <FormField
                     control={form.control}
                     name='StripeApiSecret'
@@ -1343,6 +1357,32 @@ export function PaymentSettingsSection({
                         <FormDescription>
                           {t(
                             'Webhook signing secret (leave blank unless updating)'
+                          )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name='StripeAccountId'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Account ID')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            placeholder={t('acct_xxx')}
+                            autoComplete='off'
+                            {...field}
+                            onChange={(event) =>
+                              field.onChange(event.target.value)
+                            }
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t(
+                            'Stripe account ID used to scope payment events (required for subscriptions)'
                           )}
                         </FormDescription>
                         <FormMessage />

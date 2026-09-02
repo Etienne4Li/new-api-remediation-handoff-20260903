@@ -37,6 +37,7 @@ import {
   type CSSProperties,
   type HTMLAttributes,
   type ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -312,15 +313,23 @@ function CodeMirrorCodeView({
   // parent (recreated on every keystroke-driven render) does not invalidate
   // the extensions and tear down the EditorView, which would reset the cursor
   // to the document start and make typing appear right-to-left.
+  const handleKeyDown = useCallback(
+    // This closure runs from CodeMirror's DOM listener, never during render.
+    // eslint-disable-next-line react-hooks/refs
+    (event: globalThis.KeyboardEvent) => onKeyDownRef.current?.(event),
+    []
+  )
   const editorExtensions = useMemo(
     () =>
+      // The callback is invoked by CodeMirror after the extension is mounted.
+      // eslint-disable-next-line react-hooks/refs
       getCodeMirrorExtensions({
         language,
-        onKeyDown: (event) => onKeyDownRef.current?.(event),
+        onKeyDown: handleKeyDown,
         readOnly,
         showLineNumbers,
       }),
-    [language, readOnly, showLineNumbers]
+    [handleKeyDown, language, readOnly, showLineNumbers]
   )
 
   useEffect(() => {
@@ -397,7 +406,7 @@ function CodeMirrorCodeView({
   )
 }
 
-export const CodeBlockFrame = ({
+const CodeBlockFrame = ({
   bodyClassName,
   bodyMaxHeight,
   bodyOverlay,

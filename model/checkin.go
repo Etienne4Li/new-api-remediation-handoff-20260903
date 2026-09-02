@@ -53,7 +53,7 @@ func HasCheckedInToday(userId int) (bool, error) {
 // MySQL 和 PostgreSQL 使用事务保证原子性
 // SQLite 不支持嵌套事务，使用顺序操作 + 手动回滚
 func UserCheckin(userId int) (*Checkin, error) {
-	setting := operation_setting.GetCheckinSetting()
+	setting := operation_setting.GetCheckinSettingSnapshot()
 	if !setting.Enabled {
 		return nil, errors.New("签到功能未启用")
 	}
@@ -101,8 +101,7 @@ func userCheckinWithTransaction(checkin *Checkin, userId int, quotaAwarded int) 
 		}
 
 		// 步骤2: 在事务中增加用户额度
-		if err := tx.Model(&User{}).Where("id = ?", userId).
-			Update("quota", gorm.Expr("quota + ?", quotaAwarded)).Error; err != nil {
+		if err := creditTopUpQuota(tx, userId, quotaAwarded, nil); err != nil {
 			return errors.New("签到失败：更新额度出错")
 		}
 
@@ -113,10 +112,10 @@ func userCheckinWithTransaction(checkin *Checkin, userId int, quotaAwarded int) 
 		return nil, err
 	}
 
-	// 事务成功后，异步更新缓存
-	go func() {
-		_ = cacheIncrUserQuota(userId, int64(quotaAwarded))
-	}()
+	// The database credit and its durable repair marker have committed. Apply
+	// the cache delta before returning so process exit cannot discard the fast
+	// path and tests/callers never outlive an untracked cache goroutine.
+	syncCreditUserQuotaCache(userId, quotaAwarded, "check-in")
 
 	return checkin, nil
 }
@@ -160,14 +159,25 @@ func GetUserCheckinStats(userId int, month string) (map[string]interface{}, erro
 		}
 	}
 
-	// 检查今天是否已签到
-	hasCheckedToday, _ := HasCheckedInToday(userId)
+	// 检查今天是否已签到。统计接口不能把数据库故障静默转换成
+	// checked_in_today=false，否则前端会展示错误状态并诱导重复操作。
+	hasCheckedToday, err := HasCheckedInToday(userId)
+	if err != nil {
+		return nil, err
+	}
 
 	// 获取用户所有时间的签到统计
 	var totalCheckins int64
 	var totalQuota int64
-	DB.Model(&Checkin{}).Where("user_id = ?", userId).Count(&totalCheckins)
-	DB.Model(&Checkin{}).Where("user_id = ?", userId).Select("COALESCE(SUM(quota_awarded), 0)").Scan(&totalQuota)
+	if err := DB.Model(&Checkin{}).Where("user_id = ?", userId).Count(&totalCheckins).Error; err != nil {
+		return nil, err
+	}
+	if err := DB.Model(&Checkin{}).
+		Where("user_id = ?", userId).
+		Select("COALESCE(SUM(quota_awarded), 0)").
+		Scan(&totalQuota).Error; err != nil {
+		return nil, err
+	}
 
 	return map[string]interface{}{
 		"total_quota":      totalQuota,      // 所有时间累计获得的额度

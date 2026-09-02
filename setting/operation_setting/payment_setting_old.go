@@ -6,6 +6,8 @@ This file is the old version of the payment settings file. If you need to add ne
 package operation_setting
 
 import (
+	"sync"
+
 	"github.com/QuantumNous/new-api/common"
 )
 
@@ -36,13 +38,117 @@ var PayMethods = []map[string]string{
 	},
 }
 
+// PaymentRuntimeConfig groups the legacy EPay/top-up settings that are
+// consumed together while creating or verifying an order.  The exported
+// scalar variables below remain for source compatibility; production code
+// should take a copy with GetPaymentRuntimeConfig and use that copy for the
+// whole request.
+type PaymentRuntimeConfig struct {
+	PayAddress            string
+	CustomCallbackAddress string
+	EpayID                string
+	EpayKey               string
+	Price                 float64
+	MinTopUp              int
+	USDExchangeRate       float64
+	PayMethods            []map[string]string
+}
+
+var paymentRuntimeConfigMu sync.RWMutex
+
+func clonePayMethods(methods []map[string]string) []map[string]string {
+	if methods == nil {
+		return nil
+	}
+	clone := make([]map[string]string, len(methods))
+	for i, method := range methods {
+		if method == nil {
+			continue
+		}
+		clone[i] = make(map[string]string, len(method))
+		for key, value := range method {
+			clone[i][key] = value
+		}
+	}
+	return clone
+}
+
+func paymentRuntimeConfigFromLegacyLocked() PaymentRuntimeConfig {
+	return PaymentRuntimeConfig{
+		PayAddress:            PayAddress,
+		CustomCallbackAddress: CustomCallbackAddress,
+		EpayID:                EpayId,
+		EpayKey:               EpayKey,
+		Price:                 Price,
+		MinTopUp:              MinTopUp,
+		USDExchangeRate:       USDExchangeRate,
+		PayMethods:            clonePayMethods(PayMethods),
+	}
+}
+
+func applyPaymentRuntimeConfigToLegacyLocked(cfg PaymentRuntimeConfig) {
+	PayAddress = cfg.PayAddress
+	CustomCallbackAddress = cfg.CustomCallbackAddress
+	EpayId = cfg.EpayID
+	EpayKey = cfg.EpayKey
+	Price = cfg.Price
+	MinTopUp = cfg.MinTopUp
+	USDExchangeRate = cfg.USDExchangeRate
+	PayMethods = clonePayMethods(cfg.PayMethods)
+}
+
+// GetPaymentRuntimeConfig returns a detached, request-safe copy. The option
+// publication fence is acquired before the package lock, matching the lock
+// order used by the other payment configuration snapshots.
+func GetPaymentRuntimeConfig() PaymentRuntimeConfig {
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
+	paymentRuntimeConfigMu.RLock()
+	defer paymentRuntimeConfigMu.RUnlock()
+	return paymentRuntimeConfigFromLegacyLocked()
+}
+
+// paymentRuntimeConfigSnapshotWithoutOptionLock is used while bootstrapping
+// OptionMap itself (which already holds the writer lock).
+func paymentRuntimeConfigSnapshotWithoutOptionLock() PaymentRuntimeConfig {
+	paymentRuntimeConfigMu.RLock()
+	defer paymentRuntimeConfigMu.RUnlock()
+	return paymentRuntimeConfigFromLegacyLocked()
+}
+
+// UpdatePaymentRuntimeConfig atomically publishes related legacy payment
+// fields. The callback mutates a private copy and may replace PayMethods;
+// nested maps are copied before publication.
+func UpdatePaymentRuntimeConfig(update func(*PaymentRuntimeConfig)) {
+	if update == nil {
+		return
+	}
+	paymentRuntimeConfigMu.Lock()
+	defer paymentRuntimeConfigMu.Unlock()
+	next := paymentRuntimeConfigFromLegacyLocked()
+	update(&next)
+	applyPaymentRuntimeConfigToLegacyLocked(next)
+}
+
 func UpdatePayMethodsByJsonString(jsonString string) error {
-	PayMethods = make([]map[string]string, 0)
-	return common.Unmarshal([]byte(jsonString), &PayMethods)
+	var decoded []map[string]string
+	if err := common.Unmarshal([]byte(jsonString), &decoded); err != nil {
+		return err
+	}
+	if decoded == nil {
+		decoded = make([]map[string]string, 0)
+	}
+	UpdatePaymentRuntimeConfig(func(cfg *PaymentRuntimeConfig) {
+		cfg.PayMethods = decoded
+	})
+	return nil
 }
 
 func PayMethods2JsonString() string {
-	jsonBytes, err := common.Marshal(PayMethods)
+	// This helper is also called by InitOptionMap while OptionMapRWMutex is
+	// already held for writing, so use the internal package-lock snapshot.
+	methods := paymentRuntimeConfigSnapshotWithoutOptionLock().PayMethods
+	jsonBytes, err := common.Marshal(methods)
 	if err != nil {
 		return "[]"
 	}
@@ -50,7 +156,7 @@ func PayMethods2JsonString() string {
 }
 
 func ContainsPayMethod(method string) bool {
-	for _, payMethod := range PayMethods {
+	for _, payMethod := range GetPaymentRuntimeConfig().PayMethods {
 		if payMethod["type"] == method {
 			return true
 		}

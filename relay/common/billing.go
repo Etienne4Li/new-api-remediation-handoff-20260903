@@ -10,7 +10,7 @@ type BillingSettler interface {
 	Settle(actualQuota int) error
 
 	// Refund 退还所有预扣费额度（资金来源 + 令牌），幂等安全。
-	// 通过 gopool 异步执行。如果已经结算或退款则不做任何操作。
+	// 实现应在返回前完成本次可执行的退款；失败组件必须保留可重试状态。
 	Refund(c *gin.Context)
 
 	// NeedsRefund 返回会话是否存在需要退还的预扣状态（未结算且未退款）。

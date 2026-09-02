@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -82,11 +83,38 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		jsonData, err := storage.Bytes()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		jsonData, normalization, err := relaycommon.NormalizeResponsesInputItemIDs(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		relaycommon.RecordResponsesInputItemIDNormalization(c, normalization)
+		if normalization.Count() > 0 {
+			logger.LogInfo(c, fmt.Sprintf(
+				"normalized Responses input item IDs: reasoning=%d, message=%d, function_call=%d, custom_tool_call=%d, function_call_output=%d, custom_tool_call_output=%d",
+				normalization.Reasoning,
+				normalization.Message,
+				normalization.FunctionCall,
+				normalization.CustomToolCall,
+				normalization.FunctionCallOutput,
+				normalization.CustomToolOutput,
+			))
+			body, closer, bodyErr := relaycommon.NewOutboundJSONBody(jsonData)
+			if bodyErr != nil {
+				return types.NewError(bodyErr, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer closer.Close()
+			requestBody = body
+		} else {
+			requestBody = common.NewReplayableBodyReader(storage)
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			return responsesRequestConversionError(err)
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 		jsonData, err := common.Marshal(convertedRequest)
@@ -108,7 +136,24 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
+		jsonData, normalization, err := relaycommon.NormalizeResponsesInputItemIDs(jsonData)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		relaycommon.RecordResponsesInputItemIDNormalization(c, normalization)
+		if normalization.Count() > 0 {
+			logger.LogInfo(c, fmt.Sprintf(
+				"normalized Responses input item IDs: reasoning=%d, message=%d, function_call=%d, custom_tool_call=%d, function_call_output=%d, custom_tool_call_output=%d",
+				normalization.Reasoning,
+				normalization.Message,
+				normalization.FunctionCall,
+				normalization.CustomToolCall,
+				normalization.FunctionCallOutput,
+				normalization.CustomToolOutput,
+			))
+		}
+
+		logger.LogDebug(c, "requestBody_meta=%s", common.SensitiveLogBody(jsonData))
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -118,47 +163,75 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		requestBody = body
 	}
 
-	var httpResp *http.Response
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
-	}
-
-	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
-	if newAPIError != nil {
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
 
-	usageDto := usage.(*dto.Usage)
+	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
+	if newAPIError != nil {
+		// A Responses stream can expose billable output and then terminate with
+		// response.failed/another protocol error.  The adapter returns the
+		// accumulated usage and marks the context in that case.  Settle it before
+		// returning the error so controller/relay's deferred Refund does not
+		// silently return the entire reservation.  Streams with no observed work
+		// leave the marker unset and retain the normal refund/retry path.
+		if common.GetContextKeyBool(c, constant.ContextKeyResponsesPartialUsage) {
+			// Once partial work is settled, retrying the same request would reuse
+			// the now-settled BillingSession and leave the retry uncharged. Mark
+			// this error non-retryable before it reaches the outer relay loop.
+			types.ErrOptionWithSkipRetry()(newAPIError)
+			// A compatible adapter may expose billable output but return a nil
+			// usage object on the error path.  Both settlement functions accept
+			// nil and apply the conservative incomplete-stream policy; skipping
+			// the call here would let the deferred refund return the reservation.
+			usageDto, _ := usage.(*dto.Usage)
+			if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
+				service.PostAudioConsumeQuota(c, info, usageDto, "")
+			} else {
+				service.PostTextConsumeQuota(c, info, usageDto, nil)
+			}
+		}
+		// reset status code 重置状态码
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
+	}
+
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData
+		originPriceDataSnapshotReady := info.PriceDataSnapshotReady
 
 		_, err := helper.ModelPriceHelper(c, info, info.GetEstimatePromptTokens(), &types.TokenCountMeta{})
 		if err != nil {
 			info.OriginModelName = originModelName
 			info.PriceData = originPriceData
+			info.PriceDataSnapshotReady = originPriceDataSnapshotReady
 			return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusBadRequest))
 		}
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 
 		info.OriginModelName = originModelName
 		info.PriceData = originPriceData
+		info.PriceDataSnapshotReady = originPriceDataSnapshotReady
 		return nil
 	}
 
@@ -168,4 +241,13 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+// responsesRequestConversionError distinguishes a channel capability miss
+// from a malformed request or an internal conversion failure.  A capability
+// miss happens before any upstream request is sent and is safe to retry on a
+// different selected channel; ordinary conversion failures must remain
+// non-retryable so a bad client payload is not replayed indefinitely.
+func responsesRequestConversionError(err error) *types.NewAPIError {
+	return requestConversionError(err)
 }

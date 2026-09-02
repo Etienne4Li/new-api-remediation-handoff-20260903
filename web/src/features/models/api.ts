@@ -23,7 +23,6 @@ import type {
   GetModelsResponse,
   GetModelResponse,
   GetVendorsResponse,
-  GetVendorResponse,
   Model,
   Vendor,
   SearchModelsParams,
@@ -37,6 +36,14 @@ import type {
   DeploymentSettingsResponse,
   ListDeploymentsResponse,
 } from './types'
+
+// ============================================================================
+// Model CRUD Operations
+// ============================================================================
+
+/**
+ * Get paginated list of models
+ */
 
 // ============================================================================
 // Model CRUD Operations
@@ -131,22 +138,6 @@ export async function getVendors(params?: {
 /**
  * Search vendors
  */
-export async function searchVendors(params: {
-  keyword?: string
-  p?: number
-  page_size?: number
-}): Promise<GetVendorsResponse> {
-  const res = await api.get('/api/vendors/search', { params })
-  return res.data
-}
-
-/**
- * Get single vendor by ID
- */
-export async function getVendor(id: number): Promise<GetVendorResponse> {
-  const res = await api.get(`/api/vendors/${id}`)
-  return res.data
-}
 
 /**
  * Create new vendor
@@ -165,16 +156,6 @@ export async function updateVendor(
   data: Partial<Vendor> & { id: number }
 ): Promise<{ success: boolean; message?: string; data?: Vendor }> {
   const res = await api.put('/api/vendors/', data)
-  return res.data
-}
-
-/**
- * Delete vendor
- */
-export async function deleteVendor(
-  id: number
-): Promise<{ success: boolean; message?: string }> {
-  const res = await api.delete(`/api/vendors/${id}`)
   return res.data
 }
 
@@ -402,19 +383,6 @@ export async function listDeploymentContainers(
 /**
  * Get single container details
  */
-export async function getDeploymentContainerDetails(
-  deploymentId: string | number,
-  containerId: string
-): Promise<{
-  success: boolean
-  message?: string
-  data?: Record<string, unknown>
-}> {
-  const res = await api.get(
-    `/api/deployments/${deploymentId}/containers/${encodeURIComponent(containerId)}`
-  )
-  return res.data
-}
 
 /**
  * Delete deployment
@@ -460,14 +428,6 @@ export async function getHardwareTypes(): Promise<{
 /**
  * Get locations for deployment
  */
-export async function getDeploymentLocations(): Promise<{
-  success: boolean
-  message?: string
-  data?: { locations?: Array<Record<string, unknown>>; total?: number }
-}> {
-  const res = await api.get('/api/deployments/locations')
-  return res.data
-}
 
 /**
  * Get available replicas

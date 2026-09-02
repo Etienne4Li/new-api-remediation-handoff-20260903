@@ -56,7 +56,7 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'upstream_model_update_ignored_models',
 ])
 
-export function isAdvancedSettingsField(
+function isAdvancedSettingsField(
   fieldName: string
 ): fieldName is FieldPath<ChannelFormValues> {
   return ADVANCED_SETTINGS_FIELDS.has(fieldName as FieldPath<ChannelFormValues>)

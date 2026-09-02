@@ -2,7 +2,6 @@ package minimax
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,21 +38,22 @@ type MiniMaxImageResponse struct {
 	} `json:"base_resp"`
 }
 
-func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest {
+func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) (MiniMaxImageRequest, error) {
+	imageN, ok := dto.BoundedImageN(request.N)
+	if !ok {
+		return MiniMaxImageRequest{}, fmt.Errorf("n must be an integer between 1 and %d", dto.MaxImageN)
+	}
 	responseFormat := normalizeMiniMaxResponseFormat(request.ResponseFormat)
 	minimaxRequest := MiniMaxImageRequest{
 		Model:          request.Model,
 		Prompt:         request.Prompt,
 		ResponseFormat: responseFormat,
-		N:              1,
+		N:              int(imageN),
 		AigcWatermark:  request.Watermark,
 	}
 
 	if request.Model == "" {
 		minimaxRequest.Model = "image-01"
-	}
-	if request.N != nil && *request.N > 0 {
-		minimaxRequest.N = int(*request.N)
 	}
 	if aspectRatio := aspectRatioFromImageRequest(request); aspectRatio != "" {
 		minimaxRequest.AspectRatio = aspectRatio
@@ -65,7 +65,7 @@ func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest 
 		}
 	}
 
-	return minimaxRequest
+	return minimaxRequest, nil
 }
 
 func aspectRatioFromImageRequest(request dto.ImageRequest) string {
@@ -169,14 +169,14 @@ func responseMiniMax2OpenAIImage(response *MiniMaxImageResponse, info *relaycomm
 		if err != nil {
 			return nil, err
 		}
-		imageResponse.Metadata = metadata
+		imageResponse.Metadata = service.RedactTaskResponseBody(metadata)
 	}
 
 	return imageResponse, nil
 }
 
 func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}

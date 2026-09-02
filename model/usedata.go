@@ -40,11 +40,18 @@ type QuotaDataLogParams struct {
 
 func UpdateQuotaData() {
 	for {
-		if common.DataExportEnabled {
+		runtimeConfig := common.GetGeneralRuntimeConfig()
+		if runtimeConfig.DataExportEnabled {
 			common.SysLog("正在更新数据看板数据...")
 			SaveQuotaDataCache()
 		}
-		time.Sleep(time.Duration(common.DataExportInterval) * time.Minute)
+		interval := runtimeConfig.DataExportInterval
+		if interval <= 0 {
+			// Preserve the historical behavior without allowing a malformed
+			// hot-updated value to create a busy loop.
+			interval = 1
+		}
+		time.Sleep(time.Duration(interval) * time.Minute)
 	}
 }
 
@@ -139,13 +146,21 @@ func increaseQuotaData(quotaData *QuotaData) {
 }
 
 func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+	return getQuotaDataByUsername(username, startTime, endTime, nil)
+}
+
+func getQuotaDataByUsername(username string, startTime int64, endTime int64, actorRole *int) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
-	err = DB.Table("quota_data").
+	query := DB.Table("quota_data").
 		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime).
-		Group("user_id, username, model_name, created_at").
-		Find(&quotaDatas).Error
+		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime)
+	if actorRole != nil {
+		if query, err = applyAdminUserRoleScope(query, "quota_data.user_id", *actorRole); err != nil {
+			return nil, err
+		}
+	}
+	err = query.Group("user_id, username, model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
@@ -161,23 +176,56 @@ func GetQuotaDataByUserId(userId int, startTime int64, endTime int64) (quotaData
 }
 
 func GetQuotaDataGroupByUser(startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+	return getQuotaDataGroupByUser(startTime, endTime, nil)
+}
+
+// GetQuotaDataGroupByUserForRole applies the administrator visibility
+// predicate before grouping.  Grouping only by username without this scope
+// would otherwise let a higher-role row contribute to an apparently harmless
+// aggregate and leak its usage totals.
+func GetQuotaDataGroupByUserForRole(startTime int64, endTime int64, actorRole int) (quotaData []*QuotaData, err error) {
+	return getQuotaDataGroupByUser(startTime, endTime, &actorRole)
+}
+
+func getQuotaDataGroupByUser(startTime int64, endTime int64, actorRole *int) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
-	err = DB.Table("quota_data").
+	query := DB.Table("quota_data").
 		Select("username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("created_at >= ? and created_at <= ?", startTime, endTime).
-		Group("username, created_at").
-		Find(&quotaDatas).Error
+		Where("created_at >= ? and created_at <= ?", startTime, endTime)
+	if actorRole != nil {
+		if query, err = applyAdminUserRoleScope(query, "quota_data.user_id", *actorRole); err != nil {
+			return nil, err
+		}
+	}
+	err = query.Group("username, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
 func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaData []*QuotaData, err error) {
+	return getAllQuotaDates(startTime, endTime, username, nil)
+}
+
+// GetAllQuotaDatesForRole is the administrator-scoped dashboard query.  A
+// username filter does not bypass the role predicate; both branches use the
+// same owner scope.
+func GetAllQuotaDatesForRole(startTime int64, endTime int64, username string, actorRole int) (quotaData []*QuotaData, err error) {
+	return getAllQuotaDates(startTime, endTime, username, &actorRole)
+}
+
+func getAllQuotaDates(startTime int64, endTime int64, username string, actorRole *int) (quotaData []*QuotaData, err error) {
 	if username != "" {
-		return GetQuotaDataByUsername(username, startTime, endTime)
+		return getQuotaDataByUsername(username, startTime, endTime, actorRole)
 	}
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
 	// only select model_name, sum(count) as count, sum(quota) as quota, model_name, created_at from quota_data group by model_name, created_at;
 	//err = DB.Table("quota_data").Where("created_at >= ? and created_at <= ?", startTime, endTime).Find(&quotaDatas).Error
-	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
+	query := DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime)
+	if actorRole != nil {
+		if query, err = applyAdminUserRoleScope(query, "quota_data.user_id", *actorRole); err != nil {
+			return nil, err
+		}
+	}
+	err = query.Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }

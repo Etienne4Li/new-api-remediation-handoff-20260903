@@ -56,6 +56,13 @@ export default defineConfig(({ envMode }) => {
       entry: {
         index: './src/main.tsx',
       },
+      define: {
+        // Keep developer overlays opt-in while still making the flag
+        // available to the browser bundle in Rsbuild development mode.
+        'import.meta.env.VITE_ENABLE_DEVTOOLS': JSON.stringify(
+          env.rawPublicVars.VITE_ENABLE_DEVTOOLS ?? ''
+        ),
+      },
     },
     resolve: {
       alias: {

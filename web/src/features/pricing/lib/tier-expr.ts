@@ -234,7 +234,7 @@ export function tryParseVisualConfig(
 
     const cfg = normalizeVisualConfig({ tiers })
     const regenerated = generateExprFromVisualConfig(cfg)
-    if (regenerated.replace(/\s+/g, '') !== body.replace(/\s+/g, '')) {
+    if (regenerated.replaceAll(/\s+/g, '') !== body.replaceAll(/\s+/g, '')) {
       return null
     }
     return cfg
@@ -319,5 +319,3 @@ export function exprUsesExtraVars(exprStr: string): boolean {
   const varNames = ESTIMATOR_VARS.map((f) => f.var).join('|')
   return new RegExp(`\\b(${varNames})\\b`).test(exprStr)
 }
-
-export const ESTIMATOR_EXTRA_FIELDS = ESTIMATOR_VARS

@@ -71,7 +71,7 @@ export type PricingModel = {
 }
 
 /** Input/output modalities supported by a model. */
-export type Modality = 'text' | 'image' | 'audio' | 'video' | 'file'
+type Modality = 'text' | 'image' | 'audio' | 'video' | 'file'
 
 /** Functional capabilities a model exposes. */
 export type ModelCapability =
@@ -108,4 +108,3 @@ export type PriceType =
   | 'image'
   | 'audio_input'
   | 'audio_output'
-export type QuotaType = 0 | 1 // 0: token-based, 1: per-request

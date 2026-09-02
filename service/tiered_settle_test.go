@@ -657,6 +657,29 @@ func TestTryTieredSettle_ErrorFallbackToEstimatedQuotaAfterGroup(t *testing.T) {
 	}
 }
 
+func TestTryTieredSettleConservativeScalesAbnormalFallbackToObservedUsage(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		FinalPreConsumedQuota: 1_000_000,
+		TieredBillingSnapshot: &billingexpr.BillingSnapshot{
+			BillingMode:               "tiered_expr",
+			ExprString:                `invalid expr!!!`,
+			ExprHash:                  billingexpr.ExprHashString(`invalid expr!!!`),
+			GroupRatio:                1,
+			EstimatedPromptTokens:     100,
+			EstimatedCompletionTokens: 9_999_900,
+			EstimatedQuotaAfterGroup:  1_000_000,
+		},
+	}
+
+	ok, quota, result := TryTieredSettleConservative(info, billingexpr.TokenParams{P: 100, C: 500})
+	require.True(t, ok)
+	require.Nil(t, result)
+	// The expression cannot run, so do not charge the full reservation that
+	// was based on the client's huge max_output_tokens. Scale it to observed
+	// work (600 / 10,000,000 of the reservation), rounded conservatively.
+	assert.Equal(t, 60, quota)
+}
+
 // ---------------------------------------------------------------------------
 // BuildTieredTokenParams: token normalization and ratio parity tests
 // ---------------------------------------------------------------------------

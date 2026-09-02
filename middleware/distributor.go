@@ -40,7 +40,7 @@ func Distribute() func(c *gin.Context) {
 			return
 		}
 		if ok {
-			id, err := strconv.Atoi(channelId.(string))
+			id, err := parseSpecificChannelID(channelId)
 			if err != nil {
 				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
 				return
@@ -52,6 +52,15 @@ func Distribute() func(c *gin.Context) {
 			}
 			if channel.Status != common.ChannelStatusEnabled {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
+				return
+			}
+			// A token may explicitly pin a channel (the admin-only key-ID form).
+			// That path bypasses normal ability selection, so enforce the same
+			// endpoint capability gate before handing control to the relay handler.
+			if !channelSupportsRequestPath(channel, c.Request.URL.Path, modelRequest.Model) {
+				endpoint, _ := common.EndpointTypeForRequestPath(c.Request.URL.Path)
+				message := fmt.Sprintf("channel %d does not support endpoint %q", channel.Id, endpoint)
+				abortWithOpenAiMessage(c, http.StatusBadRequest, message, types.ErrorCodeInvalidRequest)
 				return
 			}
 		} else {
@@ -162,7 +171,14 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
+			statusCode := setupErr.StatusCode
+			if statusCode < 100 || statusCode > 599 {
+				statusCode = http.StatusBadRequest
+			}
+			abortWithOpenAiMessage(c, statusCode, setupErr.Error(), setupErr.GetErrorCode())
+			return
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
@@ -170,18 +186,72 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-// channelSupportsRequestPath reports whether a channel can serve the request path.
-// Only Advanced Custom (type 58) channels are path-checked; all other channel types
-// always pass. A type-58 channel is usable only when one of its routes matches.
+// parseSpecificChannelID accepts the string form produced by TokenAuth and an
+// integer value used by internal callers/tests. Keeping the type assertion
+// defensive avoids a panic if middleware state is malformed.
+func parseSpecificChannelID(value any) (int, error) {
+	switch typed := value.(type) {
+	case string:
+		return parseCanonicalPositiveChannelID(typed)
+	case int:
+		if typed <= 0 {
+			return 0, fmt.Errorf("specific channel id must be positive")
+		}
+		return typed, nil
+	case int64:
+		if typed <= 0 || typed > int64(maxIntValue()) {
+			return 0, fmt.Errorf("specific channel id out of range")
+		}
+		return int(typed), nil
+	case uint:
+		if typed == 0 || uint64(typed) > uint64(maxIntValue()) {
+			return 0, fmt.Errorf("specific channel id out of range")
+		}
+		return int(typed), nil
+	case uint64:
+		if typed == 0 || typed > uint64(maxIntValue()) {
+			return 0, fmt.Errorf("specific channel id out of range")
+		}
+		return int(typed), nil
+	default:
+		return 0, fmt.Errorf("invalid specific channel id type %T", value)
+	}
+}
+
+func parseCanonicalPositiveChannelID(value string) (int, error) {
+	// Channel IDs are serialized as canonical positive decimal integers.  Do
+	// not trim or accept signs/leading zeroes: silently normalizing malformed
+	// values would make the legacy token suffix ambiguous.
+	if value == "" || value[0] == '0' {
+		return 0, fmt.Errorf("specific channel id must be a canonical positive decimal integer")
+	}
+	parsed, err := strconv.ParseUint(value, 10, strconv.IntSize)
+	if err != nil || parsed == 0 || parsed > uint64(maxIntValue()) {
+		return 0, fmt.Errorf("specific channel id out of range")
+	}
+	return int(parsed), nil
+}
+
+func maxIntValue() int {
+	return int(^uint(0) >> 1)
+}
+
+// channelSupportsRequestPath reports whether a channel can serve the request
+// path. Native adaptor capabilities are checked first; Advanced Custom then
+// applies its route/model matcher.
 func channelSupportsRequestPath(channel *model.Channel, requestPath string, requestModel string) bool {
 	if channel == nil {
+		return false
+	}
+	if !common.ChannelSupportsRequestPath(channel.Type, requestModel, requestPath) {
 		return false
 	}
 	if channel.Type != constant.ChannelTypeAdvancedCustom {
 		return true
 	}
 	config := channel.GetOtherSettings().AdvancedCustom
-	return config != nil && config.SupportsPathForModel(requestPath, requestModel)
+	canonicalPath := common.CanonicalRelayRequestPath(requestPath)
+	return config != nil && config.SupportsPathForModel(canonicalPath, requestModel)
 }
 
 // getModelFromRequest 从请求中读取模型信息
@@ -456,6 +526,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelParamOverride, paramOverride)
 	common.SetContextKey(c, constant.ContextKeyChannelHeaderOverride, headerOverride)
+	common.SetContextKey(c, constant.ContextKeyChannelOrganization, "")
 	if nil != channel.OpenAIOrganization && *channel.OpenAIOrganization != "" {
 		common.SetContextKey(c, constant.ContextKeyChannelOrganization, *channel.OpenAIOrganization)
 	}

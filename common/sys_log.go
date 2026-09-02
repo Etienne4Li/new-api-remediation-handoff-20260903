@@ -46,7 +46,7 @@ func LogStartupSuccess(startTime time.Time, port string) {
 	LogWriterMu.RLock()
 	defer LogWriterMu.RUnlock()
 
-	if SessionCookieSecure == false {
+	if !IsSessionCookieSecure() {
 		// Warn when the local HTTP compatibility mode disables cookie transport
 		// security and refresh/logout Origin validation.
 		fmt.Fprintf(gin.DefaultWriter, "\n")
@@ -55,7 +55,7 @@ func LogStartupSuccess(startTime time.Time, port string) {
 	}
 
 	fmt.Fprintf(gin.DefaultWriter, "\n")
-	fmt.Fprintf(gin.DefaultWriter, "  \033[32m%s %s\033[0m  ready in %d ms\n", SystemName, Version, durationMs)
+	fmt.Fprintf(gin.DefaultWriter, "  \033[32m%s %s\033[0m  ready in %d ms\n", GetSystemName(), Version, durationMs)
 	fmt.Fprintf(gin.DefaultWriter, "\n")
 
 	if !IsRunningInContainer() {

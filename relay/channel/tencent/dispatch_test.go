@@ -6,10 +6,64 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDispatchAdaptorClaudeCapabilityFollowsCredential(t *testing.T) {
+	tests := []struct {
+		name          string
+		apiKey        string
+		wantSupported bool
+	}{
+		{
+			name:          "native TC3 key returns typed unsupported endpoint",
+			apiKey:        "1300000000|AKIDxxxxxxxx|secretxxxxxxxx",
+			wantSupported: false,
+		},
+		{
+			name:          "TokenHub key uses OpenAI-compatible Claude conversion",
+			apiKey:        "sk-xxxxxxxxxxxxxxxx",
+			wantSupported: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelType:       constant.ChannelTypeTencent,
+				ApiKey:            tt.apiKey,
+				ChannelBaseUrl:    constant.ChannelBaseURLs[constant.ChannelTypeTencent],
+				UpstreamModelName: "claude-sonnet-4",
+			}, OriginModelName: "claude-sonnet-4"}
+			dispatch := &DispatchAdaptor{}
+			dispatch.Init(info)
+
+			request := &dto.ClaudeRequest{
+				Model:    "claude-sonnet-4",
+				Messages: []dto.ClaudeMessage{{Role: "user", Content: "hello"}},
+			}
+			var converted any
+			var err error
+			require.NotPanics(t, func() {
+				converted, err = dispatch.ConvertClaudeRequest(nil, info, request)
+			})
+			if tt.wantSupported {
+				require.NoError(t, err)
+				_, ok := converted.(*dto.GeneralOpenAIRequest)
+				require.True(t, ok, "TokenHub dispatch should use OpenAI Claude conversion, got %T", converted)
+			} else {
+				require.Nil(t, converted)
+				var capabilityErr *types.UnsupportedEndpointError
+				require.ErrorAs(t, err, &capabilityErr)
+				require.Equal(t, string(types.RelayFormatClaude), capabilityErr.Endpoint)
+			}
+		})
+	}
+}
 
 func TestDispatchAdaptorInit(t *testing.T) {
 	tests := []struct {

@@ -1,15 +1,16 @@
 package vertex
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 
@@ -122,27 +123,53 @@ func exchangeJwtForAccessToken(signedJWT string, info *relaycommon.RelayInfo) (s
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var result struct {
+		AccessToken      string `json:"access_token"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
+	if err != nil {
+		return "", err
+	}
+	if err := common.Unmarshal(responseBody, &result); err != nil {
 		return "", err
 	}
 
-	if accessToken, ok := result["access_token"].(string); ok {
-		return accessToken, nil
+	if result.AccessToken != "" {
+		return result.AccessToken, nil
 	}
 
-	return "", fmt.Errorf("failed to get access token: %v", result)
+	return "", fmt.Errorf("failed to get access token: status=%d error_meta=%s description_meta=%s",
+		resp.StatusCode, common.SensitiveLogMeta(result.Error), common.SensitiveLogMeta(result.ErrorDescription))
 }
 
 func AcquireAccessToken(creds Credentials, proxy string) (string, error) {
+	return AcquireAccessTokenWithContext(context.Background(), creds, proxy)
+}
+
+// AcquireAccessTokenWithContext exchanges a service-account JWT while honoring
+// the caller's cancellation/deadline.  The legacy wrapper remains for relay
+// paths that do not yet carry a context.
+func AcquireAccessTokenWithContext(ctx context.Context, creds Credentials, proxy string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	signedJWT, err := createSignedJWT(creds.ClientEmail, creds.PrivateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create signed JWT: %w", err)
 	}
-	return exchangeJwtForAccessTokenWithProxy(signedJWT, proxy)
+	return exchangeJwtForAccessTokenWithContext(ctx, signedJWT, proxy)
 }
 
 func exchangeJwtForAccessTokenWithProxy(signedJWT string, proxy string) (string, error) {
+	return exchangeJwtForAccessTokenWithContext(context.Background(), signedJWT, proxy)
+}
+
+func exchangeJwtForAccessTokenWithContext(ctx context.Context, signedJWT string, proxy string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	authURL := "https://www.googleapis.com/oauth2/v4/token"
 	data := url.Values{}
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -159,19 +186,33 @@ func exchangeJwtForAccessTokenWithProxy(signedJWT string, proxy string) (string,
 		client = service.GetHttpClient()
 	}
 
-	resp, err := client.PostForm(authURL, data)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var result struct {
+		AccessToken      string `json:"access_token"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
+	if err != nil {
+		return "", err
+	}
+	if err := common.Unmarshal(responseBody, &result); err != nil {
 		return "", err
 	}
 
-	if accessToken, ok := result["access_token"].(string); ok {
-		return accessToken, nil
+	if result.AccessToken != "" {
+		return result.AccessToken, nil
 	}
-	return "", fmt.Errorf("failed to get access token: %v", result)
+	return "", fmt.Errorf("failed to get access token: status=%d error_meta=%s description_meta=%s",
+		resp.StatusCode, common.SensitiveLogMeta(result.Error), common.SensitiveLogMeta(result.ErrorDescription))
 }

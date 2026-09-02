@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
@@ -35,24 +35,28 @@ export function useAffiliate() {
   const [affiliateLink, setAffiliateLink] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [transferring, setTransferring] = useState(false)
+  const requestIdRef = useRef(0)
   const { copyToClipboard } = useCopyToClipboard()
 
   // Fetch affiliate code
   const fetchAffiliateCode = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     try {
       setLoading(true)
       const response = await getAffiliateCode()
 
+      if (requestId !== requestIdRef.current) return
       if (response.success && response.data) {
         setAffiliateCode(response.data)
         const link = generateAffiliateLink(response.data)
         setAffiliateLink(link)
       }
     } catch (error) {
+      if (requestId !== requestIdRef.current) return
       // eslint-disable-next-line no-console
       console.error('Failed to fetch affiliate code:', error)
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
   }, [])
 
@@ -75,7 +79,7 @@ export function useAffiliate() {
 
       toast.error(response.message || i18next.t('Transfer failed'))
       return false
-    } catch (_error) {
+    } catch {
       toast.error(i18next.t('Transfer failed'))
       return false
     } finally {
@@ -84,7 +88,16 @@ export function useAffiliate() {
   }, [])
 
   useEffect(() => {
-    fetchAffiliateCode()
+    let active = true
+    void Promise.resolve().then(() => {
+      if (!active) return
+      return fetchAffiliateCode()
+    })
+
+    return () => {
+      active = false
+      requestIdRef.current += 1
+    }
   }, [fetchAffiliateCode])
 
   return {

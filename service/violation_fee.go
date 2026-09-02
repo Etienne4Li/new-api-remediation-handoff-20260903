@@ -89,7 +89,7 @@ func calcViolationFeeQuota(amount, groupRatio float64) int {
 		return 0
 	}
 	quota := common.QuotaFromDecimal(decimal.NewFromFloat(amount).
-		Mul(decimal.NewFromFloat(common.QuotaPerUnit)).
+		Mul(decimal.NewFromFloat(common.GetQuotaPerUnit())).
 		Mul(decimal.NewFromFloat(groupRatio)).
 		Round(0))
 	if quota <= 0 {
@@ -122,13 +122,28 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		return false
 	}
 
-	if err := PostConsumeQuota(relayInfo, feeQuota, 0, true); err != nil {
+	// Keep the financial fee and its informational aggregates in one durable
+	// operation whenever this request has a stable RequestId.  A retry after a
+	// committed fee then observes the same applied marker and cannot lose (or
+	// double-apply) usage counters.
+	usage := &postConsumeQuotaUsage{
+		UserUsedQuotaDelta:    int64(feeQuota),
+		UserRequestCountDelta: 1,
+		ChannelID:             relayInfo.ChannelId,
+		ChannelUsedQuotaDelta: int64(feeQuota),
+	}
+	result, err := postConsumeQuotaWithComponentUsageResult(relayInfo, feeQuota, 0, true, "violation_fee", usage)
+	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("failed to charge violation fee: %s", err.Error()))
 		return false
 	}
 
-	model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, feeQuota)
-	model.UpdateChannelUsedQuota(relayInfo.ChannelId, feeQuota)
+	// Requests without a durable identity retain the compatibility behavior,
+	// but only that fallback may update usage outside the financial operation.
+	if !result.Durable {
+		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, feeQuota)
+		model.UpdateChannelUsedQuota(relayInfo.ChannelId, feeQuota)
+	}
 
 	useTimeSeconds := time.Now().Unix() - relayInfo.StartTime.Unix()
 	tokenName := ctx.GetString("token_name")

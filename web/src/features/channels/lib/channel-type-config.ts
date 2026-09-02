@@ -45,7 +45,7 @@ export interface ChannelTypeConfig {
 /**
  * Configuration for each channel type
  */
-export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
+const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
   1: {
     id: 1,
     name: CHANNEL_TYPES[1],
@@ -182,47 +182,19 @@ export function getChannelTypeConfig(type: number): ChannelTypeConfig {
 /**
  * Check if channel type requires organization field
  */
-export function requiresOrganization(type: number): boolean {
-  return CHANNEL_TYPE_CONFIGS[type]?.requiresOrganization || false
-}
 
 /**
  * Check if channel type requires region configuration
  */
-export function requiresRegion(type: number): boolean {
-  return CHANNEL_TYPE_CONFIGS[type]?.requiresRegion || false
-}
 
 /**
  * Get default base URL for channel type
  */
-export function getDefaultBaseUrl(type: number): string {
-  return CHANNEL_TYPE_CONFIGS[type]?.defaultBaseUrl || ''
-}
 
 /**
  * Get hints for channel type
  */
-export function getChannelTypeHints(type: number) {
-  return CHANNEL_TYPE_CONFIGS[type]?.hints || {}
-}
 
 /**
  * Validate API key format for channel type
  */
-export function validateKeyFormat(type: number, key: string): boolean {
-  const config = CHANNEL_TYPE_CONFIGS[type]
-  if (!config?.validation) return true
-
-  const { keyFormat, keyMinLength } = config.validation
-
-  if (keyMinLength && key.length < keyMinLength) {
-    return false
-  }
-
-  if (keyFormat && !keyFormat.test(key)) {
-    return false
-  }
-
-  return true
-}

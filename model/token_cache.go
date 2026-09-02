@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -39,12 +40,16 @@ func invalidateTokenCacheForMutation(key string) error {
 	if !common.RedisEnabled || key == "" {
 		return nil
 	}
-	ctx := context.Background()
-	err := common.RDB.Set(ctx, getTokenCacheFenceKey(key), 1, time.Duration(tokenCacheFenceSeconds)*time.Second).Err()
+	client, err := modelRedisClient()
 	if err != nil {
 		return err
 	}
-	return common.RDB.Del(ctx, getTokenCacheKey(key)).Err()
+	ctx := context.Background()
+	err = client.Set(ctx, getTokenCacheFenceKey(key), 1, time.Duration(tokenCacheFenceSeconds)*time.Second).Err()
+	if err != nil {
+		return err
+	}
+	return client.Del(ctx, getTokenCacheKey(key)).Err()
 }
 
 // cacheInitToken publishes a database snapshot only when no mutation fence is
@@ -56,6 +61,10 @@ func invalidateTokenCacheForMutation(key string) error {
 func cacheInitToken(token Token) (int, error) {
 	if !common.RedisEnabled {
 		return 0, nil
+	}
+	client, err := modelRedisClient()
+	if err != nil {
+		return 0, err
 	}
 	allowIps := ""
 	if token.AllowIps != nil {
@@ -78,7 +87,7 @@ redis.call('HSET', KEYS[1],
 redis.call('EXPIRE', KEYS[1], ARGV[17])
 return 1`
 
-	return common.RDB.Eval(context.Background(), script, []string{
+	return client.Eval(context.Background(), script, []string{
 		getTokenCacheKey(token.Key), getTokenCacheFenceKey(token.Key),
 	},
 		token.Id, token.UserId, token.Status, token.Name,
@@ -104,4 +113,31 @@ func cacheGetTokenByKey(key string) (*Token, error) {
 	}
 	token.Key = key
 	return &token, nil
+}
+
+// repairTokenQuotaCache fences and removes a token hash after a quota delta
+// could not be applied. The next authenticated read will hydrate the hash
+// from the database once the short fence expires, rather than trusting a
+// stale balance indefinitely.
+func repairTokenQuotaCache(tokenID int, key string) {
+	if !common.RedisEnabled || tokenID <= 0 || strings.TrimSpace(key) == "" {
+		return
+	}
+	if err := invalidateTokenCacheForMutation(key); err != nil {
+		common.SysLog(fmt.Sprintf("failed to invalidate token quota cache: token_id=%d error=%v", tokenID, err))
+	}
+}
+
+// handleTokenQuotaCacheMutationFailure fences the cache and records a durable
+// repair hint. The financial DB write has already committed by the time this
+// helper is called, so callers must not retry the ledger mutation merely
+// because Redis was unavailable.
+func handleTokenQuotaCacheMutationFailure(tokenID int, key string, cause error) {
+	if !common.RedisEnabled || tokenID <= 0 || strings.TrimSpace(key) == "" {
+		return
+	}
+	if err := invalidateTokenCacheForMutation(key); err != nil {
+		common.SysLog(fmt.Sprintf("failed to fence token quota cache: token_id=%d error=%v", tokenID, err))
+	}
+	recordQuotaCacheRepair(QuotaCacheRepairEntityToken, tokenID, getTokenCacheKey(key), cause)
 }

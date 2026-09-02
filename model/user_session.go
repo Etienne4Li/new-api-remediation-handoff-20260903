@@ -332,7 +332,11 @@ else
   redis.call('PEXPIRE', KEYS[1], ARGV[15])
 end
 return 1`
-	result, err := common.RDB.Eval(context.Background(), script, []string{userSessionCacheKey(entry.SID)},
+	client, err := modelRedisClient()
+	if err != nil {
+		return err
+	}
+	result, err := client.Eval(context.Background(), script, []string{userSessionCacheKey(entry.SID)},
 		entry.SID, entry.UserID, entry.Version, entry.UserAuthVersion, entry.Status,
 		entry.LoginMethod, entry.IP, entry.UserAgent, entry.CreatedAt, entry.LastActiveAt,
 		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, redisExpiration,

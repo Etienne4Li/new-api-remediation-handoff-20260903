@@ -55,6 +55,23 @@ func VerifyCodeWithKey(key string, code string, purpose string) bool {
 	return code == value.code
 }
 
+// ConsumeVerificationCodeWithKey verifies a code and invalidates it as one
+// operation.  Callers that perform a state-changing action (for example a
+// password reset) must use this instead of VerifyCodeWithKey followed by
+// DeleteKey; the split sequence lets concurrent requests redeem the same code
+// more than once.
+func ConsumeVerificationCodeWithKey(key string, code string, purpose string) bool {
+	verificationMutex.Lock()
+	defer verificationMutex.Unlock()
+	mapKey := purpose + key
+	value, okay := verificationMap[mapKey]
+	if !okay || int(time.Since(value.time).Seconds()) >= VerificationValidMinutes*60 || value.code != code {
+		return false
+	}
+	delete(verificationMap, mapKey)
+	return true
+}
+
 func DeleteKey(key string, purpose string) {
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()

@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -10,19 +11,61 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// parseLogIntQuery treats an omitted query parameter as its historical zero
+// value, but never turns malformed input into an unrestricted query.  The
+// previous `value, _ := Atoi(...)` pattern made `?channel=oops` silently mean
+// all channels and made typoed time bounds scan the entire log table.
+func parseLogIntQuery(c *gin.Context, key string, min int) (int, bool) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return 0, true
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < min {
+		common.ApiErrorMsg(c, "参数错误")
+		return 0, false
+	}
+	return value, true
+}
+
+func parseLogInt64Query(c *gin.Context, key string, min int64) (int64, bool) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return 0, true
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < min {
+		common.ApiErrorMsg(c, "参数错误")
+		return 0, false
+	}
+	return value, true
+}
+
 func GetAllLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	logType, ok := parseLogIntQuery(c, "type", 0)
+	if !ok {
+		return
+	}
+	startTimestamp, ok := parseLogInt64Query(c, "start_timestamp", 0)
+	if !ok {
+		return
+	}
+	endTimestamp, ok := parseLogInt64Query(c, "end_timestamp", 0)
+	if !ok {
+		return
+	}
 	username := c.Query("username")
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
+	channel, ok := parseLogIntQuery(c, "channel", 0)
+	if !ok {
+		return
+	}
 	group := c.Query("group")
 	requestId := c.Query("request_id")
 	upstreamRequestId := c.Query("upstream_request_id")
-	logs, total, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId)
+	logs, total, err := model.GetAllLogsForRole(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -36,9 +79,18 @@ func GetAllLogs(c *gin.Context) {
 func GetUserLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	userId := c.GetInt("id")
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	logType, ok := parseLogIntQuery(c, "type", 0)
+	if !ok {
+		return
+	}
+	startTimestamp, ok := parseLogInt64Query(c, "start_timestamp", 0)
+	if !ok {
+		return
+	}
+	endTimestamp, ok := parseLogInt64Query(c, "end_timestamp", 0)
+	if !ok {
+		return
+	}
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
 	group := c.Query("group")
@@ -84,7 +136,7 @@ func GetLogByKey(c *gin.Context) {
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": common.MaskSensitiveInfo(err.Error()),
 		})
 		return
 	}
@@ -96,15 +148,27 @@ func GetLogByKey(c *gin.Context) {
 }
 
 func GetLogsStat(c *gin.Context) {
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	logType, ok := parseLogIntQuery(c, "type", 0)
+	if !ok {
+		return
+	}
+	startTimestamp, ok := parseLogInt64Query(c, "start_timestamp", 0)
+	if !ok {
+		return
+	}
+	endTimestamp, ok := parseLogInt64Query(c, "end_timestamp", 0)
+	if !ok {
+		return
+	}
 	tokenName := c.Query("token_name")
 	username := c.Query("username")
 	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
+	channel, ok := parseLogIntQuery(c, "channel", 0)
+	if !ok {
+		return
+	}
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuotaForRole(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -124,12 +188,24 @@ func GetLogsStat(c *gin.Context) {
 
 func GetLogsSelfStat(c *gin.Context) {
 	username := c.GetString("username")
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	logType, ok := parseLogIntQuery(c, "type", 0)
+	if !ok {
+		return
+	}
+	startTimestamp, ok := parseLogInt64Query(c, "start_timestamp", 0)
+	if !ok {
+		return
+	}
+	endTimestamp, ok := parseLogInt64Query(c, "end_timestamp", 0)
+	if !ok {
+		return
+	}
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
+	channel, ok := parseLogIntQuery(c, "channel", 0)
+	if !ok {
+		return
+	}
 	group := c.Query("group")
 	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
 	if err != nil {

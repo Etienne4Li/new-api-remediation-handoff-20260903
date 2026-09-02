@@ -1,11 +1,8 @@
 package cohere
 
 import (
-	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -84,112 +81,148 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	responseId := helper.GetResponseID(c)
 	createdTime := common.GetTimestamp()
 	usage := &dto.Usage{}
-	responseText := ""
-	scanner := helper.NewStreamScanner(resp.Body)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
+	var responseText strings.Builder
+	var finished bool
+	var hasUpstreamUsage bool
+
+	helper.StreamScannerHandlerWithEventsAndDrain(c, resp, info, func(event, data string, sr *helper.StreamResult) {
+		var cohereResp CohereResponse
+		if err := common.UnmarshalJsonStr(data, &cohereResp); err != nil {
+			common.SysLog("error unmarshalling Cohere stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
+			sr.Error(err)
+			return
 		}
-		if i := strings.Index(string(data), "\n"); i >= 0 {
-			return i + 1, data[0:i], nil
+
+		text, terminal, finishReason, billedUnits := cohereStreamEvent(event, cohereResp)
+		if billedUnits != nil {
+			hasUpstreamUsage = true
+			usage.PromptTokens = common.SaturatingAddNonNegativeInt(billedUnits.InputTokens)
+			usage.CompletionTokens = common.SaturatingAddNonNegativeInt(billedUnits.OutputTokens)
+			usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 		}
-		if atEOF {
-			return len(data), data, nil
+		if finished || sr.IsDraining() {
+			return
 		}
-		return 0, nil, nil
-	})
-	dataChan := make(chan string)
-	stopChan := make(chan bool)
-	go func() {
-		for scanner.Scan() {
-			data := scanner.Text()
-			dataChan <- data
-		}
-		if err := scanner.Err(); err != nil {
-			common.SysLog("error reading stream: " + err.Error())
-		}
-		stopChan <- true
-	}()
-	helper.SetEventStreamHeaders(c)
-	isFirst := true
-	c.Stream(func(w io.Writer) bool {
-		select {
-		case data := <-dataChan:
-			if isFirst {
-				isFirst = false
-				info.FirstResponseTime = time.Now()
+
+		var openaiResp *dto.ChatCompletionsStreamResponse
+		if text != "" {
+			responseText.WriteString(text)
+			openaiResp = &dto.ChatCompletionsStreamResponse{
+				Id:      responseId,
+				Created: createdTime,
+				Object:  "chat.completion.chunk",
+				Model:   info.UpstreamModelName,
+				Choices: []dto.ChatCompletionsStreamResponseChoice{{
+					Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Role: "assistant", Content: &text},
+					Index: 0,
+				}},
 			}
-			data = strings.TrimSuffix(data, "\r")
-			var cohereResp CohereResponse
-			err := json.Unmarshal([]byte(data), &cohereResp)
-			if err != nil {
-				common.SysLog("error unmarshalling stream response: " + err.Error())
-				return true
-			}
-			var openaiResp dto.ChatCompletionsStreamResponse
-			openaiResp.Id = responseId
-			openaiResp.Created = createdTime
-			openaiResp.Object = "chat.completion.chunk"
-			openaiResp.Model = info.UpstreamModelName
-			if cohereResp.IsFinished {
-				finishReason := stopReasonCohere2OpenAI(cohereResp.FinishReason)
-				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
-					{
-						Delta:        dto.ChatCompletionsStreamResponseChoiceDelta{},
-						Index:        0,
-						FinishReason: &finishReason,
-					},
-				}
-				if cohereResp.Response != nil {
-					usage.PromptTokens = cohereResp.Response.Meta.BilledUnits.InputTokens
-					usage.CompletionTokens = cohereResp.Response.Meta.BilledUnits.OutputTokens
-				}
-			} else {
-				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
-					{
-						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
-							Role:    "assistant",
-							Content: &cohereResp.Text,
-						},
-						Index: 0,
-					},
-				}
-				responseText += cohereResp.Text
-			}
-			jsonStr, err := json.Marshal(openaiResp)
-			if err != nil {
-				common.SysLog("error marshalling stream response: " + err.Error())
-				return true
-			}
-			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
-			return true
-		case <-stopChan:
-			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
-			return false
 		}
-	})
-	if usage.PromptTokens == 0 {
-		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
+		if terminal {
+			finished = true
+			finishReason = stopReasonCohere2OpenAI(finishReason)
+			openaiResp = &dto.ChatCompletionsStreamResponse{
+				Id:      responseId,
+				Created: createdTime,
+				Object:  "chat.completion.chunk",
+				Model:   info.UpstreamModelName,
+				Choices: []dto.ChatCompletionsStreamResponseChoice{{
+					Delta:        dto.ChatCompletionsStreamResponseChoiceDelta{},
+					Index:        0,
+					FinishReason: &finishReason,
+				}},
+			}
+		}
+		if openaiResp == nil {
+			return
+		}
+		if err := helper.ObjectData(c, openaiResp); err != nil {
+			common.SysLog("failed to send Cohere stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
+			if !requestContextDone(c) {
+				sr.Stop(err)
+			}
+		}
+		if terminal && !sr.IsDraining() {
+			sr.Done()
+		}
+	}, &helper.StreamScannerDrainOptions{})
+
+	if !finished && info.StreamStatus != nil && info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() && !requestContextDone(c) {
+		finishReason := "stop"
+		finalResponse := &dto.ChatCompletionsStreamResponse{
+			Id:      responseId,
+			Created: createdTime,
+			Object:  "chat.completion.chunk",
+			Model:   info.UpstreamModelName,
+			Choices: []dto.ChatCompletionsStreamResponseChoice{{
+				Delta:        dto.ChatCompletionsStreamResponseChoiceDelta{},
+				Index:        0,
+				FinishReason: &finishReason,
+			}},
+		}
+		if err := helper.ObjectData(c, finalResponse); err != nil {
+			common.SysLog("failed to send synthesized Cohere terminal response: error_meta=" + common.SensitiveLogMeta(err.Error()))
+		}
+	}
+	if !requestContextDone(c) {
+		helper.Done(c)
+	}
+	if !hasUpstreamUsage {
+		usage = service.ResponseText2Usage(c, responseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
 	return usage, nil
 }
 
+func cohereStreamEvent(event string, response CohereResponse) (text string, terminal bool, finishReason string, billedUnits *CohereBilledUnits) {
+	if response.Text != "" {
+		text = response.Text
+	}
+	if response.Delta.Message.Content.Text != "" {
+		text = response.Delta.Message.Content.Text
+	}
+	if response.Response != nil {
+		billedUnits = &response.Response.Meta.BilledUnits
+	}
+	if response.Delta.Usage != nil {
+		billedUnits = &response.Delta.Usage.BilledUnits
+	}
+	terminal = response.IsFinished || response.EventType == "stream-end" || event == "stream-end" || response.Type == "message-end" || event == "message-end"
+	if !terminal {
+		return text, false, "", billedUnits
+	}
+	finishReason = response.FinishReason
+	if finishReason == "" {
+		finishReason = response.Delta.FinishReason
+	}
+	if finishReason == "" && response.Response != nil {
+		finishReason = response.Response.FinishReason
+	}
+	if finishReason == "" {
+		finishReason = "COMPLETE"
+	}
+	return text, true, finishReason, billedUnits
+}
+
+func requestContextDone(c *gin.Context) bool {
+	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
+}
+
 func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	createdTime := common.GetTimestamp()
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereResponseResult
-	err = json.Unmarshal(responseBody, &cohereResp)
+	err = common.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	usage := dto.Usage{}
-	usage.PromptTokens = cohereResp.Meta.BilledUnits.InputTokens
-	usage.CompletionTokens = cohereResp.Meta.BilledUnits.OutputTokens
-	usage.TotalTokens = cohereResp.Meta.BilledUnits.InputTokens + cohereResp.Meta.BilledUnits.OutputTokens
+	usage.PromptTokens = common.SaturatingAddNonNegativeInt(cohereResp.Meta.BilledUnits.InputTokens)
+	usage.CompletionTokens = common.SaturatingAddNonNegativeInt(cohereResp.Meta.BilledUnits.OutputTokens)
+	usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 
 	var openaiResp dto.TextResponse
 	openaiResp.Id = cohereResp.ResponseId
@@ -206,7 +239,7 @@ func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		},
 	}
 
-	jsonResponse, err := json.Marshal(openaiResp)
+	jsonResponse, err := common.Marshal(openaiResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
@@ -217,32 +250,32 @@ func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 }
 
 func cohereRerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereRerankResponseResult
-	err = json.Unmarshal(responseBody, &cohereResp)
+	err = common.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	usage := dto.Usage{}
 	if cohereResp.Meta.BilledUnits.InputTokens == 0 {
-		usage.PromptTokens = info.GetEstimatePromptTokens()
+		usage.PromptTokens = common.SaturatingAddNonNegativeInt(info.GetEstimatePromptTokens())
 		usage.CompletionTokens = 0
-		usage.TotalTokens = info.GetEstimatePromptTokens()
+		usage.TotalTokens = usage.PromptTokens
 	} else {
-		usage.PromptTokens = cohereResp.Meta.BilledUnits.InputTokens
-		usage.CompletionTokens = cohereResp.Meta.BilledUnits.OutputTokens
-		usage.TotalTokens = cohereResp.Meta.BilledUnits.InputTokens + cohereResp.Meta.BilledUnits.OutputTokens
+		usage.PromptTokens = common.SaturatingAddNonNegativeInt(cohereResp.Meta.BilledUnits.InputTokens)
+		usage.CompletionTokens = common.SaturatingAddNonNegativeInt(cohereResp.Meta.BilledUnits.OutputTokens)
+		usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	}
 
 	var rerankResp dto.RerankResponse
 	rerankResp.Results = cohereResp.Results
 	rerankResp.Usage = usage
 
-	jsonResponse, err := json.Marshal(rerankResp)
+	jsonResponse, err := common.Marshal(rerankResp)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}

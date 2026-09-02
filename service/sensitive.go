@@ -38,25 +38,31 @@ func CheckSensitiveText(text string) (bool, []string) {
 
 // SensitiveWordContains 是否包含敏感词，返回是否包含敏感词和敏感词列表
 func SensitiveWordContains(text string) (bool, []string) {
-	if len(setting.SensitiveWords) == 0 {
+	words := setting.GetSensitiveConfig().SensitiveWords
+	if len(words) == 0 {
 		return false, nil
 	}
 	if len(text) == 0 {
 		return false, nil
 	}
 	checkText := strings.ToLower(text)
-	return AcSearch(checkText, setting.SensitiveWords, true)
+	return AcSearch(checkText, words, true)
 }
 
 // SensitiveWordReplace 敏感词替换，返回是否包含敏感词和替换后的文本
 func SensitiveWordReplace(text string, returnImmediately bool) (bool, []string, string) {
-	if len(setting.SensitiveWords) == 0 {
+	words := setting.GetSensitiveConfig().SensitiveWords
+	if len(words) == 0 {
 		return false, nil, text
 	}
 	checkText := strings.ToLower(text)
-	m := getOrBuildAC(setting.SensitiveWords)
+	m := getOrBuildAC(words)
 	hits := m.MultiPatternSearch([]rune(checkText), returnImmediately)
 	if len(hits) > 0 {
+		// Aho-Corasick reports positions in runes, while Go string slices use
+		// byte offsets. Convert once to runes so non-ASCII text cannot be split
+		// in the middle of a UTF-8 sequence (or panic on a short byte slice).
+		textRunes := []rune(text)
 		words := make([]string, 0, len(hits))
 		var builder strings.Builder
 		builder.Grow(len(text))
@@ -65,12 +71,22 @@ func SensitiveWordReplace(text string, returnImmediately bool) (bool, []string, 
 		for _, hit := range hits {
 			pos := hit.Pos
 			word := string(hit.Word)
-			builder.WriteString(text[lastPos:pos])
+			if pos < lastPos || pos > len(textRunes) {
+				continue
+			}
+			wordLen := len(hit.Word)
+			if wordLen == 0 || pos+wordLen > len(textRunes) {
+				continue
+			}
+			builder.WriteString(string(textRunes[lastPos:pos]))
 			builder.WriteString("**###**")
-			lastPos = pos + len(word)
+			lastPos = pos + wordLen
 			words = append(words, word)
 		}
-		builder.WriteString(text[lastPos:])
+		if len(words) == 0 {
+			return false, nil, text
+		}
+		builder.WriteString(string(textRunes[lastPos:]))
 		return true, words, builder.String()
 	}
 	return false, nil, text

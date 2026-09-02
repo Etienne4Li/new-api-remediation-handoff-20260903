@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +37,8 @@ var (
 )
 
 func Login(c *gin.Context) {
-	if !common.PasswordLoginEnabled {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if !securityConfig.PasswordLoginEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordLoginDisabled)
 		return
 	}
@@ -204,11 +204,12 @@ func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin
 }
 
 func Register(c *gin.Context) {
-	if !common.RegisterEnabled {
+	securityConfig := common.GetSecurityRuntimeConfig()
+	if !securityConfig.RegisterEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
 		return
 	}
-	if !common.PasswordRegisterEnabled {
+	if !securityConfig.PasswordRegisterEnabled {
 		common.ApiErrorI18n(c, i18n.MsgUserPasswordRegisterDisabled)
 		return
 	}
@@ -228,7 +229,7 @@ func Register(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserInputInvalid, map[string]any{"Error": err.Error()})
 		return
 	}
-	if common.EmailVerificationEnabled {
+	if securityConfig.EmailVerificationEnabled {
 		if user.Email == "" || user.VerificationCode == "" {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailVerificationRequired)
 			return
@@ -247,7 +248,7 @@ func Register(c *gin.Context) {
 		}
 	}
 	emailForExistCheck := ""
-	if common.EmailVerificationEnabled {
+	if securityConfig.EmailVerificationEnabled {
 		emailForExistCheck = user.Email
 	}
 	exist, err := model.CheckUserExistOrDeleted(user.Username, emailForExistCheck)
@@ -261,7 +262,19 @@ func Register(c *gin.Context) {
 		return
 	}
 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
-	inviterId, _ := model.GetUserIdByAffCode(affCode)
+	inviterId := 0
+	if strings.TrimSpace(affCode) != "" {
+		var lookupErr error
+		inviterId, lookupErr = model.GetUserIdByAffCode(strings.TrimSpace(affCode))
+		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			common.SysLog(fmt.Sprintf("GetUserIdByAffCode error: %v", lookupErr))
+			common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+			return
+		}
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			inviterId = 0
+		}
+	}
 	cleanUser := model.User{
 		Username:    user.Username,
 		Password:    user.Password,
@@ -269,7 +282,7 @@ func Register(c *gin.Context) {
 		InviterId:   inviterId,
 		Role:        common.RoleCommonUser, // 明确设置角色为普通用户
 	}
-	if common.EmailVerificationEnabled {
+	if securityConfig.EmailVerificationEnabled {
 		cleanUser.Email = user.Email
 	}
 	if err := cleanUser.Insert(inviterId); err != nil {
@@ -307,7 +320,7 @@ func Register(c *gin.Context) {
 			UnlimitedQuota:     true,
 			ModelLimitsEnabled: false,
 		}
-		if setting.DefaultUseAutoGroup {
+		if setting.GetDefaultUseAutoGroup() {
 			token.Group = "auto"
 		}
 		if err := token.Insert(); err != nil {
@@ -326,7 +339,7 @@ func Register(c *gin.Context) {
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	users, total, err := model.GetAllUsers(pageInfo, sortOptions)
+	users, total, err := model.GetAllUsersForRole(pageInfo, c.GetInt("role"), sortOptions)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -356,7 +369,7 @@ func SearchUsers(c *gin.Context) {
 	}
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
+	users, total, err := model.SearchUsersForRole(keyword, group, role, status, c.GetInt("role"), pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -369,6 +382,13 @@ func SearchUsers(c *gin.Context) {
 }
 
 func canManageTargetRole(myRole int, targetRole int) bool {
+	// Role values come from the authenticated context and the database.  Keep
+	// this helper fail-closed even when a caller bypasses AdminAuth or a stale
+	// row contains an unknown role; comparing arbitrary integers (for example
+	// actor role 42) would otherwise accidentally grant management access.
+	if !common.IsValidateRole(myRole) || !common.IsValidateRole(targetRole) {
+		return false
+	}
 	return myRole == common.RoleRootUser || myRole > targetRole
 }
 
@@ -378,7 +398,7 @@ func GetUser(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	user, err := model.GetUserById(id, false)
+	user, err := model.GetUserByIdForAdmin(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -407,7 +427,12 @@ func GenerateAccessToken(c *gin.Context) {
 		common.SysLog("failed to generate key: " + err.Error())
 		return
 	}
-	if model.DB.Where("access_token = ?", key).First(&model.User{}).RowsAffected != 0 {
+	exists, err := model.AccessTokenExists(key)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if exists {
 		common.ApiErrorI18n(c, i18n.MsgUuidDuplicate)
 		return
 	}
@@ -465,7 +490,7 @@ func GetAffCode(c *gin.Context) {
 		if err := user.Update(false); err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -506,7 +531,15 @@ func GetSelf(c *gin.Context) {
 // login and refresh. It intentionally excludes password, management PAT and
 // administrator-only remarks.
 func buildSelfUserData(user *model.User) map[string]interface{} {
-	userSetting := user.GetSetting()
+	userSetting, settingErr := user.GetSettingWithError()
+	settingJSON := "{}"
+	if settingErr == nil {
+		if encoded, err := common.Marshal(userSetting); err == nil {
+			settingJSON = string(encoded)
+		}
+	} else {
+		common.SysError(fmt.Sprintf("failed to render user %d setting: %v", user.Id, settingErr))
+	}
 	permissions := calculateUserPermissions(user.Role)
 	permissions["admin_permissions"] = authz.Capabilities(user.Id, user.Role)
 	return map[string]interface{}{
@@ -531,7 +564,7 @@ func buildSelfUserData(user *model.User) map[string]interface{} {
 		"aff_history_quota": user.AffHistoryQuota,
 		"inviter_id":        user.InviterId,
 		"linux_do_id":       user.LinuxDOId,
-		"setting":           user.Setting,
+		"setting":           settingJSON,
 		"stripe_customer":   user.StripeCustomer,
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
 		"permissions":       permissions,
@@ -591,6 +624,7 @@ func generateDefaultSidebarConfig(userRole int) string {
 	defaultConfig["personal"] = map[string]interface{}{
 		"enabled":  true,
 		"topup":    true,
+		"ticket":   true,
 		"personal": true,
 	}
 
@@ -655,10 +689,15 @@ func GetUserModels(c *gin.Context) {
 			groupsToQuery = []string{group}
 		}
 	}
+	models, err := service.GetGroupsEnabledModelsWithError(groupsToQuery)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    service.GetGroupsEnabledModels(groupsToQuery),
+		"data":    models,
 	})
 }
 
@@ -959,7 +998,7 @@ func DeleteUser(c *gin.Context) {
 		return
 	}
 	myRole := c.GetInt("role")
-	if myRole <= originUser.Role {
+	if !canManageTargetRole(myRole, originUser.Role) {
 		common.ApiErrorI18n(c, i18n.MsgUserNoPermissionHigherLevel)
 		return
 	}
@@ -981,14 +1020,18 @@ func DeleteUser(c *gin.Context) {
 
 func DeleteSelf(c *gin.Context) {
 	id := c.GetInt("id")
-	user, _ := model.GetUserById(id, false)
+	user, err := model.GetUserById(id, false)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	if user.Role == common.RoleRootUser {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotDeleteRootUser)
 		return
 	}
 
-	err := model.DeleteUserById(id)
+	err = model.DeleteUserById(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1016,6 +1059,10 @@ func CreateUser(c *gin.Context) {
 		user.DisplayName = user.Username
 	}
 	myRole := c.GetInt("role")
+	if !common.IsValidateRole(myRole) || !common.IsValidateRole(user.Role) {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
 	if user.Role >= myRole {
 		common.ApiErrorI18n(c, i18n.MsgUserCannotCreateHigherLevel)
 		return
@@ -1093,8 +1140,17 @@ func ManageUser(c *gin.Context) {
 	user := model.User{
 		Id: req.Id,
 	}
-	// Fill attributes
-	model.DB.Unscoped().Where(&user).First(&user)
+	// Fill attributes. Treat database failures as failures rather than using the
+	// zero-value role, which could otherwise pass the hierarchy comparison and
+	// turn a transient outage into a partially applied management operation.
+	if err := model.DB.Unscoped().Where(&user).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.ApiErrorI18n(c, i18n.MsgUserNotExists)
+		} else {
+			common.ApiError(c, err)
+		}
+		return
+	}
 	if user.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgUserNotExists)
 		return
@@ -1121,7 +1177,7 @@ func ManageUser(c *gin.Context) {
 		if err := user.Delete(); err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": err.Error(),
+				"message": common.MaskSensitiveInfo(err.Error()),
 			})
 			return
 		}
@@ -1196,7 +1252,7 @@ func ManageUser(c *gin.Context) {
 				return
 			}
 			oldQuota := user.Quota
-			if err := model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("quota", req.Value).Error; err != nil {
+			if err := model.SetUserQuota(user.Id, req.Value); err != nil {
 				common.ApiError(c, err)
 				return
 			}
@@ -1383,7 +1439,7 @@ func TopUp(c *gin.Context) {
 	if err != nil {
 		// 不向用户暴露兑换失败的细分原因，避免攻击者根据错误类型判断兑换码状态。
 		common.ApiErrorI18n(c, i18n.MsgRedeemFailed)
-		logger.LogError(c, fmt.Sprintf("failed to redeem key %s for user %d: %s", req.Key, id, err.Error()))
+		logger.LogError(c, fmt.Sprintf("failed to redeem key meta=%s for user %d: %s", common.SensitiveLogMeta(req.Key), id, err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1433,8 +1489,12 @@ func UpdateUserSetting(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgSettingWebhookEmpty)
 			return
 		}
-		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.WebhookUrl); err != nil {
+		var err error
+		if req.WebhookUrl, err = service.NormalizeNotificationURL(req.WebhookUrl); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgSettingWebhookInvalid)
+			return
+		}
+		if req.WebhookSecret, err = service.NormalizeNotificationCredential(req.WebhookSecret, service.MaxNotificationSecretLength); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgSettingWebhookInvalid)
 			return
 		}
@@ -1442,6 +1502,10 @@ func UpdateUserSetting(c *gin.Context) {
 
 	// 如果是邮件类型，验证邮箱地址
 	if req.QuotaWarningType == dto.NotifyTypeEmail && req.NotificationEmail != "" {
+		if len([]byte(req.NotificationEmail)) > service.MaxNotificationEmailLength {
+			common.ApiErrorI18n(c, i18n.MsgSettingEmailInvalid)
+			return
+		}
 		// 验证邮箱格式
 		if !strings.Contains(req.NotificationEmail, "@") {
 			common.ApiErrorI18n(c, i18n.MsgSettingEmailInvalid)
@@ -1455,15 +1519,15 @@ func UpdateUserSetting(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgSettingBarkUrlEmpty)
 			return
 		}
-		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.BarkUrl); err != nil {
-			common.ApiErrorI18n(c, i18n.MsgSettingBarkUrlInvalid)
+		if normalized, err := service.NormalizeNotificationURL(req.BarkUrl); err != nil {
+			if strings.Contains(err.Error(), "http or https") {
+				common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
+			} else {
+				common.ApiErrorI18n(c, i18n.MsgSettingBarkUrlInvalid)
+			}
 			return
-		}
-		// 检查是否是HTTP或HTTPS
-		if !strings.HasPrefix(req.BarkUrl, "https://") && !strings.HasPrefix(req.BarkUrl, "http://") {
-			common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
-			return
+		} else {
+			req.BarkUrl = normalized
 		}
 	}
 
@@ -1478,14 +1542,21 @@ func UpdateUserSetting(c *gin.Context) {
 			return
 		}
 		// 验证URL格式
-		if _, err := url.ParseRequestURI(req.GotifyUrl); err != nil {
+		if normalized, err := service.NormalizeNotificationURL(req.GotifyUrl); err != nil {
+			if strings.Contains(err.Error(), "http or https") {
+				common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
+			} else {
+				common.ApiErrorI18n(c, i18n.MsgSettingGotifyUrlInvalid)
+			}
+			return
+		} else {
+			req.GotifyUrl = normalized
+		}
+		if normalized, err := service.NormalizeNotificationCredential(req.GotifyToken, service.MaxNotificationTokenLength); err != nil {
 			common.ApiErrorI18n(c, i18n.MsgSettingGotifyUrlInvalid)
 			return
-		}
-		// 检查是否是HTTP或HTTPS
-		if !strings.HasPrefix(req.GotifyUrl, "https://") && !strings.HasPrefix(req.GotifyUrl, "http://") {
-			common.ApiErrorI18n(c, i18n.MsgSettingUrlMustHttp)
-			return
+		} else {
+			req.GotifyToken = normalized
 		}
 	}
 

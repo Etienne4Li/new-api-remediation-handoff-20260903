@@ -1,7 +1,6 @@
 package palm
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 
@@ -57,17 +56,17 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 	dataChan := make(chan string)
 	stopChan := make(chan bool)
 	go func() {
-		responseBody, err := io.ReadAll(resp.Body)
+		responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 		if err != nil {
-			common.SysLog("error reading stream response: " + err.Error())
+			common.SysLog("error reading stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			stopChan <- true
 			return
 		}
 		service.CloseResponseBodyGracefully(resp)
 		var palmResponse PaLMChatResponse
-		err = json.Unmarshal(responseBody, &palmResponse)
+		err = common.Unmarshal(responseBody, &palmResponse)
 		if err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
+			common.SysLog("error unmarshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			stopChan <- true
 			return
 		}
@@ -77,9 +76,9 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 		if len(palmResponse.Candidates) > 0 {
 			responseText = palmResponse.Candidates[0].Content
 		}
-		jsonResponse, err := json.Marshal(fullTextResponse)
+		jsonResponse, err := common.Marshal(fullTextResponse)
 		if err != nil {
-			common.SysLog("error marshalling stream response: " + err.Error())
+			common.SysLog("error marshalling stream response: error_meta=" + common.SensitiveLogMeta(err.Error()))
 			stopChan <- true
 			return
 		}
@@ -102,13 +101,13 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 }
 
 func palmHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
 	var palmResponse PaLMChatResponse
-	err = json.Unmarshal(responseBody, &palmResponse)
+	err = common.Unmarshal(responseBody, &palmResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}

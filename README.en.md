@@ -123,6 +123,16 @@ nano docker-compose.yml
 docker-compose up -d
 ```
 
+> **Production deployment:** `docker-compose.yml` is a compatibility
+> quick-start with development defaults and must not be exposed directly to the
+> internet. For production, read
+> [`docs/deployment/secure-compose.md`](docs/deployment/secure-compose.md) and
+> use `docker-compose.secure.yml`. It requires pinned image digests, Docker
+> secrets, Redis ACL/persistence/memory limits, an internal data network,
+> unprivileged containers, health checks, and bounded log retention. Run
+> `scripts/verify-secure-compose.sh` before startup and apply the deny-by-default
+> reverse-proxy example from the deployment guide.
+
 <details>
 <summary><strong>Using Docker Commands</strong></summary>
 
@@ -314,17 +324,22 @@ docker run --name new-api -d --restart always \
 | Variable Name | Description | Default Value |
 |--------|------|--------|
 | `SESSION_SECRET` | Authentication signing secret; must be identical on every node | - |
+| `SESSION_SECRET_FILE` | File containing the authentication signing secret; takes precedence over `SESSION_SECRET` | - |
 | `SESSION_COOKIE_SECURE` | `false`/unset disables the refresh/logout OriginGuard for local HTTP dev proxies; `true` enables the Secure cookie and strict Origin checks | `false` |
 | `SESSION_COOKIE_TRUSTED_URL` | Required with Secure mode: comma-separated exact HTTPS Origins allowed to call refresh/logout; not a relay CORS allowlist | - |
-| `TRUSTED_PROXIES` | Unset/blank trusts loopback, RFC 1918 and IPv6 ULA with a startup warning; `none` trusts no proxies; an explicit proxy IP/CIDR list replaces the defaults | `127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7` |
+| `TRUSTED_PROXIES` | Unset/blank uses the TCP peer only and emits a startup warning; `none` is the same strict mode; an explicit IP/CIDR list replaces the defaults (the edge must clear and rebuild `X-Forwarded-For`) | empty (direct-peer mode) |
 | `USER_SESSION_ACTIVE_LIMIT` | Maximum active login Sessions per user | `50` |
 | `USER_SESSION_ISSUANCE_LIMIT` | Maximum Sessions created per user within the issuance window, including revoked Sessions | `100` |
 | `USER_SESSION_ISSUANCE_WINDOW_SECONDS` | Per-user Session issuance window; clamped to the revoked retention period when configured higher | `86400` |
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | Days to retain revoked Session rows for audit and issuance accounting | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | Global Sessions created per hour that triggers an alert only; it never blocks login | `5000` |
-| `CRYPTO_SECRET` | HMAC secret for cache keys; nodes sharing Redis must use the same effective value | Defaults to `SESSION_SECRET` |
+| `CRYPTO_SECRET` | Durable root key for credentials encrypted at rest, fingerprints, and cache HMACs; all nodes sharing a database must use the same non-rotating value | Defaults to `SESSION_SECRET` |
+| `CRYPTO_SECRET_FILE` | File containing the durable credential/cache root key; takes precedence over `CRYPTO_SECRET` | - |
 | `SQL_DSN` | Database connection string | - |
+| `SQL_DSN_FILE` | File containing the database connection string; takes precedence over `SQL_DSN` (recommended for Docker/Kubernetes secrets) | - |
+| `LOG_SQL_DSN_FILE` | File containing the log database connection string; takes precedence over `LOG_SQL_DSN` | - |
 | `REDIS_CONN_STRING` | Redis connection string | - |
+| `REDIS_CONN_STRING_FILE` | File containing the Redis connection string; takes precedence over `REDIS_CONN_STRING` | - |
 | `STREAMING_TIMEOUT` | Streaming timeout (seconds) | `300` |
 | `STREAM_SCANNER_MAX_BUFFER_MB` | Max per-line buffer (MB) for the stream scanner; increase when upstream sends huge image/base64 payloads | `64` |
 | `MAX_REQUEST_BODY_MB` | Max request body size (MB, counted **after decompression**; prevents huge requests/zip bombs from exhausting memory). Exceeding it returns `413` | `32` |
@@ -404,7 +419,7 @@ docker run --name new-api -d --restart always \
 
 > [!WARNING]
 > - All nodes must use the same primary database and the same `SESSION_SECRET`; otherwise Access Tokens, refresh sessions, and temporary authentication flows cannot be verified consistently.
-> - Nodes connected to the same Redis must also use the same `CRYPTO_SECRET`, or their cache-key digests will differ and shared entries cannot be reused consistently.
+> - Nodes sharing a database must keep the same `CRYPTO_SECRET`; it protects encrypted credentials and fingerprints in addition to cache-key digests. Do not replace it on an existing database without an explicit re-encryption migration.
 
 The database is authoritative for login Sessions and for the per-user active/issuance limits. Redis Session entries are short-lived caches whose TTL follows `SYNC_FREQUENCY` (60 seconds by default) and never exceeds the Session's remaining lifetime.
 

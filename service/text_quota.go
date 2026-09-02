@@ -76,9 +76,158 @@ func (s *textQuotaSummary) hasBillableUsage() bool {
 	return s.TotalTokens > 0 || !s.ToolCallSurchargeQuota.IsZero()
 }
 
+// needsIncompleteResponsesStreamBilling reports whether a Responses stream
+// ended abnormally without an authoritative upstream usage object. The
+// explicit authority bit is set by the Responses adapter and intentionally
+// takes precedence over the generic local-count flag: a provider may return a
+// valid partial usage object while another part of the response was counted
+// locally, and that provider usage must not be replaced by a reservation
+// estimate.
+func needsIncompleteResponsesStreamBilling(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage) bool {
+	if ctx == nil || relayInfo == nil || !relayInfo.IsStream || relayInfo.RelayMode != relayconstant.RelayModeResponses {
+		return false
+	}
+	status := relayInfo.StreamStatus
+	if status == nil {
+		return false
+	}
+	streamMarkedIncomplete := common.GetContextKeyBool(ctx, constant.ContextKeyResponsesStreamIncomplete)
+	terminalSeen := common.GetContextKeyBool(ctx, constant.ContextKeyResponsesStreamTerminalSeen)
+	_, terminalSeenSet := common.GetContextKey(ctx, constant.ContextKeyResponsesStreamTerminalSeen)
+	// For Responses, only an explicit [DONE] marker is a normal terminal
+	// signal. StreamScannerHandler also uses EOF/HandlerStop as generic normal
+	// endings for legacy adapters, but an EOF without [DONE] can mean the
+	// upstream/client connection was cut before terminal usage was delivered.
+	// The adapter's terminal-seen bit makes an EOF after a valid terminal event
+	// safe, while an explicit incomplete bit covers response.incomplete/
+	// response.cancelled followed by [DONE].
+	if !streamMarkedIncomplete && !status.HasErrors() {
+		switch status.EndReason {
+		case relaycommon.StreamEndReasonDone:
+			// A direct package-level caller from an older relay may not set the
+			// adapter marker; retain the historical Done semantics in that case.
+			if !terminalSeenSet || terminalSeen {
+				return false
+			}
+		case relaycommon.StreamEndReasonEOF, relaycommon.StreamEndReasonHandlerStop:
+			// EOF/HandlerStop is only safe after the Responses protocol emitted a
+			// terminal event. Missing marker means the stream was truncated.
+			if terminalSeen {
+				return false
+			}
+		}
+	}
+	if common.GetContextKeyBool(ctx, constant.ContextKeyResponsesUsageAuthoritative) {
+		return false
+	}
+	if (status.EndReason == relaycommon.StreamEndReasonEOF ||
+		status.EndReason == relaycommon.StreamEndReasonHandlerStop) && !terminalSeen {
+		return true
+	}
+	return streamMarkedIncomplete || common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) || !ValidUsage(usage)
+}
+
+// needsIncompleteResponsesStreamBillingFloor is kept as a compatibility
+// alias for package-local callers from older revisions. It now describes the
+// usage-normalisation decision; no quota floor is retained.
+func needsIncompleteResponsesStreamBillingFloor(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage) bool {
+	return needsIncompleteResponsesStreamBilling(ctx, relayInfo, usage)
+}
+
+// cloneUsageForIncompleteResponsesBilling returns an independent usage value
+// so the original upstream payload remains available for logging and
+// diagnostics. BillingUsage is cleared on the clone: otherwise a second
+// effectiveBillingUsage pass could unwrap the stale nested usage and undo the
+// normalisation.
+func cloneUsageForIncompleteResponsesBilling(usage *dto.Usage) *dto.Usage {
+	if usage == nil {
+		return &dto.Usage{}
+	}
+	clone := *usage
+	clone.BillingUsage = nil
+	if usage.InputTokensDetails != nil {
+		details := *usage.InputTokensDetails
+		clone.InputTokensDetails = &details
+	}
+	return &clone
+}
+
+// safeTokenTotal adds non-negative token counts without allowing malformed
+// upstream values to wrap an int into a negative number.
+func safeTokenTotal(promptTokens, completionTokens int) int {
+	return common.SaturatingAddNonNegativeInt(promptTokens, completionTokens)
+}
+
+func nonNegativeTokenCount(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func subtractTokenCount(value, deduction int) int {
+	value = nonNegativeTokenCount(value)
+	deduction = nonNegativeTokenCount(deduction)
+	if deduction >= value {
+		return 0
+	}
+	return value - deduction
+}
+
+// normalizeIncompleteResponsesStreamUsage applies the conservative billing
+// policy for an abnormal Responses stream:
+//   - input is at least the request-side estimate;
+//   - completion is at least common.PreConsumedQuota (500 by default), while
+//     any larger observed reasoning/tool/text output is retained.
+//
+// This deliberately works at the usage layer rather than by raising summary
+// quota to PriceData.QuotaToPreConsume. The latter may include a client-
+// supplied max_output_tokens value many orders of magnitude larger than work
+// actually observed, and would turn a protective baseline into a permanent
+// overcharge. Free groups/models keep their zero-charge semantics.
+func normalizeIncompleteResponsesStreamUsage(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage) (*dto.Usage, bool) {
+	if !needsIncompleteResponsesStreamBilling(ctx, relayInfo, usage) {
+		return usage, false
+	}
+
+	normalized := cloneUsageForIncompleteResponsesBilling(usage)
+	if relayInfo.PriceData.FreeModel || relayInfo.PriceData.GroupRatioInfo.GroupRatio == 0 {
+		// Preserve any observed dimensions for the log, but do not invent a
+		// billable baseline for a free group/model.
+		return normalized, true
+	}
+
+	promptTokens := relayInfo.GetEstimatePromptTokens()
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if normalized.PromptTokens > promptTokens {
+		promptTokens = normalized.PromptTokens
+	}
+
+	completionBaseline := common.GetPreConsumedQuota()
+	if completionBaseline <= 0 {
+		completionBaseline = 500
+	}
+	completionTokens := normalized.CompletionTokens
+	if completionTokens < completionBaseline {
+		completionTokens = completionBaseline
+	}
+	if completionTokens < 0 { // defensive; the baseline above normally wins
+		completionTokens = completionBaseline
+	}
+
+	normalized.PromptTokens = promptTokens
+	normalized.InputTokens = promptTokens
+	normalized.CompletionTokens = completionTokens
+	normalized.OutputTokens = completionTokens
+	normalized.TotalTokens = safeTokenTotal(promptTokens, completionTokens)
+	return normalized, true
+}
+
 func cacheWriteTokensTotal(summary textQuotaSummary) int {
 	if summary.CacheCreationTokens5m > 0 || summary.CacheCreationTokens1h > 0 {
-		splitCacheWriteTokens := summary.CacheCreationTokens5m + summary.CacheCreationTokens1h
+		splitCacheWriteTokens := safeTokenTotal(summary.CacheCreationTokens5m, summary.CacheCreationTokens1h)
 		if summary.CacheCreationTokens > splitCacheWriteTokens {
 			return summary.CacheCreationTokens
 		}
@@ -147,7 +296,7 @@ func mergeToolSurchargeItems(items []ToolSurchargeItem) []ToolSurchargeItem {
 
 func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, summary *textQuotaSummary) decimal.Decimal {
 	dGroupRatio := decimal.NewFromFloat(summary.GroupRatio)
-	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+	dQuotaPerUnit := decimal.NewFromFloat(common.GetQuotaPerUnit())
 
 	var items []ToolSurchargeItem
 
@@ -225,6 +374,20 @@ func composeTieredTextQuota(relayInfo *relaycommon.RelayInfo, summary textQuotaS
 	return total
 }
 
+// shouldUseTieredTextFallback reports whether a tiered settlement result is
+// safe to use for the text path. TryTieredSettle deliberately returns the
+// frozen pre-consume quota when expression evaluation fails, so callers can
+// preserve legacy behaviour for ordinary requests. For an abnormal Responses
+// stream, the conservative variant returns a bounded quota with a nil result;
+// that value must still be applied. A zero bounded result means there is no
+// reservation to settle and the usage-normalised summary remains the fallback.
+func shouldUseTieredTextFallback(incompleteResponses bool, tieredQuota int, tieredResult *billingexpr.TieredResult) bool {
+	if !incompleteResponses {
+		return true
+	}
+	return tieredResult != nil || tieredQuota > 0
+}
+
 // calculateTextQuotaSummary expects a usage already remapped by
 // effectiveBillingUsage; PostTextConsumeQuota performs that remap once and shares
 // the result with tiered billing, affinity observation and logging.
@@ -254,30 +417,36 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 		}
 	}
 
-	summary.PromptTokens = usage.PromptTokens
-	summary.CompletionTokens = usage.CompletionTokens
-	summary.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-	summary.CacheTokens = usage.PromptTokensDetails.CachedTokens
-	summary.CacheCreationTokens = usage.PromptTokensDetails.CacheCreationTokensTotal()
-	summary.CacheCreationTokens5m = usage.ClaudeCacheCreation5mTokens
-	summary.CacheCreationTokens1h = usage.ClaudeCacheCreation1hTokens
-	summary.ImageTokens = usage.PromptTokensDetails.ImageTokens
-	summary.AudioTokens = usage.PromptTokensDetails.AudioTokens
+	summary.PromptTokens = nonNegativeTokenCount(usage.PromptTokens)
+	summary.CompletionTokens = nonNegativeTokenCount(usage.CompletionTokens)
+	summary.TotalTokens = safeTokenTotal(usage.PromptTokens, usage.CompletionTokens)
+	summary.CacheTokens = nonNegativeTokenCount(usage.PromptTokensDetails.CachedTokens)
+	summary.CacheCreationTokens = nonNegativeTokenCount(usage.PromptTokensDetails.CacheCreationTokensTotal())
+	summary.CacheCreationTokens5m = nonNegativeTokenCount(usage.ClaudeCacheCreation5mTokens)
+	summary.CacheCreationTokens1h = nonNegativeTokenCount(usage.ClaudeCacheCreation1hTokens)
+	summary.ImageTokens = nonNegativeTokenCount(usage.PromptTokensDetails.ImageTokens)
+	summary.AudioTokens = nonNegativeTokenCount(usage.PromptTokensDetails.AudioTokens)
 	legacyClaudeDerived := isLegacyClaudeDerivedOpenAIUsage(relayInfo, usage)
 	isOpenRouterClaudeBilling := relayInfo.ChannelMeta != nil &&
 		relayInfo.ChannelType == constant.ChannelTypeOpenRouter &&
 		summary.IsClaudeUsageSemantic
 
 	if isOpenRouterClaudeBilling {
-		summary.PromptTokens -= summary.CacheTokens
+		summary.PromptTokens = subtractTokenCount(summary.PromptTokens, summary.CacheTokens)
 		isUsingCustomSettings := relayInfo.PriceData.UsePrice || hasCustomModelRatio(summary.ModelName, relayInfo.PriceData.ModelRatio)
-		if summary.CacheCreationTokens == 0 && relayInfo.PriceData.CacheCreationRatio != 1 && usage.Cost != 0 && !isUsingCustomSettings {
-			maybeCacheCreationTokens := CalcOpenRouterCacheCreateTokens(*usage, relayInfo.PriceData)
-			if maybeCacheCreationTokens >= 0 && summary.PromptTokens >= maybeCacheCreationTokens {
-				summary.CacheCreationTokens = maybeCacheCreationTokens
+		if summary.CacheCreationTokens == 0 && relayInfo.PriceData.CacheCreationRatio != 1 && !isUsingCustomSettings {
+			// Cost is an `any` field populated from an upstream JSON payload.
+			// Validate its shape before attempting the cache-write inference;
+			// direct interface comparison can panic when a provider sends an
+			// object or array instead of a number.
+			if cost, ok := parseOpenRouterUsageCost(usage.Cost); ok && cost > 0 {
+				maybeCacheCreationTokens := CalcOpenRouterCacheCreateTokens(*usage, relayInfo.PriceData)
+				if maybeCacheCreationTokens >= 0 && summary.PromptTokens >= maybeCacheCreationTokens {
+					summary.CacheCreationTokens = maybeCacheCreationTokens
+				}
 			}
 		}
-		summary.PromptTokens -= summary.CacheCreationTokens
+		summary.PromptTokens = subtractTokenCount(summary.PromptTokens, summary.CacheCreationTokens)
 	}
 
 	dPromptTokens := decimal.NewFromInt(int64(summary.PromptTokens))
@@ -295,7 +464,7 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	dCacheCreationRatio := decimal.NewFromFloat(summary.CacheCreationRatio)
 	dCacheCreationRatio5m := decimal.NewFromFloat(summary.CacheCreationRatio5m)
 	dCacheCreationRatio1h := decimal.NewFromFloat(summary.CacheCreationRatio1h)
-	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+	dQuotaPerUnit := decimal.NewFromFloat(common.GetQuotaPerUnit())
 
 	ratio := dModelRatio.Mul(dGroupRatio)
 	summary.ToolCallSurchargeQuota = calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
@@ -319,10 +488,8 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 				baseTokens = baseTokens.Sub(dCachedCreationTokens)
 				cachedCreationTokensWithRatio = dCachedCreationTokens.Mul(dCacheCreationRatio)
 			} else {
-				remaining := summary.CacheCreationTokens - summary.CacheCreationTokens5m - summary.CacheCreationTokens1h
-				if remaining < 0 {
-					remaining = 0
-				}
+				splitCacheWriteTokens := safeTokenTotal(summary.CacheCreationTokens5m, summary.CacheCreationTokens1h)
+				remaining := subtractTokenCount(summary.CacheCreationTokens, splitCacheWriteTokens)
 				cachedCreationTokensWithRatio = decimal.NewFromInt(int64(remaining)).Mul(dCacheCreationRatio)
 				cachedCreationTokensWithRatio = cachedCreationTokensWithRatio.Add(decimal.NewFromInt(int64(summary.CacheCreationTokens5m)).Mul(dCacheCreationRatio5m))
 				cachedCreationTokensWithRatio = cachedCreationTokensWithRatio.Add(decimal.NewFromInt(int64(summary.CacheCreationTokens1h)).Mul(dCacheCreationRatio1h))
@@ -397,11 +564,16 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
+	incompleteStreamUsage := needsIncompleteResponsesStreamBilling(ctx, relayInfo, billingUsage)
+	billingUsage, normalizedIncompleteUsage := normalizeIncompleteResponsesStreamUsage(ctx, relayInfo, billingUsage)
+	incompleteStreamUsage = incompleteStreamUsage || normalizedIncompleteUsage
 	if usage == nil {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
 	if originUsage != nil {
-		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, billingUsage, relayInfo.GetFinalRequestRelayFormat())
+		// Affinity statistics must reflect the upstream observation rather than
+		// the synthetic completion baseline used only for settlement.
+		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, effectiveBillingUsage(originUsage), relayInfo.GetFinalRequestRelayFormat())
 	}
 
 	adminRejectReason := common.GetContextKeyString(ctx, constant.ContextKeyAdminRejectReason)
@@ -409,16 +581,49 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	var tieredResult *billingexpr.TieredResult
 	tieredBillingApplied := false
-	if originUsage != nil {
+	if billingUsage != nil && (originUsage != nil || incompleteStreamUsage) {
 		var tieredUsedVars map[string]bool
 		if snap := relayInfo.TieredBillingSnapshot; snap != nil {
 			tieredUsedVars = billingexpr.UsedVars(snap.ExprString)
 		}
-		tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, BuildTieredTokenParams(billingUsage, summary.IsClaudeUsageSemantic, tieredUsedVars))
-		if tieredOk {
+		var tieredOk bool
+		var tieredQuota int
+		var tieredRes *billingexpr.TieredResult
+		params := BuildTieredTokenParams(billingUsage, summary.IsClaudeUsageSemantic, tieredUsedVars)
+		if incompleteStreamUsage {
+			tieredOk, tieredQuota, tieredRes = TryTieredSettleConservative(relayInfo, params)
+		} else {
+			tieredOk, tieredQuota, tieredRes = TryTieredSettle(relayInfo, params)
+		}
+		if tieredOk && shouldUseTieredTextFallback(incompleteStreamUsage, tieredQuota, tieredRes) {
 			tieredBillingApplied = true
 			tieredResult = tieredRes
 			summary.Quota = composeTieredTextQuota(relayInfo, summary, tieredQuota, tieredRes)
+		}
+	}
+
+	if incompleteStreamUsage {
+		extraContent = append(extraContent, "Responses 流异常结束且缺少完整 usage，按估算输入与已观察输出（最低 500 token）结算")
+		if summary.Quota == 0 {
+			logger.LogError(ctx, fmt.Sprintf(
+				"incomplete Responses stream still resolved to zero quota: userId=%d channelId=%d tokenId=%d model=%s end_reason=%s",
+				relayInfo.UserId,
+				relayInfo.ChannelId,
+				relayInfo.TokenId,
+				summary.ModelName,
+				relayInfo.StreamStatus.EndReason,
+			))
+		} else {
+			logger.LogWarn(ctx, fmt.Sprintf(
+				"incomplete Responses stream billed conservatively: quota=%d baseline_applied=%t userId=%d channelId=%d tokenId=%d model=%s end_reason=%s",
+				summary.Quota,
+				normalizedIncompleteUsage,
+				relayInfo.UserId,
+				relayInfo.ChannelId,
+				relayInfo.TokenId,
+				summary.ModelName,
+				relayInfo.StreamStatus.EndReason,
+			))
 		}
 	}
 
@@ -427,7 +632,7 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 			Mul(decimal.NewFromInt(int64(item.Count))).
 			Div(decimal.NewFromInt(1000)).
 			Mul(decimal.NewFromFloat(summary.GroupRatio)).
-			Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+			Mul(decimal.NewFromFloat(common.GetQuotaPerUnit()))
 		extraContent = append(extraContent, fmt.Sprintf(
 			"%s 调用 %d 次，调用花费 %s",
 			item.Name,
@@ -436,20 +641,20 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		))
 	}
 	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
-		q := decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+		q := decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.GetQuotaPerUnit()))
 		extraContent = append(extraContent, fmt.Sprintf("Audio Input 花费 %s", logger.LogQuota(common.QuotaFromDecimal(q))))
 	}
 
-	if !summary.hasBillableUsage() {
+	hasBillableUsage := summary.hasBillableUsage() || (incompleteStreamUsage && summary.Quota > 0)
+	if !hasBillableUsage {
 		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
-	} else {
-		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
-		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
-		logger.LogError(ctx, "error settling billing: "+err.Error())
+	settlementErr := SettleBillingAndRecordUsage(ctx, relayInfo, summary.Quota, hasBillableUsage)
+	if settlementErr != nil {
+		logger.LogError(ctx, "error settling billing: "+settlementErr.Error())
+		extraContent = append(extraContent, "计费结算失败，已进入对账队列")
 	}
 
 	logModel := summary.ModelName
@@ -520,6 +725,15 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if tieredBillingApplied {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
 	}
+	if settlementErr != nil {
+		adminInfo, ok := other["admin_info"].(map[string]interface{})
+		if !ok || adminInfo == nil {
+			adminInfo = map[string]interface{}{}
+			other["admin_info"] = adminInfo
+		}
+		adminInfo["billing_settlement_failed"] = true
+		adminInfo["billing_settlement_error"] = common.SensitiveLogMeta(settlementErr.Error())
+	}
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
@@ -537,7 +751,16 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
 	})
+	cacheUsage := perfCacheUsageFromUpstream(ctx, originUsage, billingUsage)
 	gopool.Go(func() {
-		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
+		perfmetrics.RecordRelaySampleWithTokens(
+			relayInfo,
+			true,
+			cacheUsage.InputTokens,
+			cacheUsage.CacheReadTokens,
+			cacheUsage.CacheWriteTokens,
+			int64(summary.CompletionTokens),
+			cacheUsage.Observed,
+		)
 	})
 }

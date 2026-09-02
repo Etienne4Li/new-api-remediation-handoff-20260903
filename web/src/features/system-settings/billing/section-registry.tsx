@@ -145,6 +145,7 @@ const BILLING_SECTIONS = [
           AmountDiscount: settings['payment_setting.amount_discount'],
           StripeApiSecret: settings.StripeApiSecret,
           StripeWebhookSecret: settings.StripeWebhookSecret,
+          StripeAccountId: settings.StripeAccountId,
           StripePriceId: settings.StripePriceId,
           StripeUnitPrice: settings.StripeUnitPrice,
           StripeMinTopUp: settings.StripeMinTopUp,
@@ -203,7 +204,7 @@ const BILLING_SECTIONS = [
   },
 ] as const
 
-export type BillingSectionId = (typeof BILLING_SECTIONS)[number]['id']
+type BillingSectionId = (typeof BILLING_SECTIONS)[number]['id']
 
 const billingRegistry = createSectionRegistry<
   BillingSectionId,

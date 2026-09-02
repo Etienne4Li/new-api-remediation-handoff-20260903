@@ -19,9 +19,25 @@ type ChatHistory struct {
 type CohereResponse struct {
 	IsFinished   bool                  `json:"is_finished"`
 	EventType    string                `json:"event_type"`
+	Type         string                `json:"type"`
 	Text         string                `json:"text,omitempty"`
 	FinishReason string                `json:"finish_reason,omitempty"`
 	Response     *CohereResponseResult `json:"response"`
+	Delta        CohereStreamDelta     `json:"delta"`
+}
+
+type CohereStreamDelta struct {
+	FinishReason string       `json:"finish_reason,omitempty"`
+	Usage        *CohereUsage `json:"usage,omitempty"`
+	Message      struct {
+		Content struct {
+			Text string `json:"text,omitempty"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+type CohereUsage struct {
+	BilledUnits CohereBilledUnits `json:"billed_units"`
 }
 
 type CohereResponseResult struct {

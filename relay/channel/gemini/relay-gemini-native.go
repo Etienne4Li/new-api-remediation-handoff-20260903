@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,12 +20,12 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 	defer service.CloseResponseBodyGracefully(resp)
 
 	// 读取响应体
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	logger.LogDebug(c, "Gemini native response body: %s", responseBody)
+	logger.LogDebug(c, "Gemini native response_meta=%s", common.SensitiveLogBody(responseBody))
 
 	// 解析为 Gemini 原生响应格式
 	var geminiResponse dto.GeminiChatResponse
@@ -50,12 +49,12 @@ func GeminiTextGenerationHandler(c *gin.Context, info *relaycommon.RelayInfo, re
 func NativeGeminiEmbeddingHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
-	logger.LogDebug(c, "Gemini native embedding response body: %s", responseBody)
+	logger.LogDebug(c, "Gemini native embedding response_meta=%s", common.SensitiveLogBody(responseBody))
 
 	usage := service.ResponseText2Usage(c, "", info.UpstreamModelName, info.GetEstimatePromptTokens())
 
@@ -84,7 +83,7 @@ func GeminiTextGenerationStreamHandler(c *gin.Context, info *relaycommon.RelayIn
 	return geminiStreamHandler(c, info, resp, func(data string, geminiResponse *dto.GeminiChatResponse) bool {
 		err := helper.StringData(c, data)
 		if err != nil {
-			logger.LogError(c, "failed to write stream data: "+err.Error())
+			logger.LogError(c, "failed to write stream data: error_meta="+common.SensitiveLogMeta(err.Error()))
 			return false
 		}
 		info.SendResponseCount++

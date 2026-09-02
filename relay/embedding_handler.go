@@ -42,7 +42,7 @@ func EmbeddingHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 
 	convertedRequest, err := adaptor.ConvertEmbeddingRequest(c, info, *request)
 	if err != nil {
-		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		return requestConversionError(err)
 	}
 	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 	jsonData, err := common.Marshal(convertedRequest)
@@ -57,7 +57,7 @@ func EmbeddingHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		}
 	}
 
-	logger.LogDebug(c, "converted embedding request body: %s", jsonData)
+	logger.LogDebug(c, "converted embedding request body_meta=%s", common.SensitiveLogBody(jsonData))
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -71,15 +71,15 @@ func EmbeddingHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
 
-	var httpResp *http.Response
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		if httpResp.StatusCode != http.StatusOK {
-			newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
-			return newAPIError
-		}
+	httpResp, contractErr := requireHTTPResponse(resp)
+	if contractErr != nil {
+		return contractErr
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		newAPIError = service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+		// reset status code 重置状态码
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
@@ -88,6 +88,11 @@ func EmbeddingHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, usageErr := requireUsage(usage)
+	if usageErr != nil {
+		service.ResetStatusCode(usageErr, statusCodeMappingStr)
+		return usageErr
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

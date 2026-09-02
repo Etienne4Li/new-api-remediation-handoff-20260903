@@ -19,15 +19,15 @@ func UsageFromGeminiMetadata(metadata *dto.GeminiUsageMetadata, fallbackPromptTo
 		return usage
 	}
 
-	promptTokens := metadata.PromptTokenCount + metadata.ToolUsePromptTokenCount
+	promptTokens := types.SaturatingAddNonNegativeInt(metadata.PromptTokenCount, metadata.ToolUsePromptTokenCount)
 	if promptTokens <= 0 && fallbackPromptTokens > 0 {
 		promptTokens = fallbackPromptTokens
 	}
 
 	usage := &dto.Usage{
 		PromptTokens:     promptTokens,
-		CompletionTokens: metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount,
-		TotalTokens:      metadata.TotalTokenCount,
+		CompletionTokens: types.SaturatingAddNonNegativeInt(metadata.CandidatesTokenCount, metadata.ThoughtsTokenCount),
+		TotalTokens:      max(metadata.TotalTokenCount, 0),
 		BillingUsage:     dto.CloneBillingUsage(metadata.BillingUsage),
 	}
 	if usage.BillingUsage == nil {
@@ -38,35 +38,37 @@ func UsageFromGeminiMetadata(metadata *dto.GeminiUsageMetadata, fallbackPromptTo
 
 	for _, detail := range metadata.PromptTokensDetails {
 		if detail.Modality == "AUDIO" {
-			usage.PromptTokensDetails.AudioTokens += detail.TokenCount
+			usage.PromptTokensDetails.AudioTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.AudioTokens, detail.TokenCount)
 		} else if detail.Modality == "IMAGE" {
-			usage.PromptTokensDetails.ImageTokens += detail.TokenCount
+			usage.PromptTokensDetails.ImageTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.ImageTokens, detail.TokenCount)
 		} else if detail.Modality == "TEXT" {
-			usage.PromptTokensDetails.TextTokens += detail.TokenCount
+			usage.PromptTokensDetails.TextTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.TextTokens, detail.TokenCount)
 		}
 	}
 	for _, detail := range metadata.ToolUsePromptTokensDetails {
 		if detail.Modality == "AUDIO" {
-			usage.PromptTokensDetails.AudioTokens += detail.TokenCount
+			usage.PromptTokensDetails.AudioTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.AudioTokens, detail.TokenCount)
 		} else if detail.Modality == "IMAGE" {
-			usage.PromptTokensDetails.ImageTokens += detail.TokenCount
+			usage.PromptTokensDetails.ImageTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.ImageTokens, detail.TokenCount)
 		} else if detail.Modality == "TEXT" {
-			usage.PromptTokensDetails.TextTokens += detail.TokenCount
+			usage.PromptTokensDetails.TextTokens = types.SaturatingAddNonNegativeInt(usage.PromptTokensDetails.TextTokens, detail.TokenCount)
 		}
 	}
 	for _, detail := range metadata.CandidatesTokensDetails {
 		switch detail.Modality {
 		case "IMAGE":
-			usage.CompletionTokenDetails.ImageTokens += detail.TokenCount
+			usage.CompletionTokenDetails.ImageTokens = types.SaturatingAddNonNegativeInt(usage.CompletionTokenDetails.ImageTokens, detail.TokenCount)
 		case "AUDIO":
-			usage.CompletionTokenDetails.AudioTokens += detail.TokenCount
+			usage.CompletionTokenDetails.AudioTokens = types.SaturatingAddNonNegativeInt(usage.CompletionTokenDetails.AudioTokens, detail.TokenCount)
 		case "TEXT":
-			usage.CompletionTokenDetails.TextTokens += detail.TokenCount
+			usage.CompletionTokenDetails.TextTokens = types.SaturatingAddNonNegativeInt(usage.CompletionTokenDetails.TextTokens, detail.TokenCount)
 		}
 	}
 
 	if usage.TotalTokens > 0 && usage.CompletionTokens <= 0 {
-		usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+		if usage.TotalTokens > usage.PromptTokens {
+			usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
+		}
 	}
 
 	if usage.PromptTokens > 0 && usage.PromptTokensDetails.TextTokens == 0 && usage.PromptTokensDetails.AudioTokens == 0 {

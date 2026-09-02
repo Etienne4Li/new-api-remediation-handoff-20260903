@@ -17,6 +17,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResponseAliImageMetadataIsRedacted(t *testing.T) {
+	info := &relaycommon.RelayInfo{}
+	response := &AliResponse{}
+	body := []byte(`{"output":{"results":[{"url":"https://cdn.example/image.png?X-Amz-Signature=secret"}],"api_key":"upstream-secret"},"request_id":"req-1"}`)
+	got := responseAli2OpenAIImage(nil, response, body, info, "url")
+	require.NotNil(t, got)
+	assert.NotContains(t, string(got.Metadata), "X-Amz-Signature")
+	assert.NotContains(t, string(got.Metadata), "upstream-secret")
+	assert.Contains(t, string(got.Metadata), "image.png")
+}
+
 func TestConvertOpenAIRequestFiltersThinkingBudgetByUpstreamModel(t *testing.T) {
 	tests := []struct {
 		name          string

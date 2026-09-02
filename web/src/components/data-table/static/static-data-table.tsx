@@ -63,7 +63,7 @@ type StaticDataTableProps<TData = unknown> =
   | StaticDataTableDataProps<TData>
   | StaticDataTableChildrenProps
 
-export type StaticDataTableColumn<TData = unknown> = {
+type StaticDataTableColumn<TData = unknown> = {
   id: string
   header: React.ReactNode
   className?: string

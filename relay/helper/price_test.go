@@ -13,8 +13,23 @@ import (
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHandleGroupRatioIgnoresMalformedAutoGroupContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("auto_group", map[string]any{"group": "admin"})
+	info := &relaycommon.RelayInfo{UserGroup: "default", UsingGroup: "default"}
+
+	var got interface{}
+	assert.NotPanics(t, func() {
+		got = HandleGroupRatio(ctx, info)
+	})
+	assert.Equal(t, "default", info.UsingGroup)
+	assert.NotNil(t, got)
+}
 
 func TestModelPriceHelperTieredUsesPreloadedRequestInput(t *testing.T) {
 	gin.SetMode(gin.TestMode)

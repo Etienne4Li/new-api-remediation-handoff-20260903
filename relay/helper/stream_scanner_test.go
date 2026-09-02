@@ -86,6 +86,30 @@ func TestNewStreamScanner_AllowsLargeStreamLine(t *testing.T) {
 	require.NoError(t, scanner.Err())
 }
 
+func TestStreamingTimeoutDurationFallsBackForInvalidSetting(t *testing.T) {
+	old := constant.StreamingTimeout
+	t.Cleanup(func() { constant.StreamingTimeout = old })
+
+	constant.StreamingTimeout = 0
+	assert.Equal(t, defaultStreamingTimeout, streamingTimeoutDuration())
+	constant.StreamingTimeout = -1
+	assert.Equal(t, defaultStreamingTimeout, streamingTimeoutDuration())
+	constant.StreamingTimeout = int(^uint(0) >> 1)
+	assert.Equal(t, defaultStreamingTimeout, streamingTimeoutDuration())
+	constant.StreamingTimeout = 7
+	assert.Equal(t, 7*time.Second, streamingTimeoutDuration())
+}
+
+func TestScannerBufferSizeFallsBackForOverflowingSetting(t *testing.T) {
+	old := constant.StreamScannerMaxBufferMB
+	t.Cleanup(func() { constant.StreamScannerMaxBufferMB = old })
+
+	constant.StreamScannerMaxBufferMB = int(^uint(0) >> 1)
+	assert.Equal(t, DefaultMaxScannerBufferSize, getScannerBufferSize())
+	constant.StreamScannerMaxBufferMB = -1
+	assert.Equal(t, DefaultMaxScannerBufferSize, getScannerBufferSize())
+}
+
 func TestStreamScannerHandler_EmptyBody(t *testing.T) {
 	t.Parallel()
 
@@ -150,6 +174,23 @@ func TestStreamScannerHandler_DoneStopsScanner(t *testing.T) {
 	})
 
 	assert.Equal(t, int64(50), count.Load(), "data after [DONE] must not be processed")
+}
+
+func TestStreamScannerHandler_BareDoneStopsScanner(t *testing.T) {
+	t.Parallel()
+
+	body := "data: before\n[DONE]\ndata: should_not_appear\n"
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+
+	var received []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		received = append(received, data)
+	})
+
+	assert.Equal(t, []string{"before"}, received,
+		"a bare [DONE] sentinel must terminate the stream without becoming a payload")
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 }
 
 func TestStreamScannerHandler_StopStopsStream(t *testing.T) {

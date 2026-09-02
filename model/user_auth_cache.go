@@ -53,6 +53,10 @@ func writeUserCache(user *UserBase, includeQuota bool) error {
 	if user.AuthVersion <= 0 {
 		return fmt.Errorf("invalid user auth version")
 	}
+	client, err := modelRedisClient()
+	if err != nil {
+		return err
+	}
 	includeQuotaArg := "0"
 	if includeQuota {
 		includeQuotaArg = "1"
@@ -84,7 +88,7 @@ if ARGV[10] == '1' and redis.call('HEXISTS', KEYS[1], 'Quota') == 0 then
 end
 redis.call('EXPIRE', KEYS[1], ARGV[12])
 return 1`
-	result, err := common.RDB.Eval(context.Background(), script,
+	result, err := client.Eval(context.Background(), script,
 		[]string{getUserCacheKey(user.Id), getUserAuthFenceKey(user.Id), getUserAuthVersionKey(user.Id)},
 		user.AuthVersion, user.Id, user.Group, user.Email, user.Status, user.Role,
 		user.Username, user.Setting, user.CacheSchema, includeQuotaArg, user.Quota, ttl,
@@ -102,7 +106,11 @@ func getUserAuthVersionFloor(userId int) (int64, error) {
 	if !common.RedisEnabled {
 		return 0, nil
 	}
-	values, err := common.RDB.MGet(context.Background(), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)).Result()
+	client, err := modelRedisClient()
+	if err != nil {
+		return 0, err
+	}
+	values, err := client.MGet(context.Background(), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)).Result()
 	if err != nil {
 		return 0, err
 	}
@@ -133,6 +141,10 @@ func SetUserAuthVersionFence(userId int, authVersion int64) error {
 	if userId <= 0 || authVersion <= 0 {
 		return fmt.Errorf("invalid user auth fence")
 	}
+	client, err := modelRedisClient()
+	if err != nil {
+		return err
+	}
 	const script = `
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
 local incoming = tonumber(ARGV[1])
@@ -144,7 +156,7 @@ elseif redis.call('TTL', KEYS[1]) < 0 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 return 1`
-	return common.RDB.Eval(context.Background(), script, []string{getUserAuthFenceKey(userId)}, authVersion, userAuthFenceTTLSeconds()).Err()
+	return client.Eval(context.Background(), script, []string{getUserAuthFenceKey(userId)}, authVersion, userAuthFenceTTLSeconds()).Err()
 }
 
 // publishCommittedUserAuthVersion records the durable lower bound used to
@@ -157,6 +169,10 @@ func publishCommittedUserAuthVersion(userId int, authVersion int64) error {
 	if userId <= 0 || authVersion <= 0 {
 		return fmt.Errorf("invalid committed user auth version")
 	}
+	client, err := modelRedisClient()
+	if err != nil {
+		return err
+	}
 	const script = `
 local incoming = tonumber(ARGV[1])
 local committed = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -168,7 +184,7 @@ if pending > 0 and pending <= incoming then
   redis.call('DEL', KEYS[2])
 end
 return 1`
-	return common.RDB.Eval(context.Background(), script,
+	return client.Eval(context.Background(), script,
 		[]string{getUserAuthVersionKey(userId), getUserAuthFenceKey(userId)}, authVersion,
 	).Err()
 }
@@ -247,6 +263,10 @@ func updateUserCacheFieldAtVersion(userId int, field string, value interface{}, 
 	if userId <= 0 || authVersion <= 0 {
 		return fmt.Errorf("invalid user auth version")
 	}
+	client, err := modelRedisClient()
+	if err != nil {
+		return err
+	}
 	const script = `
 local incoming = tonumber(ARGV[1])
 local pending = tonumber(redis.call('GET', KEYS[2]) or '0')
@@ -269,7 +289,7 @@ if current ~= incoming then
 end
 redis.call('HSET', KEYS[1], ARGV[2], ARGV[3], 'CacheSchema', ARGV[4])
 return 1`
-	result, err := common.RDB.Eval(context.Background(), script,
+	result, err := client.Eval(context.Background(), script,
 		[]string{getUserCacheKey(userId), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)},
 		authVersion, field, value, userCacheSchemaVersion,
 	).Int()

@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -2127,10 +2128,10 @@ func TestRemoveDisabledFieldsSkipWhenChannelPassThroughEnabled(t *testing.T) {
 
 func TestRemoveDisabledFieldsSkipWhenGlobalPassThroughEnabled(t *testing.T) {
 	original := model_setting.GetGlobalSettings().PassThroughRequestEnabled
-	model_setting.GetGlobalSettings().PassThroughRequestEnabled = true
 	t.Cleanup(func() {
-		model_setting.GetGlobalSettings().PassThroughRequestEnabled = original
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"global.pass_through_request_enabled": fmt.Sprintf("%t", original)})
 	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"global.pass_through_request_enabled": "true"}))
 
 	input := `{
 		"service_tier":"flex",

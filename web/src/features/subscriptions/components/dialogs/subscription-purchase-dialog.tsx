@@ -75,10 +75,14 @@ export function SubscriptionPurchaseDialog(props: Props) {
   const [selectedEpayMethod, setSelectedEpayMethod] = useState('')
 
   useEffect(() => {
-    if (props.open && props.epayMethods && props.epayMethods.length > 0) {
-      setSelectedEpayMethod(props.epayMethods[0].type)
-    } else if (!props.open) {
-      setSelectedEpayMethod('')
+    const nextMethod =
+      props.open && props.epayMethods?.length ? props.epayMethods[0].type : ''
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (!cancelled) setSelectedEpayMethod(nextMethod)
+    })
+    return () => {
+      cancelled = true
     }
   }, [props.open, props.epayMethods])
 
@@ -405,12 +409,10 @@ export function SubscriptionPurchaseDialog(props: Props) {
             {hasEpay && (
               <div className='grid grid-cols-[minmax(0,1fr)_auto] gap-2'>
                 <Select
-                  items={[
-                    ...(props.epayMethods || []).map((m) => ({
-                      value: m.type,
-                      label: m.name || m.type,
-                    })),
-                  ]}
+                  items={(props.epayMethods || []).map((m) => ({
+                    value: m.type,
+                    label: m.name || m.type,
+                  }))}
                   value={selectedEpayMethod}
                   onValueChange={(v) => v !== null && setSelectedEpayMethod(v)}
                   disabled={limitReached}

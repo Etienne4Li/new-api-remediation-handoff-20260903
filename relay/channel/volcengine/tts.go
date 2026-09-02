@@ -3,16 +3,16 @@ package volcengine
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -143,7 +143,7 @@ func getContentTypeByEncoding(encoding string) string {
 }
 
 func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, encoding string) (usage any, err *types.NewAPIError) {
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			errors.New("failed to read volcengine response"),
@@ -154,7 +154,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 	defer resp.Body.Close()
 
 	var volcResp VolcengineTTSResponse
-	if unmarshalErr := json.Unmarshal(body, &volcResp); unmarshalErr != nil {
+	if unmarshalErr := common.Unmarshal(body, &volcResp); unmarshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			errors.New("failed to parse volcengine response"),
 			types.ErrorCodeBadResponseBody,
@@ -164,7 +164,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 
 	if volcResp.Code != 3000 {
 		return nil, types.NewErrorWithStatusCode(
-			errors.New(volcResp.Message),
+			fmt.Errorf("volcengine TTS upstream error: code=%d message_meta=%s", volcResp.Code, common.SensitiveLogMeta(volcResp.Message)),
 			types.ErrorCodeBadResponse,
 			http.StatusBadRequest,
 		)
@@ -226,7 +226,7 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	}
 	defer conn.Close()
 
-	payload, marshalErr := json.Marshal(volcRequest)
+	payload, marshalErr := common.Marshal(volcRequest)
 	if marshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to marshal request: %w", marshalErr),
@@ -263,7 +263,7 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 		switch msg.MsgType {
 		case MsgTypeError:
 			return nil, types.NewErrorWithStatusCode(
-				fmt.Errorf("received error from server: code=%d, %s", msg.ErrorCode, string(msg.Payload)),
+				fmt.Errorf("volcengine TTS websocket upstream error: code=%d payload_meta=%s", msg.ErrorCode, common.SensitiveLogBody(msg.Payload)),
 				types.ErrorCodeBadResponse,
 				http.StatusBadRequest,
 			)

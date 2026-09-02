@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
@@ -135,8 +136,12 @@ func AddRedemption(c *gin.Context) {
 }
 
 func DeleteRedemption(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
-	err := model.DeleteRedemptionById(id)
+	id, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || id <= 0 {
+		common.ApiErrorMsg(c, "无效的兑换码ID")
+		return
+	}
+	err = model.DeleteRedemptionById(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return

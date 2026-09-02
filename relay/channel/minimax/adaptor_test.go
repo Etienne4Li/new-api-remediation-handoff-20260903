@@ -13,7 +13,23 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestResponseMiniMaxImageMetadataIsRedacted(t *testing.T) {
+	response := &MiniMaxImageResponse{Metadata: map[string]any{
+		"url":        "https://cdn.example/image.png?token=secret",
+		"api_key":    "upstream-secret",
+		"diagnostic": "ok",
+	}}
+	got, err := responseMiniMax2OpenAIImage(response, &relaycommon.RelayInfo{StartTime: time.Unix(123, 0)})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotContains(t, string(got.Metadata), "token=secret")
+	assert.NotContains(t, string(got.Metadata), "upstream-secret")
+	assert.Contains(t, string(got.Metadata), "image.png")
+}
 
 func TestGetRequestURLForImageGeneration(t *testing.T) {
 	t.Parallel()
@@ -87,7 +103,6 @@ func TestConvertImageRequest(t *testing.T) {
 func TestDoResponseForImageGeneration(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 

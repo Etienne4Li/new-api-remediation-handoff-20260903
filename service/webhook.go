@@ -32,6 +32,14 @@ func generateSignature(secret string, payload []byte) string {
 
 // SendWebhookNotify 发送 webhook 通知
 func SendWebhookNotify(webhookURL string, secret string, data dto.Notify) error {
+	systemConfig := system_setting.GetRuntimeConfig()
+	var err error
+	if webhookURL, err = NormalizeNotificationURL(webhookURL); err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
+	if secret, err = NormalizeNotificationCredential(secret, MaxNotificationSecretLength); err != nil {
+		return fmt.Errorf("request reject: %v", err)
+	}
 	// 处理占位符
 	content := data.Content
 	for _, value := range data.Values {
@@ -57,11 +65,11 @@ func SendWebhookNotify(webhookURL string, secret string, data dto.Notify) error 
 	var req *http.Request
 	var resp *http.Response
 
-	if system_setting.EnableWorker() {
+	if systemConfig.WorkerURL != "" {
 		// 构建worker请求数据
 		workerReq := &WorkerRequest{
 			URL:    webhookURL,
-			Key:    system_setting.WorkerValidKey,
+			Key:    systemConfig.WorkerValidKey,
 			Method: http.MethodPost,
 			Headers: map[string]string{
 				"Content-Type": "application/json",

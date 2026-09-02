@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import { getUserProfile, updateUserProfile, updateUserSettings } from '../api'
@@ -35,26 +35,36 @@ export function useProfile() {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
+  const requestIdRef = useRef(0)
+  const loadingRequestIdRef = useRef(0)
 
   // Fetch user profile (with optional silent mode)
   const fetchProfile = useCallback(async (silent = false) => {
+    const requestId = ++requestIdRef.current
     try {
       if (!silent) {
+        loadingRequestIdRef.current = requestId
         setLoading(true)
       }
       const response = await getUserProfile()
 
+      if (requestId !== requestIdRef.current) return
       if (response.success && response.data) {
         setProfile(response.data)
       }
     } catch (error) {
+      if (requestId !== requestIdRef.current) return
       // eslint-disable-next-line no-console
       console.error('Failed to fetch profile:', error)
       if (!silent) {
         toast.error(i18next.t('Failed to load profile'))
       }
     } finally {
-      if (!silent) {
+      if (
+        requestId === requestIdRef.current &&
+        loadingRequestIdRef.current !== 0
+      ) {
+        loadingRequestIdRef.current = 0
         setLoading(false)
       }
     }
@@ -121,8 +131,38 @@ export function useProfile() {
 
   // Initial fetch
   useEffect(() => {
-    fetchProfile()
-  }, [fetchProfile])
+    let cancelled = false
+    const requestId = ++requestIdRef.current
+    loadingRequestIdRef.current = requestId
+
+    void getUserProfile()
+      .then((response) => {
+        if (cancelled || requestId !== requestIdRef.current) return
+        if (response.success && response.data) {
+          setProfile(response.data)
+        }
+        loadingRequestIdRef.current = 0
+        setLoading(false)
+      })
+      .catch((error: unknown) => {
+        if (cancelled || requestId !== requestIdRef.current) return
+        // eslint-disable-next-line no-console
+        console.error('Failed to fetch profile:', error)
+        toast.error(i18next.t('Failed to load profile'))
+        loadingRequestIdRef.current = 0
+        setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+      if (requestId === requestIdRef.current) {
+        requestIdRef.current += 1
+      }
+      if (loadingRequestIdRef.current === requestId) {
+        loadingRequestIdRef.current = 0
+      }
+    }
+  }, [])
 
   return {
     profile,

@@ -12,6 +12,14 @@ var (
 	maskIPPattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
 	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+	// maskAuthPattern prevents transport errors such as
+	// `Authorization: Bearer <token>` from echoing credentials to a client.
+	// Basic and Token schemes are included because providers use both forms.
+	maskAuthPattern = regexp.MustCompile(`(?i)(\b(?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=-]+`)
+	// maskSecretKVPattern covers JSON, form, and header-style key/value pairs.
+	// Requiring a delimiter avoids masking ordinary prose that merely mentions
+	// a token or secret.
+	maskSecretKVPattern = regexp.MustCompile(`(?i)(["']?(?:api[_-]?key|x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|token|client[_-]?secret|secret|password|passwd|signature|sig|x-signature)["']?\s*[:=]\s*)(["'][^"']*["']|[^\s,;&}]+)`)
 )
 
 // maskHostTail returns the tail parts of a domain/host that should be preserved.
@@ -66,6 +74,35 @@ func maskHostForPlainDomain(domain string) string {
 // www.openai.com -> ***.***.com
 // api.openai.com -> ***.***.com
 func MaskSensitiveInfo(str string) string {
+	// Redact credentials before the URL/domain pass.  A bearer token commonly
+	// contains dots (for example a JWT); the domain matcher below would
+	// otherwise rewrite only the first label and leave the remainder of the
+	// credential visible ("abc.def" -> "***.def").
+	str = maskAuthPattern.ReplaceAllString(str, "${1}***")
+	str = maskSecretKVPattern.ReplaceAllStringFunc(str, func(match string) string {
+		parts := maskSecretKVPattern.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		// Keep the conventional scheme marker readable while still masking the
+		// credential that follows it (e.g. Authorization: Bearer <token>).
+		value := strings.Trim(parts[2], "\"'")
+		if strings.EqualFold(value, "Bearer") || strings.EqualFold(value, "Basic") || strings.EqualFold(value, "Token") {
+			return match
+		}
+		quoted := ""
+		if len(parts[2]) >= 2 {
+			if (parts[2][0] == '"' && parts[2][len(parts[2])-1] == '"') ||
+				(parts[2][0] == '\'' && parts[2][len(parts[2])-1] == '\'') {
+				quoted = parts[2][:1]
+			}
+		}
+		if quoted != "" {
+			return parts[1] + quoted + "***" + quoted
+		}
+		return parts[1] + "***"
+	})
+
 	// Mask URLs
 	str = maskURLPattern.ReplaceAllStringFunc(str, func(urlStr string) string {
 		u, err := url.Parse(urlStr)

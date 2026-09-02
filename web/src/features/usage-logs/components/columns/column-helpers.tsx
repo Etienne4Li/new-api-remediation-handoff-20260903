@@ -17,19 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { Zap } from 'lucide-react'
 /* eslint-disable react-refresh/only-export-components */
 import { useState } from 'react'
 
 import { DataTableColumnHeader } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
-import { formatTimestampToDate, formatTokens } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { formatDuration } from '../../lib/format'
@@ -38,32 +30,6 @@ import { FailReasonDialog } from '../dialogs/fail-reason-dialog'
 /**
  * Cache tooltip component for token display
  */
-export function CacheTooltip({
-  tokens,
-  label,
-  color,
-}: {
-  tokens: number
-  label: string
-  color: string
-}) {
-  if (tokens <= 0) return null
-
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger
-          render={<Zap className={`size-3 flex-shrink-0 ${color}`} />}
-        ></TooltipTrigger>
-        <TooltipContent side='top'>
-          <p className='text-xs'>
-            {label}: {formatTokens(tokens)}
-          </p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
-}
 
 // ============================================================================
 // Column Definition Factories
@@ -72,32 +38,6 @@ export function CacheTooltip({
 /**
  * Create a timestamp column - compact mono style matching common logs
  */
-export function createTimestampColumn<T>(config: {
-  accessorKey: string
-  title: string
-  unit?: 'seconds' | 'milliseconds'
-}): ColumnDef<T> {
-  const { accessorKey, title, unit = 'milliseconds' } = config
-
-  return {
-    accessorKey,
-    header: ({ column }) => (
-      <DataTableColumnHeader column={column} title={title} />
-    ),
-    cell: ({ row }) => {
-      const timestamp = row.getValue(accessorKey) as number
-      if (!timestamp) {
-        return <span className='text-muted-foreground/60 text-xs'>-</span>
-      }
-      return (
-        <span className='font-mono text-xs tabular-nums'>
-          {formatTimestampToDate(timestamp, unit)}
-        </span>
-      )
-    },
-    meta: { label: title },
-  }
-}
 
 /**
  * Create a duration column - pill style matching common logs timing

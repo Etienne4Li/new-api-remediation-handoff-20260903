@@ -22,6 +22,7 @@ import {
   ArrowLeft,
   CalendarClock,
   Code2,
+  Database,
   FileText,
   HeartPulse,
   Info,
@@ -48,11 +49,15 @@ import {
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { getPerfMetrics } from '@/features/performance-metrics/api'
+import {
+  getPerfMetrics,
+  PERF_METRICS_AUTO_REFRESH_OPTIONS,
+} from '@/features/performance-metrics/api'
 import {
   formatLatency,
   formatThroughput,
   formatUptimePct,
+  getCombinedCacheHitRate,
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
 import { getLobeIcon } from '@/lib/lobe-icon'
@@ -86,7 +91,7 @@ import { ModelDetailsPerformance } from './model-details-performance'
 
 function SectionTitle(props: { children: React.ReactNode }) {
   return (
-    <h2 className='text-muted-foreground mb-3 text-xs font-semibold tracking-wider uppercase'>
+    <h2 className='text-muted-foreground mb-3 text-xs font-semibold uppercase'>
       {props.children}
     </h2>
   )
@@ -158,7 +163,7 @@ function OverviewMetric(props: {
     <div className='flex min-w-0 items-center gap-2 px-3 py-2'>
       <Icon className='text-muted-foreground/70 size-3.5 shrink-0' />
       <div className='min-w-0 flex-1'>
-        <div className='text-muted-foreground truncate text-[10px] font-medium tracking-wider uppercase'>
+        <div className='text-muted-foreground truncate text-[10px] font-medium uppercase'>
           {props.label}
         </div>
         <div
@@ -179,7 +184,7 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
   const metricsQuery = useQuery({
     queryKey: ['perf-metrics', props.model.model_name],
     queryFn: () => getPerfMetrics(props.model.model_name, 24),
-    staleTime: 60 * 1000,
+    ...PERF_METRICS_AUTO_REFRESH_OPTIONS,
   })
 
   const groups = metricsQuery.data?.data.groups ?? []
@@ -207,9 +212,10 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
             latencyValues.length
         )
       : 0
+  const cacheHitRate = getCombinedCacheHitRate(groups)
 
   return (
-    <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-3 sm:divide-x'>
+    <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-4 sm:divide-x'>
       <OverviewMetric
         icon={Timer}
         label='TPS'
@@ -225,6 +231,11 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
         label={t('Success rate')}
         value={formatUptimePct(successRate)}
         valueClassName={getSuccessRateTextClass(successRate)}
+      />
+      <OverviewMetric
+        icon={Database}
+        label={t('Hit Rate')}
+        value={formatUptimePct(cacheHitRate)}
       />
     </div>
   )
@@ -256,7 +267,7 @@ function CatalogTextValue(props: { children: React.ReactNode }) {
 function CatalogInfoCell(props: { label: string; children: React.ReactNode }) {
   return (
     <div className='bg-card flex min-w-0 flex-col gap-1 px-3 py-2.5'>
-      <span className='text-muted-foreground text-[10px] font-medium tracking-wider uppercase'>
+      <span className='text-muted-foreground text-[10px] font-medium uppercase'>
         {props.label}
       </span>
       {props.children}
@@ -363,7 +374,7 @@ function ModelBackendQuickStats(props: { model: PricingModel }) {
             key={stat.key}
             className='bg-background flex min-w-0 flex-col gap-0.5 px-3 py-2.5'
           >
-            <span className='text-muted-foreground inline-flex min-w-0 items-center gap-1 text-[10px] font-medium tracking-wider uppercase'>
+            <span className='text-muted-foreground inline-flex min-w-0 items-center gap-1 text-[10px] font-medium uppercase'>
               <Icon className='size-3 shrink-0' />
               <span className='truncate'>{stat.label}</span>
             </span>
@@ -401,7 +412,7 @@ function ModelBackendSignalsSection(props: { model: PricingModel }) {
       <SectionTitle>
         {t('Capabilities')} / {t('Supported modalities')}
       </SectionTitle>
-      <div className='grid gap-3 rounded-xl border p-3 @2xl/details:grid-cols-[minmax(0,1.5fr)_minmax(260px,1fr)]'>
+      <div className='grid gap-3 @2xl/details:grid-cols-[minmax(0,1.5fr)_minmax(260px,1fr)]'>
         {capabilities.length > 0 ? (
           <CatalogPillList
             items={capabilities.map((capability) =>
@@ -534,7 +545,7 @@ function ModelHeader(props: { model: PricingModel }) {
     <header className='pb-4'>
       <div className='flex items-center gap-2.5'>
         {modelIcon}
-        <h1 className='font-mono text-xl font-bold tracking-tight sm:text-2xl'>
+        <h1 className='font-mono text-xl font-bold sm:text-2xl'>
           {model.model_name}
         </h1>
         <CopyButton
@@ -637,7 +648,7 @@ function PriceSection(props: {
               {t('Unable to parse structured pricing')}
             </p>
             <div className='mt-3'>
-              <div className='text-muted-foreground mb-1 text-[10px] font-medium tracking-wider uppercase'>
+              <div className='text-muted-foreground mb-1 text-[10px] font-medium uppercase'>
                 {t('Raw expression')}
               </div>
               <code className='text-muted-foreground bg-background/80 block max-h-28 overflow-auto rounded-md border px-2 py-1.5 font-mono text-xs break-all'>
@@ -907,8 +918,7 @@ function GroupPricingSection(props: {
     )
   }
 
-  const thClass =
-    'text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'
+  const thClass = 'text-muted-foreground py-2 text-[10px] font-medium uppercase'
 
   if (isDynamicPricingModel(props.model)) {
     const dynamicTiers = getDynamicPricingTiers(props.model)
@@ -928,7 +938,7 @@ function GroupPricingSection(props: {
               )}
             </p>
             <div className='mt-3'>
-              <div className='text-muted-foreground mb-1 text-[10px] font-medium tracking-wider uppercase'>
+              <div className='text-muted-foreground mb-1 text-[10px] font-medium uppercase'>
                 {t('Raw expression')}
               </div>
               <code className='text-muted-foreground bg-background/80 block max-h-28 overflow-auto rounded-md border px-2 py-1.5 font-mono text-xs break-all'>
@@ -1169,7 +1179,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
         <TabsContent value='overview' className='space-y-6 outline-none'>
           <OverviewSummaryGrid model={props.model} />
 
-          <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
+          <section className='space-y-5 border-t pt-5'>
             <SectionTitle>{t('Pricing')}</SectionTitle>
             <PriceSection
               model={props.model}

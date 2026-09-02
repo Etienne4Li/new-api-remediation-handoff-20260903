@@ -205,13 +205,6 @@ export async function paySubscriptionEpay(
 // User Self Subscriptions
 // ============================================================================
 
-export async function getSelfSubscriptions(): Promise<
-  ApiResponse<UserSubscriptionRecord[]>
-> {
-  const res = await api.get('/api/subscription/self')
-  return res.data
-}
-
 export async function getSelfSubscriptionFull(): Promise<
   ApiResponse<SelfSubscriptionData>
 > {
@@ -234,6 +227,9 @@ export async function updateBillingPreference(
 }
 
 export async function getGroups(): Promise<ApiResponse<string[]>> {
-  const res = await api.get('/api/group')
+  // The backend registers the admin group route with a trailing slash. Use
+  // the canonical path directly so this request does not rely on Gin's 301
+  // redirect (which can be rejected by reverse proxies or CORS policies).
+  const res = await api.get('/api/group/')
   return res.data
 }

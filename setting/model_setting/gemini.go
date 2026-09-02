@@ -2,6 +2,7 @@ package model_setting
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -55,6 +56,9 @@ var defaultGeminiSettings = GeminiSettings{
 
 // 全局实例
 var geminiSettings = defaultGeminiSettings
+var geminiSettingsMu sync.RWMutex
+
+type geminiSettingsFields GeminiSettings
 
 func init() {
 	// 注册到全局配置管理器
@@ -63,11 +67,27 @@ func init() {
 
 // GetGeminiSettings 获取Gemini配置
 func GetGeminiSettings() *GeminiSettings {
-	return &geminiSettings
+	geminiSettingsMu.RLock()
+	defer geminiSettingsMu.RUnlock()
+	settings := geminiSettings
+	settings.SafetySettings = cloneStringMap(geminiSettings.SafetySettings)
+	settings.VersionSettings = cloneStringMap(geminiSettings.VersionSettings)
+	settings.SupportedImagineModels = append([]string(nil), geminiSettings.SupportedImagineModels...)
+	return &settings
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 // GetGeminiSafetySetting 获取安全设置
 func GetGeminiSafetySetting(key string) string {
+	geminiSettingsMu.RLock()
+	defer geminiSettingsMu.RUnlock()
 	settings := geminiSettings.SafetySettings
 	if value := settings[key]; value != "" {
 		return value
@@ -101,6 +121,8 @@ func ValidateGeminiSafetySettings(value string) error {
 
 // GetGeminiVersionSetting 获取版本设置
 func GetGeminiVersionSetting(key string) string {
+	geminiSettingsMu.RLock()
+	defer geminiSettingsMu.RUnlock()
 	if value, ok := geminiSettings.VersionSettings[key]; ok {
 		return value
 	}
@@ -108,10 +130,53 @@ func GetGeminiVersionSetting(key string) string {
 }
 
 func IsGeminiModelSupportImagine(model string) bool {
+	geminiSettingsMu.RLock()
+	defer geminiSettingsMu.RUnlock()
 	for _, v := range geminiSettings.SupportedImagineModels {
 		if v == model {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *GeminiSettings) ConfigSnapshot() interface{} {
+	if s == nil {
+		return GeminiSettings{}
+	}
+	geminiSettingsMu.RLock()
+	defer geminiSettingsMu.RUnlock()
+	return cloneGeminiSettings(*s)
+}
+
+func cloneGeminiSettings(source GeminiSettings) GeminiSettings {
+	clone := source
+	clone.SafetySettings = cloneStringMap(source.SafetySettings)
+	clone.VersionSettings = cloneStringMap(source.VersionSettings)
+	clone.SupportedImagineModels = append([]string(nil), source.SupportedImagineModels...)
+	return clone
+}
+
+func (s *GeminiSettings) ValidateConfigMap(values map[string]string) error {
+	if s == nil {
+		return config.ValidateConfigFromMap(&GeminiSettings{}, values)
+	}
+	geminiSettingsMu.RLock()
+	staged := geminiSettingsFields(cloneGeminiSettings(*s))
+	geminiSettingsMu.RUnlock()
+	return config.ValidateConfigFromMap(&staged, values)
+}
+
+func (s *GeminiSettings) UpdateConfigMap(values map[string]string) error {
+	if s == nil {
+		return fmt.Errorf("gemini settings must not be nil")
+	}
+	geminiSettingsMu.Lock()
+	defer geminiSettingsMu.Unlock()
+	staged := geminiSettingsFields(cloneGeminiSettings(*s))
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	*s = cloneGeminiSettings(GeminiSettings(staged))
+	return nil
 }

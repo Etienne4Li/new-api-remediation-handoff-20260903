@@ -44,15 +44,17 @@ func SanitizeURLForLog(rawURL string) string {
 
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
+		// A malformed URL can still contain a credential or signed query. Do
+		// not fall back to echoing the original value into a log.
+		return "<invalid-url>"
 	}
+	// URL userinfo is never useful for diagnostics and may contain a password
+	// or API credential. Strip it even when the URL has no query parameters.
+	hadUserinfo := parsedURL.User != nil
+	parsedURL.User = nil
 
 	query := parsedURL.Query()
-	if len(query) == 0 {
-		return rawURL
-	}
-
-	changed := false
+	changed := hadUserinfo
 	for key := range query {
 		if isSensitiveURLQueryKey(key) {
 			query.Set(key, "***masked***")
@@ -108,13 +110,27 @@ func GetAPIVersion(c *gin.Context) string {
 }
 
 func createTaskError(err error, code string, statusCode int, localError bool) *dto.TaskError {
+	if err == nil {
+		err = fmt.Errorf("unknown task error")
+	}
 	return &dto.TaskError{
 		Code:       code,
-		Message:    err.Error(),
+		Message:    common.MaskSensitiveInfo(err.Error()),
 		StatusCode: statusCode,
 		LocalError: localError,
 		Error:      err,
 	}
+}
+
+func taskRequestDecodeError(err error, fallbackCode string) *dto.TaskError {
+	if err == nil {
+		return nil
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "duration") || strings.Contains(message, "seconds") {
+		return createTaskError(err, "invalid_seconds", http.StatusBadRequest, true)
+	}
+	return createTaskError(err, fallbackCode, http.StatusBadRequest, true)
 }
 
 func storeTaskRequest(c *gin.Context, info *RelayInfo, action string, requestObj TaskSubmitReq) {
@@ -145,15 +161,32 @@ func validatePrompt(prompt string) *dto.TaskError {
 // overflow quota calculation into a negative charge.
 const MaxTaskDurationSeconds = 3600
 
-func validateTaskDurationBounds(req TaskSubmitReq) *dto.TaskError {
-	seconds := req.Duration
-	if seconds == 0 && req.Seconds != "" {
-		seconds, _ = strconv.Atoi(req.Seconds)
-	}
-	if seconds < 0 || seconds > MaxTaskDurationSeconds {
+// ValidateTaskDurationBounds checks every client-facing duration encoding
+// before an adaptor can turn it into a provider request or billing multiplier.
+// Both fields are checked independently because different providers prefer
+// either numeric `duration` or string `seconds`.
+func ValidateTaskDurationBounds(req TaskSubmitReq) *dto.TaskError {
+	// Validate both representations independently. Some adaptors prefer the
+	// string `seconds` field while others prefer numeric `duration`; checking
+	// only whichever field happens to be selected here lets a conflicting
+	// oversized value bypass the provider-specific conversion.
+	if req.Duration < 0 || req.Duration > MaxTaskDurationSeconds {
 		return createTaskError(fmt.Errorf("seconds must be between 1 and %d", MaxTaskDurationSeconds), "invalid_seconds", http.StatusBadRequest, true)
 	}
+	if raw := strings.TrimSpace(req.Seconds); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil || seconds < 0 || seconds > MaxTaskDurationSeconds {
+			return createTaskError(fmt.Errorf("seconds must be between 1 and %d", MaxTaskDurationSeconds), "invalid_seconds", http.StatusBadRequest, true)
+		}
+	}
 	return nil
+}
+
+// Keep the package-local name for existing callers/tests while exposing the
+// shared check to adaptors with special validation paths (for example Sora
+// remix, which does not use ValidateMultipartDirect).
+func validateTaskDurationBounds(req TaskSubmitReq) *dto.TaskError {
+	return ValidateTaskDurationBounds(req)
 }
 
 func validateMultipartTaskRequest(c *gin.Context, info *RelayInfo, action string) (TaskSubmitReq, error) {
@@ -205,7 +238,7 @@ func ValidateMultipartDirect(c *gin.Context, info *RelayInfo) *dto.TaskError {
 
 	var req TaskSubmitReq
 	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
-		return createTaskError(err, "invalid_json", http.StatusBadRequest, true)
+		return taskRequestDecodeError(err, "invalid_json")
 	}
 
 	prompt = req.Prompt
@@ -292,7 +325,7 @@ func ValidateBasicTaskRequest(c *gin.Context, info *RelayInfo, action string) *d
 	}
 	// 为了metadata字段的兼容性，统一UnmarshalBodyReusable
 	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
-		return createTaskError(err, "invalid_request", http.StatusBadRequest, true)
+		return taskRequestDecodeError(err, "invalid_request")
 	}
 
 	if taskErr := validatePrompt(req.Prompt); taskErr != nil {

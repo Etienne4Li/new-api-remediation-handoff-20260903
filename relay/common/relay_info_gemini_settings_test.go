@@ -1,22 +1,27 @@
 package common
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
+func mustJSON(t *testing.T, value any) string {
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(raw)
+}
+
 func TestRelayInfoConvOptionsUsesNormalizedGeminiSafetySettings(t *testing.T) {
-	settings := model_setting.GetGeminiSettings()
-	original := settings.SafetySettings
+	original := model_setting.GetGeminiSettings().SafetySettings
 	t.Cleanup(func() {
-		settings.SafetySettings = original
+		_ = config.GlobalConfig.LoadFromDB(map[string]string{"gemini.safety_settings": mustJSON(t, original)})
 	})
-	settings.SafetySettings = map[string]string{
-		"HARM_CATEGORY_HATE_SPEECH":       "",
-		"HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_ONLY_HIGH",
-	}
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"gemini.safety_settings": `{"HARM_CATEGORY_HATE_SPEECH":"","HARM_CATEGORY_DANGEROUS_CONTENT":"BLOCK_ONLY_HIGH"}`}))
 
 	options := (&RelayInfo{}).ConvOptions()
 

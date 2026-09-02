@@ -95,19 +95,19 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
   // Initialize form when tag changes
   useEffect(() => {
-    if (open && currentTag) {
+    if (!open || !currentTag) return
+    const models = tagModelsData?.data?.split(',').filter(Boolean) || []
+    let cancelled = false
+    void Promise.resolve().then(() => {
+      if (cancelled) return
       setNewTag(currentTag)
       setModelMapping('')
       setSelectedGroups([])
       setCustomModel('')
-
-      // Load tag models
-      if (tagModelsData?.data) {
-        const models = tagModelsData.data.split(',').filter(Boolean)
-        setSelectedModels(models)
-      } else {
-        setSelectedModels([])
-      }
+      setSelectedModels(models)
+    })
+    return () => {
+      cancelled = true
     }
   }, [open, currentTag, tagModelsData])
 
@@ -304,12 +304,10 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
                 <div className='flex gap-2'>
                   <Select<string>
-                    items={[
-                      ...availableModels.map((model) => ({
-                        value: model,
-                        label: model,
-                      })),
-                    ]}
+                    items={availableModels.map((model) => ({
+                      value: model,
+                      label: model,
+                    }))}
                     onValueChange={(value) => {
                       if (value === null) return
                       if (!selectedModels.includes(value)) {

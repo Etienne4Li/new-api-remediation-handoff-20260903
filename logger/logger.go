@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,14 +26,66 @@ const (
 	loggerDebug = "DEBUG"
 )
 
-const maxLogCount = 1000000
+const (
+	maxLogCount = 1000000
+
+	// File logging is deliberately bounded even when an operator does not
+	// configure an external logrotate job.  The values are policy defaults,
+	// not hard limits: deployments can lower them through environment
+	// variables, but the parser always keeps a finite upper bound.
+	defaultLogMaxSizeMB = 100
+	maxLogMaxSizeMB     = 4 * 1024
+	defaultLogMaxFiles  = 30
+	maxLogMaxFiles      = 1000
+	defaultLogAgeDays   = 30
+	maxLogAgeDays       = 3650
+)
 
 var logCount int
+var logBytes int64
 var setupLogLock sync.Mutex
 var setupLogWorking bool
+
+// logStateMu protects the rotation counters. Logging is called concurrently
+// by request goroutines; an unsynchronised counter/flag can start multiple
+// rotations and race with the worker that swaps the current file.
+var logStateMu sync.Mutex
 var currentLogPath string
 var currentLogPathMu sync.RWMutex
 var currentLogFile *os.File
+
+type rotationConfig struct {
+	maxBytes int64
+	maxFiles int
+	maxAge   time.Duration
+}
+
+var rotationConfigMu sync.RWMutex
+var currentRotationConfig = rotationConfig{
+	maxBytes: int64(defaultLogMaxSizeMB) * 1024 * 1024,
+	maxFiles: defaultLogMaxFiles,
+	maxAge:   time.Duration(defaultLogAgeDays) * 24 * time.Hour,
+}
+
+func loadRotationConfig() {
+	maxSizeMB := common.GetEnvOrDefaultBounded("LOG_MAX_SIZE_MB", defaultLogMaxSizeMB, 1, maxLogMaxSizeMB)
+	maxFiles := common.GetEnvOrDefaultBounded("LOG_MAX_FILES", defaultLogMaxFiles, 1, maxLogMaxFiles)
+	maxAgeDays := common.GetEnvOrDefaultBounded("LOG_RETENTION_DAYS", defaultLogAgeDays, 1, maxLogAgeDays)
+	config := rotationConfig{
+		maxBytes: int64(maxSizeMB) * 1024 * 1024,
+		maxFiles: maxFiles,
+		maxAge:   time.Duration(maxAgeDays) * 24 * time.Hour,
+	}
+	rotationConfigMu.Lock()
+	currentRotationConfig = config
+	rotationConfigMu.Unlock()
+}
+
+func getRotationConfig() rotationConfig {
+	rotationConfigMu.RLock()
+	defer rotationConfigMu.RUnlock()
+	return currentRotationConfig
+}
 
 func GetCurrentLogPath() string {
 	currentLogPathMu.RLock()
@@ -40,37 +94,76 @@ func GetCurrentLogPath() string {
 }
 
 func SetupLogger() {
-	defer func() {
+	if *common.LogDir == "" {
+		// logHelper can request a rotation even when file logging is disabled.
+		// Clear the in-flight marker so a later configuration change (or a
+		// subsequent call with a non-empty log directory) is not permanently
+		// suppressed.
+		logStateMu.Lock()
 		setupLogWorking = false
-	}()
-	if *common.LogDir != "" {
-		ok := setupLogLock.TryLock()
-		if !ok {
-			log.Println("setup log is already working")
-			return
-		}
-		defer func() {
-			setupLogLock.Unlock()
-		}()
-		logPath := filepath.Join(*common.LogDir, fmt.Sprintf("oneapi-%s.log", time.Now().Format("20060102150405")))
-		fd, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			log.Fatal("failed to open log file")
-		}
-		currentLogPathMu.Lock()
-		oldFile := currentLogFile
-		currentLogPath = logPath
-		currentLogFile = fd
-		currentLogPathMu.Unlock()
-
-		common.LogWriterMu.Lock()
-		gin.DefaultWriter = io.MultiWriter(os.Stdout, fd)
-		gin.DefaultErrorWriter = io.MultiWriter(os.Stderr, fd)
-		if oldFile != nil {
-			_ = oldFile.Close()
-		}
-		common.LogWriterMu.Unlock()
+		logStateMu.Unlock()
+		return
 	}
+	ok := setupLogLock.TryLock()
+	if !ok {
+		log.Println("setup log is already working")
+		// The marker is set by the caller before the asynchronous worker starts.
+		// If another worker owns setupLogLock, that worker may exit before its
+		// deferred cleanup is installed (or be a legacy caller that does not
+		// manage the marker).  Release our stale marker on the contention path;
+		// setupLogLock remains the actual mutual-exclusion guard for file swaps.
+		logStateMu.Lock()
+		setupLogWorking = false
+		logStateMu.Unlock()
+		return
+	}
+	defer setupLogLock.Unlock()
+	defer func() {
+		logStateMu.Lock()
+		setupLogWorking = false
+		logStateMu.Unlock()
+	}()
+	loadRotationConfig()
+	logPath := filepath.Join(*common.LogDir, fmt.Sprintf("oneapi-%s.log", time.Now().Format("20060102150405")))
+	// Log files can contain request metadata and provider responses.  Keep new
+	// files private to the service account; relying on the process umask alone
+	// would make deployments with a permissive umask expose them to other local
+	// users.
+	fd, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Fatal("failed to open log file")
+	}
+	if err := fd.Chmod(0600); err != nil {
+		_ = fd.Close()
+		log.Fatal("failed to secure log file permissions")
+	}
+	currentLogPathMu.Lock()
+	oldFile := currentLogFile
+	currentLogPath = logPath
+	currentLogFile = fd
+	currentLogPathMu.Unlock()
+
+	common.LogWriterMu.Lock()
+	gin.DefaultWriter = io.MultiWriter(os.Stdout, fd)
+	gin.DefaultErrorWriter = io.MultiWriter(os.Stderr, fd)
+	if oldFile != nil {
+		_ = oldFile.Close()
+	}
+	common.LogWriterMu.Unlock()
+	if oldFile == nil {
+		// A restart can reopen a file created in the same second. Seed the byte
+		// counter from its existing size so the first request cannot grow it past
+		// the configured cap indefinitely.
+		if info, statErr := fd.Stat(); statErr == nil {
+			logStateMu.Lock()
+			logBytes = info.Size()
+			logStateMu.Unlock()
+		}
+	}
+	// Prune only files generated by this logger.  This is intentionally done
+	// after swapping the writer so the current file is never removed, even when
+	// a deployment starts with a directory full of stale files.
+	pruneLogFiles(logPath)
 }
 
 func LogInfo(ctx context.Context, msg string) {
@@ -107,30 +200,125 @@ func logHelper(ctx context.Context, level string, msg string) {
 	if level == loggerINFO {
 		writer = gin.DefaultWriter
 	}
-	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), id, msg)
+	written, _ := fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), id, msg)
 	common.LogWriterMu.RUnlock()
-	logCount++ // we don't need accurate count, so no lock here
-	if logCount > maxLogCount && !setupLogWorking {
+	config := getRotationConfig()
+	logStateMu.Lock()
+	logCount++
+	if written > 0 {
+		logBytes += int64(written)
+	}
+	shouldRotate := false
+	if (logCount > maxLogCount || (config.maxBytes > 0 && logBytes >= config.maxBytes)) && !setupLogWorking {
 		logCount = 0
+		logBytes = 0
 		setupLogWorking = true
+		shouldRotate = true
+	}
+	logStateMu.Unlock()
+	if shouldRotate {
 		gopool.Go(func() {
 			SetupLogger()
 		})
 	}
 }
 
+// pruneLogFiles removes stale application log files according to the active
+// age and count policy.  It deliberately ignores directories, symlinks, and
+// files that do not match the logger's own naming convention.  A shared log
+// directory can therefore contain unrelated operator-managed files safely.
+func pruneLogFiles(currentPath string) {
+	config := getRotationConfig()
+	if config.maxFiles < 1 || config.maxAge <= 0 || *common.LogDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(*common.LogDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("failed to list log directory for retention: %v", err)
+		}
+		return
+	}
+
+	type logFile struct {
+		path    string
+		name    string
+		modTime time.Time
+	}
+	files := make([]logFile, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			!strings.HasPrefix(name, "oneapi-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, logFile{
+			path:    filepath.Join(*common.LogDir, name),
+			name:    name,
+			modTime: info.ModTime(),
+		})
+		// Tighten permissions on files left by an older release. Ignore a chmod
+		// failure here (for example, an operator-owned archive); retention still
+		// remains best-effort and never follows symlinks.
+		if chmodErr := os.Chmod(filepath.Join(*common.LogDir, name), 0600); chmodErr != nil {
+			log.Printf("failed to secure log file permissions %s: %v", name, chmodErr)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modTime.Equal(files[j].modTime) {
+			return files[i].name > files[j].name
+		}
+		return files[i].modTime.After(files[j].modTime)
+	})
+
+	currentPath = filepath.Clean(currentPath)
+	now := time.Now()
+	kept := make([]logFile, 0, len(files))
+	for _, file := range files {
+		if filepath.Clean(file.path) == currentPath {
+			kept = append(kept, file)
+			continue
+		}
+		if now.Sub(file.modTime) > config.maxAge {
+			if err := os.Remove(file.path); err != nil && !os.IsNotExist(err) {
+				log.Printf("failed to remove expired log file %s: %v", file.path, err)
+			}
+			continue
+		}
+		kept = append(kept, file)
+	}
+
+	// Keep the newest maxFiles files in total.  Always retain currentPath even
+	// if a clock skew makes it sort outside the newest window.
+	for index, file := range kept {
+		if index < config.maxFiles || filepath.Clean(file.path) == currentPath {
+			continue
+		}
+		if err := os.Remove(file.path); err != nil && !os.IsNotExist(err) {
+			log.Printf("failed to enforce log file limit for %s: %v", file.path, err)
+		}
+	}
+}
+
 func LogQuota(quota int) string {
 	// 新逻辑：根据额度展示类型输出
 	q := float64(quota)
-	switch operation_setting.GetQuotaDisplayType() {
+	quotaPerUnit := common.GetQuotaPerUnit()
+	generalSetting := operation_setting.GetGeneralSettingSnapshot()
+	paymentConfig := operation_setting.GetPaymentRuntimeConfig()
+	switch generalSetting.QuotaDisplayType {
 	case operation_setting.QuotaDisplayTypeCNY:
-		usd := q / common.QuotaPerUnit
-		cny := usd * operation_setting.USDExchangeRate
+		usd := q / quotaPerUnit
+		cny := usd * paymentConfig.USDExchangeRate
 		return fmt.Sprintf("¥%.6f 额度", cny)
 	case operation_setting.QuotaDisplayTypeCustom:
-		usd := q / common.QuotaPerUnit
-		rate := operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate
-		symbol := operation_setting.GetGeneralSetting().CustomCurrencySymbol
+		usd := q / quotaPerUnit
+		rate := generalSetting.CustomCurrencyExchangeRate
+		symbol := generalSetting.CustomCurrencySymbol
 		if symbol == "" {
 			symbol = "¤"
 		}
@@ -142,21 +330,24 @@ func LogQuota(quota int) string {
 	case operation_setting.QuotaDisplayTypeTokens:
 		return fmt.Sprintf("%d 点额度", quota)
 	default: // USD
-		return fmt.Sprintf("＄%.6f 额度", q/common.QuotaPerUnit)
+		return fmt.Sprintf("＄%.6f 额度", q/quotaPerUnit)
 	}
 }
 
 func FormatQuota(quota int) string {
 	q := float64(quota)
-	switch operation_setting.GetQuotaDisplayType() {
+	quotaPerUnit := common.GetQuotaPerUnit()
+	generalSetting := operation_setting.GetGeneralSettingSnapshot()
+	paymentConfig := operation_setting.GetPaymentRuntimeConfig()
+	switch generalSetting.QuotaDisplayType {
 	case operation_setting.QuotaDisplayTypeCNY:
-		usd := q / common.QuotaPerUnit
-		cny := usd * operation_setting.USDExchangeRate
+		usd := q / quotaPerUnit
+		cny := usd * paymentConfig.USDExchangeRate
 		return fmt.Sprintf("¥%.6f", cny)
 	case operation_setting.QuotaDisplayTypeCustom:
-		usd := q / common.QuotaPerUnit
-		rate := operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate
-		symbol := operation_setting.GetGeneralSetting().CustomCurrencySymbol
+		usd := q / quotaPerUnit
+		rate := generalSetting.CustomCurrencyExchangeRate
+		symbol := generalSetting.CustomCurrencySymbol
 		if symbol == "" {
 			symbol = "¤"
 		}
@@ -168,7 +359,7 @@ func FormatQuota(quota int) string {
 	case operation_setting.QuotaDisplayTypeTokens:
 		return fmt.Sprintf("%d", quota)
 	default:
-		return fmt.Sprintf("＄%.6f", q/common.QuotaPerUnit)
+		return fmt.Sprintf("＄%.6f", q/quotaPerUnit)
 	}
 }
 

@@ -121,7 +121,7 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		var chunk ollamaChatStreamChunk
 		if err := common.Unmarshal([]byte(line), &chunk); err != nil {
-			logger.LogError(c, "ollama stream json decode error: "+err.Error()+" line="+line)
+			logger.LogError(c, fmt.Sprintf("ollama stream json decode error_meta=%s line_meta=%s", common.SensitiveLogMeta(err.Error()), common.SensitiveLogMeta(line)))
 			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 		}
 		if chunk.Model != "" {
@@ -174,9 +174,9 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		// done frame
 		// finalize once and break loop
-		usage.PromptTokens = chunk.PromptEvalCount
-		usage.CompletionTokens = chunk.EvalCount
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		usage.PromptTokens = common.SaturatingAddNonNegativeInt(chunk.PromptEvalCount)
+		usage.CompletionTokens = common.SaturatingAddNonNegativeInt(chunk.EvalCount)
+		usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 		finishReason := chunk.DoneReason
 		if finishReason == "" {
 			finishReason = "stop"
@@ -201,21 +201,21 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		break
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
-		logger.LogError(c, "ollama stream scan error: "+err.Error())
+		logger.LogError(c, "ollama stream scan error_meta="+common.SensitiveLogMeta(err.Error()))
 	}
 	return usage, nil
 }
 
 // non-stream handler for chat/generate
 func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	body, err := io.ReadAll(resp.Body)
+	body, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
 	raw := string(body)
 	if common.DebugEnabled {
-		println("ollama non-stream raw resp:", raw)
+		logger.LogDebug(c, "ollama non-stream response_meta=%s", common.SensitiveLogBody(body))
 	}
 
 	lines := strings.Split(raw, "\n")
@@ -302,7 +302,11 @@ func ollamaChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		model = info.UpstreamModelName
 	}
 	created := toUnix(lastChunk.CreatedAt)
-	usage := &dto.Usage{PromptTokens: lastChunk.PromptEvalCount, CompletionTokens: lastChunk.EvalCount, TotalTokens: lastChunk.PromptEvalCount + lastChunk.EvalCount}
+	usage := &dto.Usage{
+		PromptTokens:     common.SaturatingAddNonNegativeInt(lastChunk.PromptEvalCount),
+		CompletionTokens: common.SaturatingAddNonNegativeInt(lastChunk.EvalCount),
+	}
+	usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	content := aggContent.String()
 	finishReason := lastChunk.DoneReason
 	if finishReason == "" {

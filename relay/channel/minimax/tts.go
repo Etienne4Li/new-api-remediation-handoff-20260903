@@ -2,13 +2,12 @@ package minimax
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -106,7 +105,7 @@ func getContentTypeByFormat(format string) string {
 }
 
 func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to read minimax response: %w", readErr),
@@ -118,7 +117,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 
 	// Parse response
 	var minimaxResp MiniMaxTTSResponse
-	if unmarshalErr := json.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
+	if unmarshalErr := common.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to unmarshal minimax TTS response: %w", unmarshalErr),
 			types.ErrorCodeBadResponseBody,
@@ -129,7 +128,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 	// Check base_resp status code
 	if minimaxResp.BaseResp.StatusCode != 0 {
 		return nil, types.NewErrorWithStatusCode(
-			fmt.Errorf("minimax TTS error: %d - %s", minimaxResp.BaseResp.StatusCode, minimaxResp.BaseResp.StatusMsg),
+			fmt.Errorf("minimax TTS upstream error: code=%d message_meta=%s", minimaxResp.BaseResp.StatusCode, common.SensitiveLogMeta(minimaxResp.BaseResp.StatusMsg)),
 			types.ErrorCodeBadResponse,
 			http.StatusBadRequest,
 		)
@@ -173,7 +172,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 }
 
 func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			errors.New("failed to read minimax response"),

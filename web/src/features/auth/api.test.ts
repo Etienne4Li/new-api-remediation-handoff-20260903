@@ -115,4 +115,44 @@ describe('logout coordination', () => {
       })
     ).rejects.toBe(originalError)
   })
+
+  test('cancels mismatch recovery with the logout request signal', async () => {
+    const abortController = new AbortController()
+    const cancellation = new Error('GitHub login timed out')
+    let requestedCount = 0
+    let recoveredSignal: AbortSignal | undefined
+    let markRefreshStarted!: () => void
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve
+    })
+
+    const outcome = executeLogout(
+      {
+        getExpectedSID: () => 'session-a',
+        request: async () => {
+          requestedCount += 1
+          throw mismatchError()
+        },
+        refresh: async (signal?: AbortSignal) => {
+          recoveredSignal = signal
+          markRefreshStarted()
+          if (!signal) throw new Error('Logout signal was not forwarded')
+          return new Promise<RefreshOutcome>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            })
+          })
+        },
+      },
+      true,
+      abortController.signal
+    )
+
+    await refreshStarted
+    abortController.abort(cancellation)
+
+    await expect(outcome).rejects.toBe(cancellation)
+    expect(recoveredSignal).toBe(abortController.signal)
+    expect(requestedCount).toBe(1)
+  })
 })

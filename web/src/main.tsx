@@ -30,20 +30,29 @@ import { toast } from 'sonner'
 
 import { getStatus } from '@/lib/api'
 import { installBuildMetadata } from '@/lib/build-metadata'
+import {
+  DEFAULT_DOCUMENT_TITLE,
+  DEFAULT_LOGO,
+  resolveSystemLogo,
+  resolveSystemName,
+} from '@/lib/constants'
 import { applyFaviconToDom } from '@/lib/dom-utils'
 import '@/lib/dayjs'
 import { initializeFrontendCache } from '@/lib/frontend-cache'
 import { handleServerError } from '@/lib/handle-server-error'
+import { readCachedStatus, writeCachedStatus } from '@/lib/status-cache'
 
 import { DirectionProvider } from './context/direction-provider'
 import { FontProvider } from './context/font-provider'
 import { ThemeProvider } from './context/theme-provider'
-import './i18n/config'
+import { i18nReady } from './i18n/config'
 // Generated Routes
 import { routeTree } from './routeTree.gen'
 
 // Styles
 import './styles/index.css'
+
+await i18nReady
 
 // Ensure VChart theme is initialized before any chart mounts (prevents white default theme flash)
 // VChart theme is driven by our ThemeProvider (html.light/html.dark) via per-chart `theme` prop.
@@ -117,36 +126,32 @@ if (!rootElement) {
 ;(function initSystemBranding() {
   try {
     if (typeof window === 'undefined' || typeof document === 'undefined') return
+    document.title = DEFAULT_DOCUMENT_TITLE
+    applyFaviconToDom(DEFAULT_LOGO)
     const apply = (name: string) => {
-      document.title = name
+      const displayName = resolveSystemName(name)
+      document.title = displayName
       const metaTitle = document.querySelector(
         'meta[name="title"]'
       ) as HTMLMetaElement | null
-      if (metaTitle) metaTitle.setAttribute('content', name)
+      if (metaTitle) metaTitle.setAttribute('content', displayName)
     }
     // Cache-first
-    try {
-      const saved = localStorage.getItem('status')
-      if (saved) {
-        const s = JSON.parse(saved)
-        if (s?.system_name) apply(s.system_name)
-        if (s?.logo) applyFaviconToDom(s.logo)
+    const cached = readCachedStatus<Record<string, unknown>>()
+    if (cached) {
+      if (typeof cached.system_name === 'string') apply(cached.system_name)
+      if (typeof cached.logo === 'string') {
+        applyFaviconToDom(resolveSystemLogo(cached.logo))
       }
-    } catch {
-      /* empty */
     }
     // Background refresh
     getStatus()
       .then((s) => {
         if (s?.system_name) {
           apply(s.system_name as string)
-          try {
-            localStorage.setItem('status', JSON.stringify(s))
-          } catch {
-            /* empty */
-          }
         }
-        if (s?.logo) applyFaviconToDom(s.logo as string)
+        writeCachedStatus(s)
+        applyFaviconToDom(resolveSystemLogo(s?.logo as string | undefined))
       })
       .catch(() => {
         /* empty */

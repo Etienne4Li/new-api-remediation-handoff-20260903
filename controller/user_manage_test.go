@@ -12,8 +12,10 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -33,6 +35,7 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 	model.DB, model.LOG_DB = db, db
 	require.NoError(t, db.AutoMigrate(
 		&model.User{}, &model.UserSession{}, &model.Log{}, &model.CasbinRule{}, &model.AuthzRole{},
+		&model.QuotaCacheRepair{},
 	))
 
 	t.Cleanup(func() {
@@ -47,6 +50,25 @@ func setupManageUserTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+func setupManageUserRedisTestDB(t *testing.T) (*gorm.DB, *miniredis.Miniredis) {
+	t.Helper()
+	db := setupManageUserTestDB(t)
+	server := miniredis.RunT(t)
+	previousRDB := common.RDB
+	previousRedisEnabled := common.RedisEnabled
+	previousBatchUpdateEnabled := common.BatchUpdateEnabled
+	common.RDB = redis.NewClient(&redis.Options{Addr: server.Addr()})
+	common.RedisEnabled = true
+	common.BatchUpdateEnabled = false
+	t.Cleanup(func() {
+		_ = common.RDB.Close()
+		common.RDB = previousRDB
+		common.RedisEnabled = previousRedisEnabled
+		common.BatchUpdateEnabled = previousBatchUpdateEnabled
+	})
+	return db, server
+}
+
 func performManageUserRequest(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -59,6 +81,69 @@ func performManageUserRequest(t *testing.T, body string) *httptest.ResponseRecor
 	c.Set("username", "root-operator")
 	ManageUser(c)
 	return recorder
+}
+
+func performCreateUserRequest(t *testing.T, actorRole int, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/user/", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", 9999)
+	c.Set("role", actorRole)
+	c.Set("username", "admin-operator")
+	CreateUser(c)
+	return recorder
+}
+
+func TestCreateUserRejectsUnknownRoles(t *testing.T) {
+	db := setupManageUserTestDB(t)
+
+	for _, role := range []int{-1, 2, 9, 42} {
+		t.Run(fmt.Sprintf("role_%d", role), func(t *testing.T) {
+			username := fmt.Sprintf("invalid-role-%d", role)
+			recorder := performCreateUserRequest(t, common.RoleRootUser, fmt.Sprintf(
+				`{"username":%q,"password":"password123","role":%d}`,
+				username,
+				role,
+			))
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), `"success":false`)
+
+			var count int64
+			require.NoError(t, db.Model(&model.User{}).Where("username = ?", username).Count(&count).Error)
+			assert.Zero(t, count)
+		})
+	}
+}
+
+func TestCreateUserStillAcceptsValidLowerRole(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	recorder := performCreateUserRequest(
+		t,
+		common.RoleAdminUser,
+		`{"username":"created-common-user","password":"password123","role":1}`,
+	)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	var created model.User
+	require.NoError(t, db.Where("username = ?", "created-common-user").First(&created).Error)
+	assert.Equal(t, common.RoleCommonUser, created.Role)
+}
+
+func TestDeleteSelfFailsCleanlyWhenAuthenticatedUserIsMissing(t *testing.T) {
+	setupManageUserTestDB(t)
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/user/self", nil)
+	c.Set("id", 0)
+
+	require.NotPanics(t, func() { DeleteSelf(c) })
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
 }
 
 func TestManageUserDisableAdvancesAuthVersionOnceAndRevokesSession(t *testing.T) {
@@ -179,4 +264,34 @@ func TestManageUserQuotaRespectsWalletCeiling(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
 	require.NoError(t, db.First(&updated, user.Id).Error)
 	assert.Equal(t, common.MaxWalletQuota-1, updated.Quota)
+}
+
+func TestManageUserQuotaOverrideInvalidatesRedisCache(t *testing.T) {
+	db, server := setupManageUserRedisTestDB(t)
+	user := model.User{
+		Username: "managed-quota-cache-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", Quota: 100, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	cached, err := model.GetUserCache(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 100, cached.Quota)
+	cacheKey := fmt.Sprintf("user:%d", user.Id)
+	assert.True(t, server.Exists(cacheKey))
+
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":"override","value":1}`, user.Id))
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.False(t, server.Exists(cacheKey), "quota override must fence the stale Redis snapshot")
+
+	var updated model.User
+	require.NoError(t, db.First(&updated, user.Id).Error)
+	assert.Equal(t, 1, updated.Quota)
+
+	reserved, err := model.TryReserveUserQuota(user.Id, 2)
+	require.NoError(t, err)
+	assert.False(t, reserved, "a reservation must observe the overridden database balance")
+	require.NoError(t, db.First(&updated, user.Id).Error)
+	assert.Equal(t, 1, updated.Quota)
 }

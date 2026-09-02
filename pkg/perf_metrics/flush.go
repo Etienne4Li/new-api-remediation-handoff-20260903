@@ -39,16 +39,20 @@ func flushCompletedBuckets() {
 		}
 
 		err := model.UpsertPerfMetric(&model.PerfMetric{
-			ModelName:      k.model,
-			Group:          k.group,
-			BucketTs:       k.bucketTs,
-			RequestCount:   drained.requestCount,
-			SuccessCount:   drained.successCount,
-			TotalLatencyMs: drained.totalLatencyMs,
-			TtftSumMs:      drained.ttftSumMs,
-			TtftCount:      drained.ttftCount,
-			OutputTokens:   drained.outputTokens,
-			GenerationMs:   drained.generationMs,
+			ModelName:        k.model,
+			Group:            k.group,
+			BucketTs:         k.bucketTs,
+			RequestCount:     drained.requestCount,
+			SuccessCount:     drained.successCount,
+			TotalLatencyMs:   drained.totalLatencyMs,
+			TtftSumMs:        drained.ttftSumMs,
+			TtftCount:        drained.ttftCount,
+			OutputTokens:     drained.outputTokens,
+			GenerationMs:     drained.generationMs,
+			InputTokens:      drained.inputTokens,
+			CacheReadTokens:  drained.cacheReadTokens,
+			CacheWriteTokens: drained.cacheWriteTokens,
+			CacheRequests:    drained.cacheRequests,
 		})
 		if err != nil {
 			bucket.addCounters(drained)
@@ -68,7 +72,7 @@ func deleteOldEmptyBucket(k bucketKey, rawKey any) {
 }
 
 func cleanupExpiredMetrics(retentionDays int) {
-	if retentionDays <= 0 {
+	if retentionDays <= 0 || retentionDays > perf_metrics_setting.MaxRetentionDays {
 		return
 	}
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
@@ -79,13 +83,17 @@ func cleanupExpiredMetrics(retentionDays int) {
 
 func redisCounters(values map[string]string) counters {
 	return counters{
-		requestCount:   parseRedisInt(values["req"]),
-		successCount:   parseRedisInt(values["ok"]),
-		totalLatencyMs: parseRedisInt(values["lat"]),
-		ttftSumMs:      parseRedisInt(values["ttft"]),
-		ttftCount:      parseRedisInt(values["ttft_n"]),
-		outputTokens:   parseRedisInt(values["out"]),
-		generationMs:   parseRedisInt(values["gen_ms"]),
+		requestCount:     parseRedisInt(values["req"]),
+		successCount:     parseRedisInt(values["ok"]),
+		totalLatencyMs:   parseRedisInt(values["lat"]),
+		ttftSumMs:        parseRedisInt(values["ttft"]),
+		ttftCount:        parseRedisInt(values["ttft_n"]),
+		outputTokens:     parseRedisInt(values["out"]),
+		generationMs:     parseRedisInt(values["gen_ms"]),
+		inputTokens:      parseRedisInt(values["in"]),
+		cacheReadTokens:  parseRedisInt(values["cache_read"]),
+		cacheWriteTokens: parseRedisInt(values["cache_write"]),
+		cacheRequests:    parseRedisInt(values["cache_req"]),
 	}
 }
 

@@ -2,10 +2,10 @@ package replicate
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -22,7 +22,6 @@ import (
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 )
 
 type Adaptor struct {
@@ -111,12 +110,14 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 	if len(request.OutputFormat) > 0 {
 		var outputFormat string
-		if err := json.Unmarshal(request.OutputFormat, &outputFormat); err == nil && strings.TrimSpace(outputFormat) != "" {
+		if err := common.Unmarshal(request.OutputFormat, &outputFormat); err == nil && strings.TrimSpace(outputFormat) != "" {
 			inputPayload["output_format"] = outputFormat
 		}
 	}
 
-	if imageN := lo.FromPtrOr(request.N, uint(0)); imageN > 0 {
+	if imageN, ok := dto.BoundedImageN(request.N); !ok {
+		return nil, fmt.Errorf("replicate adaptor: n must be an integer between 1 and %d", dto.MaxImageN)
+	} else if request.N != nil && *request.N > 0 {
 		inputPayload["num_outputs"] = int(imageN)
 	}
 
@@ -180,7 +181,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		return nil, types.NewError(errors.New("replicate adaptor: empty response"), types.ErrorCodeBadResponse)
 	}
 
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeReadResponseBodyFailed)
 	}
@@ -202,7 +203,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		if errMsg == "" {
 			errMsg = "replicate adaptor: prediction error"
 		}
-		return nil, types.NewError(errors.New(errMsg), types.ErrorCodeBadResponse)
+		// Provider error text may echo request data, signed URLs, or internal
+		// details. Keep only metadata in the error crossing the relay boundary.
+		return nil, types.NewError(fmt.Errorf("replicate upstream prediction error: message_meta=%s", common.SensitiveLogMeta(errMsg)), types.ErrorCodeBadResponse)
 	}
 
 	if prediction.Status != "" && !strings.EqualFold(prediction.Status, "succeeded") {
@@ -307,7 +310,7 @@ func downloadImagesToBase64(urls []string) ([]string, error) {
 		}
 		_, data, err := service.GetImageFromUrl(url)
 		if err != nil {
-			return nil, fmt.Errorf("replicate adaptor: failed to download image from %s: %w", url, err)
+			return nil, fmt.Errorf("replicate adaptor: failed to download image from %q: %w", common.SanitizeRequestURIForLog(url), err)
 		}
 		results = append(results, data)
 	}
@@ -435,6 +438,10 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 	if fileHeader == nil {
 		return "", nil
 	}
+	maxFileBytes := common.GetMaxFileDownloadBytes()
+	if fileHeader.Size < 0 || fileHeader.Size > maxFileBytes {
+		return "", fmt.Errorf("replicate adaptor: image file exceeds maximum allowed size of %d bytes", maxFileBytes)
+	}
 
 	file, err := fileHeader.Open()
 	if err != nil {
@@ -442,24 +449,39 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 	}
 	defer file.Close()
 
+	fileBytes, err := common.ReadBodyLimited(file, fileHeader.Size, maxFileBytes)
+	_ = file.Close()
+	if err != nil {
+		if errors.Is(err, common.ErrRequestBodyTooLarge) {
+			return "", fmt.Errorf("replicate adaptor: image file exceeds maximum allowed size of %d bytes", maxFileBytes)
+		}
+		return "", fmt.Errorf("replicate adaptor: read image content failed: %w", err)
+	}
+	mimeType, err := service.ResolveImageMIME(fileBytes)
+	if err != nil {
+		return "", fmt.Errorf("replicate adaptor: unsupported image content: %w", err)
+	}
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
 	hdr := make(textproto.MIMEHeader)
-	hdr.Set("Content-Disposition", fmt.Sprintf("form-data; name=\"content\"; filename=\"%s\"", fileHeader.Filename))
-	contentType := fileHeader.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	disposition := mime.FormatMediaType("form-data", map[string]string{
+		"name": "content", "filename": "content." + replicateImageExtension(mimeType),
+	})
+	if disposition == "" {
+		return "", errors.New("replicate adaptor: invalid upload filename")
 	}
-	hdr.Set("Content-Type", contentType)
+	hdr.Set("Content-Disposition", disposition)
+	hdr.Set("Content-Type", mimeType)
 
 	part, err := writer.CreatePart(hdr)
 	if err != nil {
 		writer.Close()
 		return "", fmt.Errorf("replicate adaptor: create upload form failed: %w", err)
 	}
-	if _, err := io.Copy(part, file); err != nil {
-		writer.Close()
+	if _, err := part.Write(fileBytes); err != nil {
+		_ = writer.Close()
 		return "", fmt.Errorf("replicate adaptor: copy image content failed: %w", err)
 	}
 	formContentType := writer.FormDataContentType()
@@ -484,12 +506,12 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return "", fmt.Errorf("replicate adaptor: read upload response failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("replicate adaptor: upload image failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return "", fmt.Errorf("replicate adaptor: upload image failed with status %d (response_meta=%s)", resp.StatusCode, common.SensitiveLogBody(respBody))
 	}
 
 	var uploadResp FileUploadResponse
@@ -502,30 +524,57 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 	return uploadResp.Urls.Get, nil
 }
 
+func replicateImageExtension(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "image/bmp":
+		return "bmp"
+	case "image/tiff":
+		return "tiff"
+	case "image/heic":
+		return "heic"
+	case "image/heif":
+		return "heif"
+	case "image/avif":
+		return "avif"
+	case "image/x-icon":
+		return "ico"
+	default:
+		return "img"
+	}
+}
+
 func (a *Adaptor) ConvertOpenAIRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeneralOpenAIRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertOpenAIRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAI))
 }
 
 func (a *Adaptor) ConvertRerankRequest(*gin.Context, int, dto.RerankRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertRerankRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatRerank))
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(*gin.Context, *relaycommon.RelayInfo, dto.EmbeddingRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertEmbeddingRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatEmbedding))
 }
 
 func (a *Adaptor) ConvertAudioRequest(*gin.Context, *relaycommon.RelayInfo, dto.AudioRequest) (io.Reader, error) {
-	return nil, errors.New("replicate adaptor: ConvertAudioRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIAudio))
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(*gin.Context, *relaycommon.RelayInfo, dto.OpenAIResponsesRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertOpenAIResponsesRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatOpenAIResponses))
 }
 
 func (a *Adaptor) ConvertClaudeRequest(*gin.Context, *relaycommon.RelayInfo, *dto.ClaudeRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertClaudeRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatClaude))
 }
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
-	return nil, errors.New("replicate adaptor: ConvertGeminiRequest is not implemented")
+	return nil, types.NewUnsupportedEndpointError(ChannelName, string(types.RelayFormatGemini))
 }

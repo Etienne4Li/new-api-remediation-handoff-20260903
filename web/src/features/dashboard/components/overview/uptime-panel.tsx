@@ -98,7 +98,7 @@ export function UptimePanel() {
     <PanelWrapper
       title={
         <span className='flex items-center gap-2'>
-          <IconBadge tone='success' size='sm'>
+          <IconBadge tone='neutral' size='sm'>
             <Activity />
           </IconBadge>
           {t('Uptime')}
@@ -131,7 +131,7 @@ export function UptimePanel() {
             <div key={group.categoryName}>
               <div className='bg-muted/30 border-border/60 border-b px-3 py-2 sm:px-5'>
                 <div className='flex items-center gap-2'>
-                  <h4 className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                  <h4 className='text-muted-foreground text-xs font-semibold uppercase'>
                     {group.categoryName}
                   </h4>
                   <span className='text-muted-foreground/40 font-mono text-xs tabular-nums'>

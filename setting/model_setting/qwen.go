@@ -1,7 +1,9 @@
 package model_setting
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/setting/config"
 )
@@ -29,6 +31,9 @@ var defaultQwenSettings = QwenSettings{
 
 // 全局实例
 var qwenSettings = defaultQwenSettings
+var qwenSettingsMu sync.RWMutex
+
+type qwenSettingsFields QwenSettings
 
 func init() {
 	// 注册到全局配置管理器
@@ -37,15 +42,58 @@ func init() {
 
 // GetQwenSettings
 func GetQwenSettings() *QwenSettings {
-	return &qwenSettings
+	qwenSettingsMu.RLock()
+	defer qwenSettingsMu.RUnlock()
+	settings := qwenSettings
+	settings.SyncImageModels = append([]string(nil), qwenSettings.SyncImageModels...)
+	return &settings
 }
 
 // IsSyncImageModel
 func IsSyncImageModel(model string) bool {
+	qwenSettingsMu.RLock()
+	defer qwenSettingsMu.RUnlock()
 	for _, m := range qwenSettings.SyncImageModels {
 		if strings.Contains(model, m) {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *QwenSettings) ConfigSnapshot() interface{} {
+	if s == nil {
+		return QwenSettings{}
+	}
+	qwenSettingsMu.RLock()
+	defer qwenSettingsMu.RUnlock()
+	settings := *s
+	settings.SyncImageModels = append([]string(nil), s.SyncImageModels...)
+	return settings
+}
+
+func (s *QwenSettings) ValidateConfigMap(values map[string]string) error {
+	if s == nil {
+		return config.ValidateConfigFromMap(&QwenSettings{}, values)
+	}
+	qwenSettingsMu.RLock()
+	staged := qwenSettingsFields(*s)
+	qwenSettingsMu.RUnlock()
+	return config.ValidateConfigFromMap(&staged, values)
+}
+
+func (s *QwenSettings) UpdateConfigMap(values map[string]string) error {
+	if s == nil {
+		return fmt.Errorf("qwen settings must not be nil")
+	}
+	qwenSettingsMu.Lock()
+	defer qwenSettingsMu.Unlock()
+	staged := qwenSettingsFields(*s)
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	updated := QwenSettings(staged)
+	updated.SyncImageModels = append([]string(nil), staged.SyncImageModels...)
+	*s = updated
+	return nil
 }

@@ -52,14 +52,37 @@ type codexWhamFetchFunc func(
 	accountID string,
 ) (statusCode int, body []byte, err error)
 
+// persistRefreshedCodexCredential keeps the remote refresh and local channel
+// update as an explicit boundary. A successful OAuth refresh must never be
+// reported as usable when the new credential could not be durably saved.
+func persistRefreshedCodexCredential(channelID int, oauthKey *codex.OAuthKey) error {
+	if channelID <= 0 {
+		return fmt.Errorf("invalid channel id: %d", channelID)
+	}
+	if oauthKey == nil {
+		return fmt.Errorf("oauth key is nil")
+	}
+	encoded, err := common.Marshal(oauthKey)
+	if err != nil {
+		return err
+	}
+	if err := model.UpdateChannelKey(channelID, string(encoded)); err != nil {
+		return fmt.Errorf("update channel %d credential: %w", channelID, err)
+	}
+	return nil
+}
+
 func fetchCodexChannelWhamData(
 	c *gin.Context,
 	fetch codexWhamFetchFunc,
 	logPrefix string,
 	userMessage string,
 ) {
-	channelId, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	channelId, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || channelId <= 0 {
+		if err == nil {
+			err = fmt.Errorf("channel id must be positive")
+		}
 		common.ApiError(c, fmt.Errorf("invalid channel id: %w", err))
 		return
 	}
@@ -129,10 +152,12 @@ func fetchCodexChannelWhamData(
 				oauthKey.Type = "codex"
 			}
 
-			encoded, encErr := common.Marshal(oauthKey)
-			if encErr == nil {
-				_ = model.DB.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("key", string(encoded)).Error
+			if persistErr := persistRefreshedCodexCredential(ch.Id, oauthKey); persistErr == nil {
 				model.InitChannelCache()
+			} else {
+				common.SysError(fmt.Sprintf("failed to persist refreshed codex credential channel_id=%d: %v", ch.Id, persistErr))
+				c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "刷新凭证保存失败，请稍后重试"})
+				return
 			}
 
 			ctx2, cancel2 := context.WithTimeout(c.Request.Context(), 15*time.Second)

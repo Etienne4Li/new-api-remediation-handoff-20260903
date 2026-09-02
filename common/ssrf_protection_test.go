@@ -2,6 +2,7 @@ package common
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -56,4 +57,37 @@ func TestNewSSRFProtectionFromFetchSettingParsesPortRanges(t *testing.T) {
 
 	require.NoError(t, protection.ValidateNetworkTarget("example.com", 8001))
 	require.Error(t, protection.ValidateNetworkTarget("example.com", 9000))
+}
+
+func TestValidateURLWithFetchSettingKeepsSyntaxBoundaryWhenDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		message string
+	}{
+		{name: "unsupported scheme", rawURL: "file:///etc/passwd", message: "scheme"},
+		{name: "userinfo", rawURL: "https://user:secret@example.test/file", message: "userinfo"},
+		{name: "fragment", rawURL: "https://example.test/file#private", message: "fragment"},
+		{name: "invalid port", rawURL: "https://example.test:65536/file", message: "port"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateURLWithFetchSetting(test.rawURL, false, true, false, false, nil, nil, nil, false)
+			require.Error(t, err)
+			require.Contains(t, strings.ToLower(err.Error()), test.message)
+		})
+	}
+
+	require.NoError(t, ValidateURLWithFetchSetting(
+		"https://example.test/file",
+		false,
+		true,
+		false,
+		false,
+		nil,
+		nil,
+		nil,
+		false,
+	))
 }

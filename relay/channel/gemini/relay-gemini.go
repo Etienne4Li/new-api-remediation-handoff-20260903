@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -52,9 +51,9 @@ func patchGeminiZeroCompletionUsage(c *gin.Context, info *relaycommon.RelayInfo,
 	estimated := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, usage.PromptTokens)
 	usage.CompletionTokens = estimated.CompletionTokens
 	if imageCount != 0 && usage.CompletionTokens == 0 {
-		usage.CompletionTokens = imageCount * 1400
+		usage.CompletionTokens = common.SaturatingMulNonNegativeInt(imageCount, 1400)
 	}
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 	// Overwrite the metadata-derived billing usage: effectiveBillingUsage prefers
 	// BillingUsage during settlement, so keeping the prompt-only metadata there
 	// would still bill zero completion tokens.
@@ -194,8 +193,8 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			usage = &dto.Usage{}
 		}
 		if imageCount != 0 && usage.CompletionTokens == 0 {
-			usage.CompletionTokens = imageCount * 1400
-			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+			usage.CompletionTokens = common.SaturatingMulNonNegativeInt(imageCount, 1400)
+			usage.TotalTokens = common.SaturatingAddNonNegativeInt(usage.PromptTokens, usage.CompletionTokens)
 			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		}
 		attachEstimatedGeminiBillingUsage(usage)
@@ -267,7 +266,7 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 				finishReason = constant.FinishReasonToolCalls
 				err := handleStream(c, info, emptyResponse)
 				if err != nil {
-					logger.LogError(c, err.Error())
+					logger.LogError(c, "failed to send initial Gemini stream response: error_meta="+common.SensitiveLogMeta(err.Error()))
 				}
 
 				response.ClearToolCalls()
@@ -277,14 +276,14 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 			} else {
 				err := handleStream(c, info, emptyResponse)
 				if err != nil {
-					logger.LogError(c, err.Error())
+					logger.LogError(c, "failed to send initial stream response: error_meta="+common.SensitiveLogMeta(err.Error()))
 				}
 			}
 		}
 
 		err := handleStream(c, info, response)
 		if err != nil {
-			logger.LogError(c, err.Error())
+			logger.LogError(c, "failed to send Gemini stream response: error_meta="+common.SensitiveLogMeta(err.Error()))
 		}
 		if isStop {
 			if info.RelayFormat != types.RelayFormatClaude {
@@ -305,18 +304,18 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	}
 	handleErr := handleFinalStream(c, info, response)
 	if handleErr != nil {
-		common.SysLog("send final response failed: " + handleErr.Error())
+		common.SysLog("send final response failed: error_meta=" + common.SensitiveLogMeta(handleErr.Error()))
 	}
 	return usage, nil
 }
 
 func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	service.CloseResponseBodyGracefully(resp)
-	logger.LogDebug(c, "Gemini response body: %s", responseBody)
+	logger.LogDebug(c, "Gemini response_meta=%s", common.SensitiveLogBody(responseBody))
 	var geminiResponse dto.GeminiChatResponse
 	err = common.Unmarshal(responseBody, &geminiResponse)
 	if err != nil {
@@ -392,7 +391,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 
-	responseBody, readErr := io.ReadAll(resp.Body)
+	responseBody, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if readErr != nil {
 		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -435,7 +434,7 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 }
 
 func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	responseBody, readErr := io.ReadAll(resp.Body)
+	responseBody, readErr := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if readErr != nil {
 		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -479,10 +478,11 @@ func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	const imageTokens = 258
 	generatedImages := len(openAIResponse.Data)
 
+	generatedImageTokens := common.SaturatingMulNonNegativeInt(imageTokens, generatedImages)
 	usage := &dto.Usage{
-		PromptTokens:     imageTokens * generatedImages, // each generated image has fixed 258 tokens
-		CompletionTokens: 0,                             // image generation does not calculate completion tokens
-		TotalTokens:      imageTokens * generatedImages,
+		PromptTokens:     generatedImageTokens, // each generated image has fixed 258 tokens
+		CompletionTokens: 0,                    // image generation does not calculate completion tokens
+		TotalTokens:      generatedImageTokens,
 	}
 
 	return usage, nil
@@ -496,7 +496,7 @@ type GeminiModelsResponse struct {
 func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 	client, err := service.GetHttpClientWithProxy(proxyURL)
 	if err != nil {
-		return nil, fmt.Errorf("创建HTTP客户端失败: %v", err)
+		return nil, fmt.Errorf("创建HTTP客户端失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 	}
 
 	allModels := make([]string, 0)
@@ -513,7 +513,7 @@ func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 		request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("创建请求失败: %v", err)
+			return nil, fmt.Errorf("创建请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 		}
 
 		request.Header.Set("x-goog-api-key", apiKey)
@@ -521,26 +521,26 @@ func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 		response, err := client.Do(request)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("请求失败: %v", err)
+			return nil, fmt.Errorf("请求失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 		}
 
 		if response.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(response.Body)
+			body, _ := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
 			response.Body.Close()
 			cancel()
-			return nil, fmt.Errorf("服务器返回错误 %d: %s", response.StatusCode, string(body))
+			return nil, fmt.Errorf("服务器返回错误 %d: body_meta=%s", response.StatusCode, common.SensitiveLogBody(body))
 		}
 
-		body, err := io.ReadAll(response.Body)
+		body, err := service.ReadProviderResponseBody(response, service.DefaultProviderResponseBodyLimitBytes)
 		response.Body.Close()
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("读取响应失败: %v", err)
+			return nil, fmt.Errorf("读取响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 		}
 
 		var modelsResponse GeminiModelsResponse
 		if err = common.Unmarshal(body, &modelsResponse); err != nil {
-			return nil, fmt.Errorf("解析响应失败: %v", err)
+			return nil, fmt.Errorf("解析响应失败: error_meta=%s", common.SensitiveLogMeta(err.Error()))
 		}
 
 		for _, model := range modelsResponse.Models {

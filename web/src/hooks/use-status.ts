@@ -20,21 +20,14 @@ import { useQuery } from '@tanstack/react-query'
 
 import type { SystemStatus } from '@/features/auth/types'
 import { getStatus } from '@/lib/api'
+import { readCachedStatus, writeCachedStatus } from '@/lib/status-cache'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { mapStatusDataToConfig } from './use-system-config'
 
 // Get initial cache from localStorage
 function getInitialStatus(): SystemStatus | undefined {
-  try {
-    if (typeof window !== 'undefined') {
-      const saved = window.localStorage.getItem('status')
-      return saved ? (JSON.parse(saved) as SystemStatus) : undefined
-    }
-  } catch {
-    /* empty */
-  }
-  return undefined
+  return readCachedStatus<SystemStatus>()
 }
 
 export function useStatus() {
@@ -56,14 +49,9 @@ export function useStatus() {
           )
         }
       }
-      // Save to localStorage
-      try {
-        if (typeof window !== 'undefined' && status) {
-          window.localStorage.setItem('status', JSON.stringify(status))
-        }
-      } catch {
-        /* empty */
-      }
+      // Persist only the non-sensitive status projection. In particular, chat
+      // templates are deliberately removed by writeCachedStatus.
+      writeCachedStatus(status)
       return status as SystemStatus | null
     },
     // Use localStorage data as initial data

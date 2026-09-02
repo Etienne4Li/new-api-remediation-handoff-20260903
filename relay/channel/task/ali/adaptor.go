@@ -2,9 +2,11 @@ package ali
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -132,7 +134,21 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *taskdto.TaskError) {
 	// ValidateMultipartDirect 负责解析并将原始 TaskSubmitReq 存入 context
-	return relaycommon.ValidateMultipartDirect(c, info)
+	if taskErr := relaycommon.ValidateMultipartDirect(c, info); taskErr != nil {
+		return taskErr
+	}
+
+	// Metadata is merged into the provider request after the shared validator
+	// runs. Validate the merged representation as well so a nested
+	// parameters.duration cannot bypass the billing multiplier bound.
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	if _, err := a.convertToAliRequest(info, req); err != nil {
+		return service.TaskErrorWrapperLocal(err, "invalid_request", http.StatusBadRequest)
+	}
+	return nil
 }
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
@@ -157,12 +173,13 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err != nil {
 		return nil, errors.Wrap(err, "convert_to_ali_request_failed")
 	}
-	logger.LogJson(c, "ali video request body", aliReq)
-
 	bodyBytes, err := common.Marshal(aliReq)
 	if err != nil {
 		return nil, errors.Wrap(err, "marshal_ali_request_failed")
 	}
+	// Requests contain prompts and user-supplied media URLs. Keep only a
+	// correlation-safe fingerprint in debug logs rather than serializing them.
+	logger.LogDebug(c, "ali_video_request_body_meta=%s", common.SensitiveLogBody(bodyBytes))
 	return bytes.NewReader(bodyBytes), nil
 }
 
@@ -201,6 +218,12 @@ func sizeToResolution(size string) (string, error) {
 
 func ProcessAliOtherRatios(aliReq *AliVideoRequest) (map[string]float64, error) {
 	otherRatios := make(map[string]float64)
+	if aliReq == nil {
+		return otherRatios, fmt.Errorf("ali request is nil")
+	}
+	if aliReq.Parameters == nil {
+		return otherRatios, nil
+	}
 	aliRatios := map[string]map[string]float64{
 		"wan2.6-i2v": {
 			"720P":  1,
@@ -433,6 +456,13 @@ func (a *TaskAdaptor) convertToAliRequest(info *relaycommon.RelayInfo, req relay
 		}
 	}
 
+	if aliReq.Parameters == nil {
+		return nil, errors.New("parameters cannot be null")
+	}
+	if aliReq.Parameters.Duration <= 0 || aliReq.Parameters.Duration > relaycommon.MaxTaskDurationSeconds {
+		return nil, fmt.Errorf("parameters.duration must be between 1 and %d", relaycommon.MaxTaskDurationSeconds)
+	}
+
 	if aliReq.Model != upstreamModel {
 		return nil, errors.New("can't change model with metadata")
 	}
@@ -440,8 +470,60 @@ func (a *TaskAdaptor) convertToAliRequest(info *relaycommon.RelayInfo, req relay
 	if err := normalizeWan27I2VInput(aliReq, req); err != nil {
 		return nil, err
 	}
+	if err := validateAliMediaInputs(&aliReq.Input); err != nil {
+		return nil, err
+	}
 
 	return aliReq, nil
+}
+
+func validateAliMediaInputs(input *AliVideoInput) error {
+	if input == nil {
+		return nil
+	}
+	if err := validateAliImageReference(input.ImgURL); err != nil {
+		return fmt.Errorf("input.img_url: %w", err)
+	}
+	for field, value := range map[string]string{
+		"input.first_frame_url": input.FirstFrameURL,
+		"input.last_frame_url":  input.LastFrameURL,
+		"input.audio_url":       input.AudioURL,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if err := common.ValidateHTTPURL(value); err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+	}
+	for index := range input.Media {
+		if strings.TrimSpace(input.Media[index].URL) == "" {
+			continue
+		}
+		if err := common.ValidateHTTPURL(input.Media[index].URL); err != nil {
+			return fmt.Errorf("input.media[%d].url: %w", index, err)
+		}
+		input.Media[index].URL = strings.TrimSpace(input.Media[index].URL)
+	}
+	input.ImgURL = strings.TrimSpace(input.ImgURL)
+	input.FirstFrameURL = strings.TrimSpace(input.FirstFrameURL)
+	input.LastFrameURL = strings.TrimSpace(input.LastFrameURL)
+	input.AudioURL = strings.TrimSpace(input.AudioURL)
+	return nil
+}
+
+// Ali's legacy img_url field also accepts raw/data base64. Any value that
+// parses as a URI is nevertheless required to be an ordinary HTTP(S) URL.
+func validateAliImageReference(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+		return nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil && parsed.Scheme == "" && parsed.Host == "" {
+		return nil
+	}
+	return common.ValidateHTTPURL(trimmed)
 }
 
 // EstimateBilling 根据用户请求参数计算 OtherRatios（时长、分辨率等）。
@@ -460,7 +542,7 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 	// metadata can override Duration past standard request validation;
 	// cap it because it is used as a billing multiplier.
 	otherRatios := map[string]float64{
-		"seconds": float64(min(aliReq.Parameters.Duration, relaycommon.MaxTaskDurationSeconds)),
+		"seconds": float64(aliReq.Parameters.Duration),
 	}
 	ratios, err := ProcessAliOtherRatios(aliReq)
 	if err != nil {
@@ -479,7 +561,7 @@ func (a *TaskAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, req
 
 // DoResponse handles upstream response
 func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (taskID string, taskData []byte, taskErr *taskdto.TaskError) {
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := service.ReadProviderResponseBody(resp, service.DefaultProviderResponseBodyLimitBytes)
 	if err != nil {
 		taskErr = service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
 		return
@@ -489,13 +571,13 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	// 解析阿里响应
 	var aliResp AliVideoResponse
 	if err := common.Unmarshal(responseBody, &aliResp); err != nil {
-		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body: %s", responseBody), "unmarshal_response_body_failed", http.StatusInternalServerError)
+		taskErr = service.TaskErrorWrapper(errors.Wrapf(err, "body_meta: %s", common.SensitiveLogBody(responseBody)), "unmarshal_response_body_failed", http.StatusInternalServerError)
 		return
 	}
 
 	// 检查错误
 	if aliResp.Code != "" {
-		taskErr = service.TaskErrorWrapper(fmt.Errorf("%s: %s", aliResp.Code, aliResp.Message), "ali_api_error", resp.StatusCode)
+		taskErr = service.TaskErrorWrapper(fmt.Errorf("ali upstream error: code=%s message_meta=%s", aliResp.Code, common.SensitiveLogMeta(aliResp.Message)), "ali_api_error", resp.StatusCode)
 		return
 	}
 
@@ -523,14 +605,25 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 
 // FetchTask 查询任务状态
 func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	return a.FetchTaskWithContext(context.Background(), baseUrl, key, body, proxy)
+}
+
+func (a *TaskAdaptor) FetchTaskWithContext(ctx context.Context, baseUrl, key string, body map[string]any, proxy string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	taskID, ok := body["task_id"].(string)
 	if !ok {
 		return nil, fmt.Errorf("invalid task_id")
 	}
+	escapedTaskID, err := taskcommon.EscapeTaskIDPathSegment(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid task_id: %w", err)
+	}
 
-	uri := fmt.Sprintf("%s/api/v1/tasks/%s", baseUrl, taskID)
+	uri := fmt.Sprintf("%s/api/v1/tasks/%s", strings.TrimRight(baseUrl, "/"), escapedTaskID)
 
-	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +653,21 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	}
 
 	taskResult := relaycommon.TaskInfo{
-		Code: 0,
+		Code:   0,
+		TaskID: aliResp.Output.TaskID,
+	}
+	if aliResp.Code != "" {
+		// The top-level error envelope takes precedence over any nested task
+		// status. An error response must not be able to claim `SUCCEEDED`.
+		taskResult.Code = 1
+		taskResult.Status = model.TaskStatusFailure
+		taskResult.Progress = "100%"
+		if aliResp.Message != "" {
+			taskResult.Reason = aliResp.Message
+		} else {
+			taskResult.Reason = fmt.Sprintf("ali task failed, code: %s", aliResp.Code)
+		}
+		return &taskResult, nil
 	}
 
 	// 状态映射
@@ -571,8 +678,14 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Status = model.TaskStatusInProgress
 	case "SUCCEEDED":
 		taskResult.Status = model.TaskStatusSuccess
-		// 阿里直接返回视频URL，不需要额外的代理端点
-		taskResult.Url = aliResp.Output.VideoURL
+		// 阿里直接返回视频 URL； validate it before the value crosses the
+		// adaptor boundary so malformed/provider-controlled strings cannot be
+		// persisted or handed to a fetcher.
+		if normalized, err := taskcommon.NormalizeTaskResultURL(aliResp.Output.VideoURL); err != nil {
+			return nil, fmt.Errorf("invalid ali video URL: %w", err)
+		} else {
+			taskResult.Url = normalized
+		}
 	case "FAILED", "CANCELED", "UNKNOWN":
 		taskResult.Status = model.TaskStatusFailure
 		if aliResp.Message != "" {

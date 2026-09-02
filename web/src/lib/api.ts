@@ -20,17 +20,13 @@ import { api } from '@/lib/http-client'
 
 export {
   applyAuthBundle,
-  applyAuthRotation,
-  bootstrapAuthentication,
   clearAuthenticatedClientState,
   clearAuthentication,
-  getCommonHeaders,
   getFreshAuthHeaders,
   isAuthBundle,
   refreshAuthentication,
-  AuthRotationError,
 } from '@/lib/auth-session'
-export type { AuthTokenRotation, RefreshOutcome } from '@/lib/auth-session'
+export type { RefreshOutcome } from '@/lib/auth-session'
 export { api }
 export type { ApiRequestConfig } from '@/lib/http-client'
 

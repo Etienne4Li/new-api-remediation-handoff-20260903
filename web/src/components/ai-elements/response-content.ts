@@ -143,7 +143,7 @@ function normalizeMarkdownExampleFences(input: string): string {
   return output.join('\n')
 }
 
-export function stripCustomTags(input: unknown): string {
+function stripCustomTags(input: unknown): string {
   if (typeof input !== 'string') {
     return String(input ?? '')
   }

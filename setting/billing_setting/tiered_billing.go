@@ -2,6 +2,7 @@ package billing_setting
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -26,6 +27,9 @@ var billingSetting = BillingSetting{
 	BillingMode: make(map[string]string),
 	BillingExpr: make(map[string]string),
 }
+var billingSettingMu sync.RWMutex
+
+type billingSettingFields BillingSetting
 
 func init() {
 	config.GlobalConfig.Register("billing_setting", &billingSetting)
@@ -36,6 +40,8 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func GetBillingMode(model string) string {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	if mode, ok := billingSetting.BillingMode[model]; ok {
 		return mode
 	}
@@ -43,16 +49,62 @@ func GetBillingMode(model string) string {
 }
 
 func GetBillingExpr(model string) (string, bool) {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	expr, ok := billingSetting.BillingExpr[model]
 	return expr, ok
 }
 
 func GetBillingModeCopy() map[string]string {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	return lo.Assign(billingSetting.BillingMode)
 }
 
 func GetBillingExprCopy() map[string]string {
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
 	return lo.Assign(billingSetting.BillingExpr)
+}
+
+func cloneBillingSetting(source BillingSetting) BillingSetting {
+	clone := source
+	clone.BillingMode = lo.Assign(source.BillingMode)
+	clone.BillingExpr = lo.Assign(source.BillingExpr)
+	return clone
+}
+
+func (s *BillingSetting) ConfigSnapshot() interface{} {
+	if s == nil {
+		return BillingSetting{}
+	}
+	billingSettingMu.RLock()
+	defer billingSettingMu.RUnlock()
+	return cloneBillingSetting(*s)
+}
+
+func (s *BillingSetting) ValidateConfigMap(values map[string]string) error {
+	if s == nil {
+		return config.ValidateConfigFromMap(&BillingSetting{}, values)
+	}
+	billingSettingMu.RLock()
+	staged := billingSettingFields(cloneBillingSetting(*s))
+	billingSettingMu.RUnlock()
+	return config.ValidateConfigFromMap(&staged, values)
+}
+
+func (s *BillingSetting) UpdateConfigMap(values map[string]string) error {
+	if s == nil {
+		return fmt.Errorf("billing setting must not be nil")
+	}
+	billingSettingMu.Lock()
+	defer billingSettingMu.Unlock()
+	staged := billingSettingFields(cloneBillingSetting(*s))
+	if err := config.UpdateConfigFromMap(&staged, values); err != nil {
+		return err
+	}
+	*s = cloneBillingSetting(BillingSetting(staged))
+	return nil
 }
 
 func GetPricingSyncData(base map[string]any) map[string]any {

@@ -1,12 +1,9 @@
 package controller
 
 import (
-	"time"
-
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -28,6 +25,23 @@ func GetSetup(c *gin.Context) {
 	setup := Setup{
 		Status: constant.Setup,
 	}
+	// Refresh the process-local hint from the durable marker so a process that
+	// started before another instance completed bootstrap does not advertise a
+	// stale "not initialized" state.
+	if !setup.Status {
+		marker, err := model.GetSetupWithError()
+		if err != nil {
+			// A failed read is not evidence that the database is empty.  Returning
+			// 503 keeps the bootstrap endpoint fail-closed during an outage and
+			// avoids exposing a misleading first-run form.
+			c.JSON(503, gin.H{"success": false, "message": "系统状态暂不可用"})
+			return
+		}
+		if marker != nil {
+			constant.Setup = true
+			setup.Status = true
+		}
+	}
 	if constant.Setup {
 		c.JSON(200, gin.H{
 			"success": true,
@@ -35,7 +49,12 @@ func GetSetup(c *gin.Context) {
 		})
 		return
 	}
-	setup.RootInit = model.RootUserExists()
+	rootExists, err := model.RootUserExistsWithError()
+	if err != nil {
+		c.JSON(503, gin.H{"success": false, "message": "系统状态暂不可用"})
+		return
+	}
+	setup.RootInit = rootExists
 	setup.DatabaseType = string(common.MainDatabaseType())
 	c.JSON(200, gin.H{
 		"success": true,
@@ -44,8 +63,16 @@ func GetSetup(c *gin.Context) {
 }
 
 func PostSetup(c *gin.Context) {
-	// Check if setup is already completed
-	if constant.Setup {
+	// constant.Setup is process-local and cannot fence a second application
+	// instance. Consult the durable setup marker as well; InitializeSetup
+	// performs the final cross-process compare-and-swap inside one transaction.
+	marker, markerErr := model.GetSetupWithError()
+	if markerErr != nil {
+		c.JSON(503, gin.H{"success": false, "message": "系统状态暂不可用"})
+		return
+	}
+	if constant.Setup || marker != nil {
+		constant.Setup = true
 		c.JSON(200, gin.H{
 			"success": false,
 			"message": "系统已经初始化完成",
@@ -53,11 +80,17 @@ func PostSetup(c *gin.Context) {
 		return
 	}
 
-	// Check if root user already exists
-	rootExists := model.RootUserExists()
+	// This is only a UX hint. The root-user decision is repeated inside the
+	// initialization transaction so a concurrent request cannot leave a half
+	// initialized database.
+	rootExists, err := model.RootUserExistsWithError()
+	if err != nil {
+		c.JSON(503, gin.H{"success": false, "message": "系统状态暂不可用"})
+		return
+	}
 
 	var req SetupRequest
-	err := c.ShouldBindJSON(&req)
+	err = c.ShouldBindJSON(&req)
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
@@ -93,82 +126,48 @@ func PostSetup(c *gin.Context) {
 			return
 		}
 
-		// Create root user
-		hashedPassword, err := common.Password2Hash(req.Password)
+	}
+
+	// Hashing is intentionally done before entering the database transaction;
+	// InitializeSetup only uses it if the transaction wins and no root exists.
+	var hashedPassword string
+	if !rootExists {
+		hashedPassword, err = common.Password2Hash(req.Password)
 		if err != nil {
 			c.JSON(200, gin.H{
 				"success": false,
-				"message": "系统错误: " + err.Error(),
-			})
-			return
-		}
-		rootUser := model.User{
-			Username:    req.Username,
-			Password:    hashedPassword,
-			Role:        common.RoleRootUser,
-			Status:      common.UserStatusEnabled,
-			DisplayName: "Root User",
-			AccessToken: nil,
-			Quota:       100000000,
-		}
-		err = model.DB.Create(&rootUser).Error
-		if err != nil {
-			c.JSON(200, gin.H{
-				"success": false,
-				"message": "创建管理员账号失败: " + err.Error(),
+				"message": "系统错误",
 			})
 			return
 		}
 	}
 
-	// Set operation modes
-	operation_setting.SelfUseModeEnabled = req.SelfUseModeEnabled
-	operation_setting.DemoSiteEnabled = req.DemoSiteEnabled
-
-	// Save operation modes to database for persistence
-	err = model.UpdateOption("SelfUseModeEnabled", boolToString(req.SelfUseModeEnabled))
+	initialized, err := model.InitializeSetup(model.SetupInitParams{
+		Username:           req.Username,
+		HashedPassword:     hashedPassword,
+		SelfUseModeEnabled: req.SelfUseModeEnabled,
+		DemoSiteEnabled:    req.DemoSiteEnabled,
+		Version:            common.Version,
+	})
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,
-			"message": "保存自用模式设置失败: " + err.Error(),
+			"message": "系统初始化失败",
 		})
 		return
 	}
-
-	err = model.UpdateOption("DemoSiteEnabled", boolToString(req.DemoSiteEnabled))
-	if err != nil {
+	if !initialized {
+		constant.Setup = true
 		c.JSON(200, gin.H{
 			"success": false,
-			"message": "保存演示站点模式设置失败: " + err.Error(),
+			"message": "系统已经初始化完成",
 		})
 		return
 	}
-
-	// Update setup status
 	constant.Setup = true
-
-	setup := model.Setup{
-		Version:       common.Version,
-		InitializedAt: time.Now().Unix(),
-	}
-	err = model.DB.Create(&setup).Error
-	if err != nil {
-		c.JSON(200, gin.H{
-			"success": false,
-			"message": "系统初始化失败: " + err.Error(),
-		})
-		return
-	}
 
 	c.JSON(200, gin.H{
 		"success": true,
 		"message": "系统初始化成功",
 	})
-}
-
-func boolToString(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }

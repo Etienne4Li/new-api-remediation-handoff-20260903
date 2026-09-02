@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { get2FAStatus } from '@/lib/api'
 
@@ -35,31 +35,59 @@ const DEFAULT_STATUS: TwoFAStatus = {
 export function useTwoFA(enabled = true) {
   const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState<TwoFAStatus>(DEFAULT_STATUS)
+  const requestIdRef = useRef(0)
 
   const fetchStatus = useCallback(async () => {
     if (!enabled) return
 
+    const requestId = ++requestIdRef.current
     try {
       setLoading(true)
       const response = await get2FAStatus()
+      if (requestId !== requestIdRef.current) return
       if (response.success && response.data) {
         setStatus(response.data)
       }
     } catch (error) {
+      if (requestId !== requestIdRef.current) return
       // eslint-disable-next-line no-console
       console.error('Failed to fetch 2FA status:', error)
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        setLoading(false)
+      }
     }
   }, [enabled])
 
   useEffect(() => {
-    fetchStatus()
-  }, [fetchStatus])
+    const requestId = ++requestIdRef.current
+    if (!enabled) return
+
+    void get2FAStatus()
+      .then((response) => {
+        if (requestId !== requestIdRef.current) return
+        if (response.success && response.data) {
+          setStatus(response.data)
+        }
+        setLoading(false)
+      })
+      .catch((error: unknown) => {
+        if (requestId !== requestIdRef.current) return
+        // eslint-disable-next-line no-console
+        console.error('Failed to fetch 2FA status:', error)
+        setLoading(false)
+      })
+
+    return () => {
+      if (requestId === requestIdRef.current) {
+        requestIdRef.current += 1
+      }
+    }
+  }, [enabled])
 
   return {
     status,
-    loading,
+    loading: enabled && loading,
     refetch: fetchStatus,
   }
 }

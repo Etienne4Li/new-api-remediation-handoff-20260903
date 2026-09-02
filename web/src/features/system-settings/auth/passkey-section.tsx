@@ -189,8 +189,12 @@ export function PasskeySection(props: PasskeySectionProps) {
   return (
     <SettingsSection title={t('Passkey Authentication')}>
       <Form {...form}>
+        {/* React Hook Form reads its refs only when the submit handler runs. */}
+        {/* eslint-disable-next-line react-hooks/refs */}
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
+            // React Hook Form reads its refs only when this handler runs.
+            // eslint-disable-next-line react-hooks/refs
             onSave={form.handleSubmit(onSubmit)}
             isSaving={updateOption.isPending}
           />

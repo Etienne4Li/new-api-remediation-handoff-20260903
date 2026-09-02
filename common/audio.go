@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/abema/go-mp4"
 	"github.com/go-audio/aiff"
 	"github.com/go-audio/wav"
@@ -15,6 +16,16 @@ import (
 	"github.com/tcolgate/mp3"
 	"github.com/yapingcat/gomedia/go-codec"
 )
+
+const defaultAACParseMaxBytes int64 = 128 << 20
+
+func aacParseMaxBytes() int64 {
+	maxMB := int64(constant.MaxRequestBodyMB)
+	if maxMB <= 0 || maxMB > (int64(^uint64(0)>>1)>>20) {
+		return defaultAACParseMaxBytes
+	}
+	return maxMB << 20
+}
 
 // GetAudioDuration 使用纯 Go 库获取音频文件的时长（秒）。
 // 它不再依赖外部的 ffmpeg 或 ffprobe 程序。
@@ -314,27 +325,43 @@ func getAACDuration(r io.ReadSeeker) (float64, error) {
 		return 0, errors.Wrap(err, "failed to seek aac file")
 	}
 
-	// 读取整个文件内容
-	data, err := io.ReadAll(r)
+	// ADTS frame splitting needs a byte slice, but never allow a malformed or
+	// chunked upload to turn that requirement into an unbounded allocation.
+	maxBytes := aacParseMaxBytes()
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to read aac file")
+	}
+	if int64(len(data)) > maxBytes {
+		return 0, errors.Errorf("aac file exceeds maximum allowed size of %d bytes", maxBytes)
 	}
 
 	var totalFrames int64
 	var sampleRate int
 
-	// 使用 gomedia 的 SplitAACFrame 函数来分割 AAC 帧
-	codec.SplitAACFrame(data, func(aac []byte) {
-		// 解析 ADTS 头部以获取采样率信息
-		if len(aac) >= 7 {
-			// 使用 ConvertADTSToASC 来获取音频配置信息
-			asc, err := codec.ConvertADTSToASC(aac)
-			if err == nil && sampleRate == 0 {
-				sampleRate = codec.AACSampleIdxToSample(int(asc.Sample_freq_index))
+	// SplitAACFrame assumes every advertised frame length is valid and can
+	// panic on a truncated/malicious header. Walk frames defensively instead.
+	for offset := codec.FindSyncword(data, 0); offset >= 0; {
+		if len(data)-offset < 7 {
+			break
+		}
+		header := codec.NewAdtsFrameHeader()
+		header.Decode(data[offset:])
+		frameLength := int(header.Variable_Header.Frame_length)
+		if frameLength < 7 || frameLength > len(data)-offset {
+			break
+		}
+		frame := data[offset : offset+frameLength]
+		asc, frameErr := codec.ConvertADTSToASC(frame)
+		if frameErr == nil {
+			freqIndex := int(asc.Sample_freq_index)
+			if freqIndex >= 0 && freqIndex < len(codec.AAC_Sampling_Idx) && sampleRate == 0 {
+				sampleRate = codec.AACSampleIdxToSample(freqIndex)
 			}
 			totalFrames++
 		}
-	})
+		offset = codec.FindSyncword(data, offset+frameLength)
+	}
 
 	if sampleRate == 0 || totalFrames == 0 {
 		return 0, errors.New("no valid aac frames found")

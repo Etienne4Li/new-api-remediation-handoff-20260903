@@ -14,7 +14,7 @@ import (
 func GetUserUsableGroups(userGroup string) map[string]string {
 	groupsCopy := setting.GetUserUsableGroupsCopy()
 	if userGroup != "" {
-		specialSettings, b := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.Get(userGroup)
+		specialSettings, b := ratio_setting.GetGroupRatioSettingSnapshot().GroupSpecialUsableGroup.Get(userGroup)
 		if b {
 			// 处理特殊可用分组
 			for specialGroup, desc := range specialSettings {
@@ -108,17 +108,26 @@ func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重
 func GetGroupsEnabledModels(groups []string) []string {
+	models, _ := GetGroupsEnabledModelsWithError(groups)
+	return models
+}
+
+func GetGroupsEnabledModelsWithError(groups []string) ([]string, error) {
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	for _, group := range groups {
-		for _, modelName := range model.GetGroupEnabledModels(group) {
+		groupModels, err := model.GetGroupEnabledModelsWithError(group)
+		if err != nil {
+			return nil, err
+		}
+		for _, modelName := range groupModels {
 			if _, ok := seen[modelName]; !ok {
 				seen[modelName] = struct{}{}
 				models = append(models, modelName)
 			}
 		}
 	}
-	return models
+	return models, nil
 }
 
 // GetUserGroupRatio 获取用户使用某个分组的倍率

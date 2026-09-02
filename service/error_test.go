@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,7 +65,7 @@ func TestResetStatusCode(t *testing.T) {
 	}
 }
 
-func TestRelayErrorHandlerTruncatesInvalidJSONBodyInLog(t *testing.T) {
+func TestRelayErrorHandlerUsesBodyMetadataInLog(t *testing.T) {
 	withDebugEnabled(t, false)
 
 	body := strings.Repeat("b", common.LocalLogContentLimit+256)
@@ -89,9 +90,9 @@ func TestRelayErrorHandlerTruncatesInvalidJSONBodyInLog(t *testing.T) {
 
 	require.NotNil(t, newAPIError)
 	require.Equal(t, "bad response status code 500", newAPIError.Error())
-	require.Contains(t, logBuffer.String(), "[truncated")
-	require.Contains(t, logBuffer.String(), fmt.Sprintf("original_length=%d", len(body)))
-	require.NotContains(t, logBuffer.String(), strings.Repeat("b", common.LocalLogContentLimit+1))
+	require.Contains(t, logBuffer.String(), fmt.Sprintf("len=%d", len(body)))
+	require.Contains(t, logBuffer.String(), "hash=")
+	require.NotContains(t, logBuffer.String(), body)
 }
 
 func TestRelayErrorHandlerKeepsStructuredErrorMessage(t *testing.T) {
@@ -122,7 +123,35 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
-func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
+func TestRelayErrorHandlerShowBodyUsesMessageMetadata(t *testing.T) {
+	secret := "provider-secret-message"
+	resp := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"` + secret + `","type":"server_error"}}`)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, true)
+	require.NotNil(t, newAPIError)
+	require.NotContains(t, newAPIError.Error(), secret)
+	require.Contains(t, newAPIError.Error(), "message_meta:")
+	require.Contains(t, newAPIError.Error(), "body_meta:")
+}
+
+func TestRelayErrorHandlerPreservesSessionPolicyErrorCode(t *testing.T) {
+	body := `{"error":{"message":"session blocked","type":"permission_error","code":"session_blocked_by_cyber_policy"}}`
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.NotNil(t, newAPIError)
+	require.Equal(t, types.ErrorCodeSessionBlockedByCyberPolicy, newAPIError.GetErrorCode())
+	require.Equal(t, http.StatusForbidden, newAPIError.StatusCode)
+}
+
+func TestRelayErrorHandlerNeverLeaksInvalidJSONBodyInDebugLog(t *testing.T) {
 	withDebugEnabled(t, true)
 
 	body := strings.Repeat("e", common.LocalLogContentLimit+256)
@@ -147,7 +176,26 @@ func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
 
 	require.NotNil(t, newAPIError)
 	require.NotContains(t, logBuffer.String(), "[truncated")
-	require.Contains(t, logBuffer.String(), body)
+	require.Contains(t, logBuffer.String(), fmt.Sprintf("len=%d", len(body)))
+	require.Contains(t, logBuffer.String(), "hash=")
+	require.NotContains(t, logBuffer.String(), body)
+}
+
+func TestTaskErrorWrapperSanitizesProviderMessage(t *testing.T) {
+	secret := "provider-secret-token"
+	taskErr := TaskErrorWrapper(errors.New(`upstream failed Authorization: Bearer `+secret+` body={"api_key":"`+secret+`"}`), "upstream_failed", http.StatusBadGateway)
+	require.NotContains(t, taskErr.Message, secret)
+	require.Contains(t, taskErr.Message, "Bearer ***")
+	require.Equal(t, http.StatusBadGateway, taskErr.StatusCode)
+}
+
+func TestTaskErrorFromAPIErrorSanitizesMessage(t *testing.T) {
+	secret := "provider-secret-token"
+	apiErr := types.NewOpenAIError(errors.New(`Authorization: Bearer `+secret), types.ErrorCodeDoRequestFailed, http.StatusBadGateway)
+	taskErr := TaskErrorFromAPIError(apiErr)
+	require.NotNil(t, taskErr)
+	require.NotContains(t, taskErr.Message, secret)
+	require.Contains(t, taskErr.Message, "Bearer ***")
 }
 
 func withDebugEnabled(t *testing.T, enabled bool) {

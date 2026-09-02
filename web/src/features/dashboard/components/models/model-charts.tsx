@@ -67,15 +67,19 @@ export function ModelCharts(props: ModelChartsProps) {
   const [activeTab, setActiveTab] = useState<ModelAnalyticsChartTab>(
     props.defaultChartTab ?? 'trend'
   )
+  const [previousDefaultChartTab, setPreviousDefaultChartTab] = useState(
+    props.defaultChartTab
+  )
   const [themeReady, setThemeReady] = useState(false)
   const themeManagerRef = useRef<
     (typeof import('@visactor/vchart'))['ThemeManager'] | null
   >(null)
   const timeGranularity = props.timeGranularity ?? DEFAULT_TIME_GRANULARITY
 
-  useEffect(() => {
+  if (props.defaultChartTab !== previousDefaultChartTab) {
+    setPreviousDefaultChartTab(props.defaultChartTab)
     if (props.defaultChartTab) setActiveTab(props.defaultChartTab)
-  }, [props.defaultChartTab])
+  }
 
   useEffect(() => {
     const updateTheme = async () => {
@@ -119,8 +123,11 @@ export function ModelCharts(props: ModelChartsProps) {
   ].join('-')
 
   return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='flex w-full flex-col gap-1.5 border-b px-3 py-2 sm:gap-3 sm:px-5 sm:py-3 lg:flex-row lg:items-center lg:justify-between'>
+    <section
+      className='bg-card @container/chart overflow-hidden rounded-lg border shadow-xs'
+      aria-label={t('Model Call Analytics')}
+    >
+      <div className='flex w-full flex-col gap-2 border-b px-3 py-2.5 sm:px-4 @2xl/chart:flex-row @2xl/chart:items-center @2xl/chart:justify-between'>
         <div className='flex items-center gap-2'>
           <IconBadge tone='chart-4' size='sm'>
             <PieChartIcon />
@@ -133,7 +140,7 @@ export function ModelCharts(props: ModelChartsProps) {
           </span>
         </div>
 
-        <div className='bg-muted/60 inline-flex h-7 w-full overflow-x-auto rounded-lg border p-0.5 sm:h-8 sm:w-auto'>
+        <div className='bg-muted/60 inline-flex h-8 w-full overflow-x-auto rounded-lg border p-0.5 @2xl/chart:w-auto'>
           {MODEL_ANALYTICS_CHART_OPTIONS.map((tab) => (
             <button
               key={tab.value}
@@ -151,7 +158,7 @@ export function ModelCharts(props: ModelChartsProps) {
         </div>
       </div>
 
-      <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
+      <div className='h-72 p-1.5 sm:h-80 sm:p-2 @5xl/content:h-96'>
         {themeReady && spec && (
           <VChart
             key={chartKey}
@@ -164,6 +171,6 @@ export function ModelCharts(props: ModelChartsProps) {
           />
         )}
       </div>
-    </div>
+    </section>
   )
 }
