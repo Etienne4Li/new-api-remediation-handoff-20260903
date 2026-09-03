@@ -797,7 +797,12 @@ export function PerformancePage() {
   const allDetailsSettled = detailQueries.every(
     (query) => query.isFetched || query.isError
   )
-  const avgLatency = weightedAverage(groups, (group) => group.avgLatencyMs)
+  const totalLatencyMs = groups.reduce((s, g) => s + g.totalLatencyMs, 0)
+  const totalRequests = groups.reduce((s, g) => s + g.requestCount, 0)
+  const avgLatency =
+    totalLatencyMs > 0 && totalRequests > 0
+      ? totalLatencyMs / totalRequests
+      : weightedAverage(groups, (group) => group.avgLatencyMs)
   const successRate = getOverallSuccessRate(groups)
   const cacheHitRate = getWorkspaceCacheHitRate(groups)
   const healthyCount = groups.filter(

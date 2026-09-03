@@ -157,6 +157,53 @@ describe('aggregatePerformanceGroups', () => {
     })
   })
 
+  test('derives exact averages from raw sums when the API provides them', () => {
+    const [group] = aggregatePerformanceGroups([
+      detail('model-a', [
+        {
+          group: 'g',
+          request_count: 1,
+          success_count: 1,
+          total_latency_ms: 1000,
+          ttft_sum_ms: 100,
+          ttft_count: 1,
+          output_tokens: 100,
+          generation_ms: 1000,
+          avg_latency_ms: 1000,
+          avg_ttft_ms: 100,
+          avg_tps: 100,
+          success_rate: 100,
+          series: [],
+        },
+      ]),
+      detail('model-b', [
+        {
+          group: 'g',
+          request_count: 3,
+          success_count: 3,
+          total_latency_ms: 9000,
+          ttft_sum_ms: 0,
+          ttft_count: 0,
+          output_tokens: 300,
+          generation_ms: 3000,
+          avg_latency_ms: 3000,
+          avg_ttft_ms: 0,
+          avg_tps: 100,
+          success_rate: 100,
+          series: [],
+        },
+      ]),
+    ])
+
+    expect(group).toMatchObject({
+      avgLatencyMs: 2500,
+      avgTtftMs: 100,
+      avgTps: 100,
+      requestCount: 4,
+      ttftCount: 1,
+    })
+  })
+
   test('weights cache hit rate by observed input tokens and aggregates token totals', () => {
     const [group] = aggregatePerformanceGroups([
       detail('busy', [
@@ -361,6 +408,11 @@ describe('performance helpers', () => {
           modelNames: ['alpha'],
           requestCount: 90,
           successCount: 90,
+          totalLatencyMs: 0,
+          ttftSumMs: 0,
+          ttftCount: 0,
+          outputTokens: 0,
+          generationMs: 0,
           avgTtftMs: 1,
           avgLatencyMs: 1,
           avgTps: 1,
@@ -376,6 +428,11 @@ describe('performance helpers', () => {
           modelNames: ['beta'],
           requestCount: 10,
           successCount: 0,
+          totalLatencyMs: 0,
+          ttftSumMs: 0,
+          ttftCount: 0,
+          outputTokens: 0,
+          generationMs: 0,
           avgTtftMs: 1,
           avgLatencyMs: 1,
           avgTps: 1,

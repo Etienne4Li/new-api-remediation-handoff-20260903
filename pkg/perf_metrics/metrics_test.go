@@ -168,3 +168,24 @@ func TestRedisCountersReadsCacheFieldsAndKeepsOldHashesCompatible(t *testing.T) 
 	assert.Equal(t, int64(750), current.cacheReadTokens)
 	assert.InDelta(t, 75, cacheHitRate(current), 0.001)
 }
+
+func TestBucketPointCarriesRawSums(t *testing.T) {
+	value := counters{
+		requestCount:   4,
+		successCount:   3,
+		totalLatencyMs: 9000,
+		ttftSumMs:      300,
+		ttftCount:      2,
+		outputTokens:   500,
+		generationMs:   2500,
+	}
+	pt := bucketPoint(0, value)
+	assert.Equal(t, int64(9000), pt.TotalLatencyMs)
+	assert.Equal(t, int64(300), pt.TtftSumMs)
+	assert.Equal(t, int64(2), pt.TtftCount)
+	assert.Equal(t, int64(500), pt.OutputTokens)
+	assert.Equal(t, int64(2500), pt.GenerationMs)
+	assert.Equal(t, int64(150), pt.AvgTtftMs)
+	assert.Equal(t, int64(2250), pt.AvgLatencyMs)
+	assert.InDelta(t, 200, pt.AvgTps, 0.001)
+}

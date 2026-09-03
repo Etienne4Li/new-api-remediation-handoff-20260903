@@ -41,6 +41,11 @@ export type AggregatedPerformanceGroup = {
   ratio?: number | string
   requestCount: number
   successCount: number
+  totalLatencyMs: number
+  ttftSumMs: number
+  ttftCount: number
+  outputTokens: number
+  generationMs: number
   avgTtftMs: number
   avgLatencyMs: number
   avgTps: number
@@ -77,6 +82,11 @@ type GroupAccumulator = MetricAccumulator & {
   modelNames: Set<string>
   requestCount: number
   successCount: number
+  totalLatencyMs: number
+  ttftSumMs: number
+  ttftCount: number
+  outputTokens: number
+  generationMs: number
   inputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
@@ -202,6 +212,11 @@ export function aggregatePerformanceGroups(
         modelNames: new Set<string>(),
         requestCount: 0,
         successCount: 0,
+        totalLatencyMs: 0,
+        ttftSumMs: 0,
+        ttftCount: 0,
+        outputTokens: 0,
+        generationMs: 0,
         inputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
@@ -243,6 +258,26 @@ export function aggregatePerformanceGroups(
       if (hasCounts) {
         accumulator.requestCount += requestCount
         accumulator.successCount += successCount
+        const totalLatencyMs = Number(group.total_latency_ms)
+        const ttftSumMs = Number(group.ttft_sum_ms)
+        const ttftCount = Number(group.ttft_count)
+        const outputTokens = Number(group.output_tokens)
+        const generationMs = Number(group.generation_ms)
+        if (Number.isFinite(totalLatencyMs) && totalLatencyMs >= 0) {
+          accumulator.totalLatencyMs += totalLatencyMs
+        }
+        if (Number.isFinite(ttftSumMs) && ttftSumMs >= 0) {
+          accumulator.ttftSumMs += ttftSumMs
+        }
+        if (Number.isFinite(ttftCount) && ttftCount >= 0) {
+          accumulator.ttftCount += ttftCount
+        }
+        if (Number.isFinite(outputTokens) && outputTokens >= 0) {
+          accumulator.outputTokens += outputTokens
+        }
+        if (Number.isFinite(generationMs) && generationMs >= 0) {
+          accumulator.generationMs += generationMs
+        }
         const ttft = Number(group.avg_ttft_ms)
         const latency = Number(group.avg_latency_ms)
         const tps = Number(group.avg_tps)
@@ -300,21 +335,35 @@ export function aggregatePerformanceGroups(
       ),
       requestCount: accumulator.requestCount,
       successCount: accumulator.successCount,
-      avgTtftMs: weightedOrAverage(
-        accumulator.ttftWeightedSum,
-        accumulator.ttftWeightedRequests,
-        accumulator.ttft
-      ),
-      avgLatencyMs: weightedOrAverage(
-        accumulator.latencyWeightedSum,
-        accumulator.latencyWeightedRequests,
-        accumulator.latency
-      ),
-      avgTps: weightedOrAverage(
-        accumulator.tpsWeightedSum,
-        accumulator.tpsWeightedRequests,
-        accumulator.tps
-      ),
+      totalLatencyMs: accumulator.totalLatencyMs,
+      ttftSumMs: accumulator.ttftSumMs,
+      ttftCount: accumulator.ttftCount,
+      outputTokens: accumulator.outputTokens,
+      generationMs: accumulator.generationMs,
+      avgTtftMs:
+        accumulator.ttftCount > 0 && accumulator.ttftSumMs > 0
+          ? accumulator.ttftSumMs / accumulator.ttftCount
+          : weightedOrAverage(
+              accumulator.ttftWeightedSum,
+              accumulator.ttftWeightedRequests,
+              accumulator.ttft
+            ),
+      avgLatencyMs:
+        accumulator.requestCount > 0 && accumulator.totalLatencyMs > 0
+          ? accumulator.totalLatencyMs / accumulator.requestCount
+          : weightedOrAverage(
+              accumulator.latencyWeightedSum,
+              accumulator.latencyWeightedRequests,
+              accumulator.latency
+            ),
+      avgTps:
+        accumulator.generationMs > 0 && accumulator.outputTokens > 0
+          ? accumulator.outputTokens / (accumulator.generationMs / 1000)
+          : weightedOrAverage(
+              accumulator.tpsWeightedSum,
+              accumulator.tpsWeightedRequests,
+              accumulator.tps
+            ),
       successRate:
         accumulator.requestCount > 0
           ? (accumulator.successCount / accumulator.requestCount) * 100
@@ -381,6 +430,11 @@ export function mergeConfiguredPerformanceGroups(
       ratio: config.ratio,
       requestCount: 0,
       successCount: 0,
+      totalLatencyMs: 0,
+      ttftSumMs: 0,
+      ttftCount: 0,
+      outputTokens: 0,
+      generationMs: 0,
       avgTtftMs: Number.NaN,
       avgLatencyMs: Number.NaN,
       avgTps: Number.NaN,

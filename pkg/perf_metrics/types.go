@@ -37,6 +37,11 @@ type BucketPoint struct {
 	CacheWriteTokens int64    `json:"cache_write_tokens,omitempty"`
 	CacheRequests    int64    `json:"cache_observed_requests,omitempty"`
 	CacheHitRate     *float64 `json:"cache_hit_rate,omitempty"`
+	TotalLatencyMs   int64    `json:"total_latency_ms"`
+	TtftSumMs        int64    `json:"ttft_sum_ms"`
+	TtftCount        int64    `json:"ttft_count"`
+	OutputTokens     int64    `json:"output_tokens"`
+	GenerationMs     int64    `json:"generation_ms"`
 	AvgTtftMs        int64    `json:"avg_ttft_ms"`
 	AvgLatencyMs     int64    `json:"avg_latency_ms"`
 	SuccessRate      float64  `json:"success_rate"`
@@ -52,6 +57,11 @@ type GroupResult struct {
 	CacheWriteTokens int64         `json:"cache_write_tokens,omitempty"`
 	CacheRequests    int64         `json:"cache_observed_requests,omitempty"`
 	CacheHitRate     *float64      `json:"cache_hit_rate,omitempty"`
+	TotalLatencyMs   int64         `json:"total_latency_ms"`
+	TtftSumMs        int64         `json:"ttft_sum_ms"`
+	TtftCount        int64         `json:"ttft_count"`
+	OutputTokens     int64         `json:"output_tokens"`
+	GenerationMs     int64         `json:"generation_ms"`
 	AvgTtftMs        int64         `json:"avg_ttft_ms"`
 	AvgLatencyMs     int64         `json:"avg_latency_ms"`
 	SuccessRate      float64       `json:"success_rate"`
@@ -67,6 +77,11 @@ type QueryResult struct {
 
 type ModelSummary struct {
 	ModelName          string    `json:"model_name"`
+	TotalLatencyMs     int64     `json:"total_latency_ms"`
+	TtftSumMs          int64     `json:"ttft_sum_ms"`
+	TtftCount          int64     `json:"ttft_count"`
+	OutputTokens       int64     `json:"output_tokens"`
+	GenerationMs       int64     `json:"generation_ms"`
 	AvgTtftMs          int64     `json:"avg_ttft_ms"`
 	AvgLatencyMs       int64     `json:"avg_latency_ms"`
 	SuccessRate        float64   `json:"success_rate"`

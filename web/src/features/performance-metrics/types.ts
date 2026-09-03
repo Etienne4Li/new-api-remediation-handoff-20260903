@@ -25,6 +25,11 @@ export type PerformanceSeriesPoint = {
   cache_write_tokens?: number
   cache_observed_requests?: number
   cache_hit_rate?: number
+  total_latency_ms?: number
+  ttft_sum_ms?: number
+  ttft_count?: number
+  output_tokens?: number
+  generation_ms?: number
   avg_ttft_ms: number
   avg_latency_ms: number
   success_rate: number
@@ -40,6 +45,11 @@ export type PerformanceGroup = {
   cache_write_tokens?: number
   cache_observed_requests?: number
   cache_hit_rate?: number
+  total_latency_ms?: number
+  ttft_sum_ms?: number
+  ttft_count?: number
+  output_tokens?: number
+  generation_ms?: number
   avg_ttft_ms: number
   avg_latency_ms: number
   success_rate: number
@@ -59,6 +69,11 @@ export type PerformanceMetricsData = {
 
 export type PerfModelSummary = {
   model_name: string
+  total_latency_ms?: number
+  ttft_sum_ms?: number
+  ttft_count?: number
+  output_tokens?: number
+  generation_ms?: number
   avg_latency_ms: number
   success_rate: number
   avg_tps: number
