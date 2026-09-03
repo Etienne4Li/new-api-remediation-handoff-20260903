@@ -23,6 +23,8 @@ import {
   getPerformanceStatus,
   getRecentStatusSeries,
   mergeConfiguredPerformanceGroups,
+  orderPerformanceGroups,
+  type AggregatedPerformanceGroup,
   type ModelPerformanceDetail,
 } from '../aggregate'
 
@@ -38,6 +40,33 @@ function detail(
       avg_tps: 16,
     },
     groups,
+  }
+}
+
+function groupFixture(
+  group: string,
+  overrides: Partial<AggregatedPerformanceGroup> = {}
+): AggregatedPerformanceGroup {
+  return {
+    group,
+    modelNames: ['alpha'],
+    requestCount: 0,
+    successCount: 0,
+    totalLatencyMs: 0,
+    ttftSumMs: 0,
+    ttftCount: 0,
+    outputTokens: 0,
+    generationMs: 0,
+    avgTtftMs: Number.NaN,
+    avgLatencyMs: Number.NaN,
+    avgTps: Number.NaN,
+    successRate: Number.NaN,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheHitRate: Number.NaN,
+    series: [],
+    ...overrides,
   }
 }
 
@@ -445,5 +474,57 @@ describe('performance helpers', () => {
         },
       ])
     ).toBe(90)
+  })
+})
+
+describe('orderPerformanceGroups', () => {
+  test('returns the original order for an empty or undefined order list', () => {
+    const groups = [
+      groupFixture('alpha'),
+      groupFixture('beta'),
+      groupFixture('gamma'),
+    ]
+
+    expect(orderPerformanceGroups(groups, [])).toEqual(groups)
+    expect(orderPerformanceGroups(groups, undefined)).toEqual(groups)
+    expect(orderPerformanceGroups(groups, null)).toEqual(groups)
+  })
+
+  test('places listed groups first and keeps unlisted groups in relative order', () => {
+    const groups = [
+      groupFixture('alpha'),
+      groupFixture('beta'),
+      groupFixture('gamma'),
+      groupFixture('delta'),
+    ]
+
+    const ordered = orderPerformanceGroups(groups, ['gamma', 'alpha'])
+
+    expect(ordered.map((group) => group.group)).toEqual([
+      'gamma',
+      'alpha',
+      'beta',
+      'delta',
+    ])
+  })
+
+  test('ignores unknown group names in the order without throwing', () => {
+    const groups = [
+      groupFixture('alpha'),
+      groupFixture('beta'),
+      groupFixture('gamma'),
+    ]
+
+    expect(() =>
+      orderPerformanceGroups(groups, ['unknown', 'beta', 'missing'])
+    ).not.toThrow()
+
+    const ordered = orderPerformanceGroups(groups, ['unknown', 'beta'])
+
+    expect(ordered.map((group) => group.group)).toEqual([
+      'beta',
+      'alpha',
+      'gamma',
+    ])
   })
 })

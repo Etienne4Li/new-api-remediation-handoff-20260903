@@ -91,5 +91,6 @@ export type PerfSummaryAllData = {
   message?: string
   data: {
     models: PerfModelSummary[]
+    group_order?: string[]
   }
 }

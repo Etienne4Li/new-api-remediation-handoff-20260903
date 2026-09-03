@@ -14,20 +14,30 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
-import { useQueries, useQuery } from '@tanstack/react-query'
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import {
   Activity,
   AlertTriangle,
+  ArrowUpDown,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleDashed,
   Database,
   Gauge,
+  GripVertical,
   HeartPulse,
   RefreshCw,
   Timer,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   StaticDataTable,
@@ -54,6 +64,7 @@ import { Switch } from '@/components/ui/switch'
 import {
   getPerfMetrics,
   getPerfMetricsSummary,
+  updatePerfGroupOrder,
 } from '@/features/performance-metrics/api'
 import {
   formatLatency,
@@ -64,6 +75,7 @@ import {
 import type { PerfModelSummary } from '@/features/performance-metrics/types'
 import { getUserGroups } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import {
   aggregatePerformanceGroups,
@@ -73,6 +85,7 @@ import {
   getPerformanceStatus,
   getRecentStatusSeries,
   mergeConfiguredPerformanceGroups,
+  orderPerformanceGroups,
   type AggregatedPerformanceGroup,
   type ModelPerformanceDetail,
   type PerformanceGroupConfig,
@@ -112,20 +125,14 @@ function formatCount(value: number | undefined): string {
   return Intl.NumberFormat().format(value)
 }
 
-function formatCacheHitRate(
-  value: number,
-  unavailableLabel: string
-): string {
+function formatCacheHitRate(value: number, unavailableLabel: string): string {
   return Number.isFinite(value) ? formatUptimePct(value) : unavailableLabel
 }
 
 function getWorkspaceCacheHitRate(
   groups: AggregatedPerformanceGroup[]
 ): number {
-  const inputTokens = groups.reduce(
-    (sum, group) => sum + group.inputTokens,
-    0
-  )
+  const inputTokens = groups.reduce((sum, group) => sum + group.inputTokens, 0)
   if (inputTokens <= 0) return Number.NaN
   const cacheReadTokens = groups.reduce(
     (sum, group) => sum + group.cacheReadTokens,
@@ -276,6 +283,12 @@ function StatusSegments(props: {
 function PerformanceGroupCard(props: {
   group: AggregatedPerformanceGroup
   onOpen: () => void
+  reorder?: {
+    onMoveUp?: () => void
+    onMoveDown?: () => void
+    onDragStart: () => void
+    onDrop: () => void
+  }
 }) {
   const { t } = useTranslation()
   const status = getPerformanceStatus(
@@ -285,100 +298,161 @@ function PerformanceGroupCard(props: {
   const colors = statusClasses(status)
   const ratio = formatGroupRatio(props.group.ratio)
 
-  return (
-    <button
-      type='button'
-      onClick={props.onOpen}
-      className='group bg-card hover:bg-muted/30 focus-visible:ring-ring/50 w-full text-left transition-colors focus-visible:ring-3 focus-visible:outline-none'
-      aria-label={`${t('Open')} ${props.group.group} ${t('Details').toLowerCase()}`}
-      data-testid={`performance-group-${props.group.group}`}
-    >
-      <Card className='group-hover:border-primary/40 h-full rounded-lg shadow-none transition-colors'>
-        <CardHeader className='gap-3 pb-0'>
-          <div className='flex items-start justify-between gap-3'>
-            <div className='min-w-0'>
-              <div className='flex min-w-0 items-center gap-2'>
-                <CardTitle className='min-w-0 truncate font-mono text-sm font-semibold'>
-                  {props.group.group}
-                </CardTitle>
-                {ratio && (
-                  <span className='text-muted-foreground shrink-0 font-mono text-[11px]'>
-                    {ratio}
-                  </span>
-                )}
-              </div>
-              {props.group.description && (
-                <p className='text-muted-foreground mt-1 line-clamp-2 text-xs leading-snug'>
-                  {props.group.description}
-                </p>
+  const baseClassName =
+    'group bg-card hover:bg-muted/30 focus-visible:ring-ring/50 w-full text-left transition-colors focus-visible:ring-3 focus-visible:outline-none'
+
+  const content = (
+    <Card className='group-hover:border-primary/40 h-full rounded-lg shadow-none transition-colors'>
+      <CardHeader className='gap-3 pb-0'>
+        <div className='flex items-start justify-between gap-3'>
+          <div className='min-w-0'>
+            <div className='flex min-w-0 items-center gap-2'>
+              <CardTitle className='min-w-0 truncate font-mono text-sm font-semibold'>
+                {props.group.group}
+              </CardTitle>
+              {ratio && (
+                <span className='text-muted-foreground shrink-0 font-mono text-[11px]'>
+                  {ratio}
+                </span>
               )}
-              <div className='text-muted-foreground mt-1 flex items-center gap-1.5 text-xs'>
-                <span
-                  className={cn('size-1.5 rounded-full', colors.dot)}
-                  aria-hidden='true'
-                />
-                <span className={cn('truncate', colors.text)}>
-                  {statusLabel(t, status)}
-                </span>
-                <span className='text-muted-foreground/60'>·</span>
-                <span className='shrink-0'>
-                  {props.group.modelNames.length > 0
-                    ? `${props.group.modelNames.length} ${t('Models')}`
-                    : t('No data')}
-                </span>
-                {props.group.requestCount > 0 && (
-                  <>
-                    <span className='text-muted-foreground/60'>·</span>
-                    <span className='shrink-0'>
-                      {formatCount(props.group.requestCount)}{' '}
-                      {t('Requests')}
-                    </span>
-                  </>
-                )}
-              </div>
             </div>
+            {props.group.description && (
+              <p className='text-muted-foreground mt-1 line-clamp-2 text-xs leading-snug'>
+                {props.group.description}
+              </p>
+            )}
+            <div className='text-muted-foreground mt-1 flex items-center gap-1.5 text-xs'>
+              <span
+                className={cn('size-1.5 rounded-full', colors.dot)}
+                aria-hidden='true'
+              />
+              <span className={cn('truncate', colors.text)}>
+                {statusLabel(t, status)}
+              </span>
+              <span className='text-muted-foreground/60'>·</span>
+              <span className='shrink-0'>
+                {props.group.modelNames.length > 0
+                  ? `${props.group.modelNames.length} ${t('Models')}`
+                  : t('No data')}
+              </span>
+              {props.group.requestCount > 0 && (
+                <>
+                  <span className='text-muted-foreground/60'>·</span>
+                  <span className='shrink-0'>
+                    {formatCount(props.group.requestCount)} {t('Requests')}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+          {props.reorder ? (
+            <div
+              className='flex shrink-0 items-center gap-0.5'
+              onClick={(e) => e.stopPropagation()}
+            >
+              <GripVertical
+                className='text-muted-foreground/60 size-4'
+                aria-hidden='true'
+              />
+              <button
+                type='button'
+                aria-label={t('Move up')}
+                disabled={!props.reorder.onMoveUp}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  props.reorder?.onMoveUp?.()
+                }}
+                className='text-muted-foreground/60 hover:text-foreground disabled:text-muted-foreground/30 focus-visible:ring-ring/50 inline-flex size-6 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none'
+              >
+                <ChevronUp className='size-3.5' aria-hidden='true' />
+              </button>
+              <button
+                type='button'
+                aria-label={t('Move down')}
+                disabled={!props.reorder.onMoveDown}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  props.reorder?.onMoveDown?.()
+                }}
+                className='text-muted-foreground/60 hover:text-foreground disabled:text-muted-foreground/30 focus-visible:ring-ring/50 inline-flex size-6 items-center justify-center rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none'
+              >
+                <ChevronDown className='size-3.5' aria-hidden='true' />
+              </button>
+            </div>
+          ) : (
             <ChevronRight
               className='text-muted-foreground/60 mt-0.5 size-4 shrink-0'
               aria-hidden='true'
             />
-          </div>
-          <StatusSegments group={props.group} fallback={status} />
-        </CardHeader>
-        <CardContent className='grid grid-cols-2 gap-x-4 gap-y-3 pt-0'>
-          <MetricValue
-            label={t('Success rate')}
-            value={formatUptimePct(props.group.successRate)}
-            tone={getSuccessRateTextClass(props.group.successRate)}
-          />
-          <MetricValue
-            label={t('Average latency')}
-            value={formatLatency(props.group.avgLatencyMs)}
-          />
-          <MetricValue
-            label={t('Average TTFT')}
-            value={formatLatency(props.group.avgTtftMs)}
-          />
-          <MetricValue
-            label={t('Throughput')}
-            value={formatThroughput(props.group.avgTps)}
-          />
-          <MetricValue
-            label={t('Hit Rate')}
-            value={formatCacheHitRate(
-              props.group.cacheHitRate,
-              t('Not available')
-            )}
-          />
-          <MetricValue
-            label={t('Input Tokens')}
-            value={formatCount(
-              props.group.inputTokens > 0
-                ? props.group.inputTokens
-                : undefined
-            )}
-          />
-        </CardContent>
-      </Card>
+          )}
+        </div>
+        <StatusSegments group={props.group} fallback={status} />
+      </CardHeader>
+      <CardContent className='grid grid-cols-2 gap-x-4 gap-y-3 pt-0'>
+        <MetricValue
+          label={t('Success rate')}
+          value={formatUptimePct(props.group.successRate)}
+          tone={getSuccessRateTextClass(props.group.successRate)}
+        />
+        <MetricValue
+          label={t('Average latency')}
+          value={formatLatency(props.group.avgLatencyMs)}
+        />
+        <MetricValue
+          label={t('Average TTFT')}
+          value={formatLatency(props.group.avgTtftMs)}
+        />
+        <MetricValue
+          label={t('Throughput')}
+          value={formatThroughput(props.group.avgTps)}
+        />
+        <MetricValue
+          label={t('Hit Rate')}
+          value={formatCacheHitRate(
+            props.group.cacheHitRate,
+            t('Not available')
+          )}
+        />
+        <MetricValue
+          label={t('Input Tokens')}
+          value={formatCount(
+            props.group.inputTokens > 0 ? props.group.inputTokens : undefined
+          )}
+        />
+      </CardContent>
+    </Card>
+  )
+
+  if (props.reorder) {
+    // In reorder mode the card hosts its own buttons, so the wrapper must not
+    // be a <button> (nested interactive elements are invalid HTML).
+    const reorder = props.reorder
+    return (
+      <div
+        data-testid={`performance-group-${props.group.group}`}
+        draggable
+        onDragStart={reorder.onDragStart}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault()
+          reorder.onDrop()
+        }}
+        className={cn(baseClassName, 'cursor-grab')}
+      >
+        {content}
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type='button'
+      onClick={props.onOpen}
+      aria-label={`${t('Open')} ${props.group.group} ${t('Details').toLowerCase()}`}
+      data-testid={`performance-group-${props.group.group}`}
+      className={baseClassName}
+    >
+      {content}
     </button>
   )
 }
@@ -661,7 +735,8 @@ function GroupDetailsSheet(props: {
                             staticDataTableClassNames.compactHeaderCellRight,
                           cellClassName:
                             staticDataTableClassNames.compactMutedNumericCell,
-                          cell: (row) => formatCount(row.group.cache_read_tokens),
+                          cell: (row) =>
+                            formatCount(row.group.cache_read_tokens),
                         },
                         {
                           id: 'cache-write',
@@ -720,12 +795,16 @@ function GroupDetailsSheet(props: {
 
 export function PerformancePage() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const [hours, setHours] = useState<WindowHours>(24)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [selectedGroupName, setSelectedGroupName] = useState<string | null>(
     null
   )
+  const [reorderMode, setReorderMode] = useState(false)
+  const [draftOrder, setDraftOrder] = useState<string[] | null>(null)
+  const draggingGroup = useRef<string | null>(null)
 
   const summaryQuery = useQuery({
     queryKey: ['perf-metrics-summary', hours],
@@ -827,19 +906,75 @@ export function PerformancePage() {
     }
     return counts
   }, [groups])
+  const savedOrder = useMemo(
+    () => summaryQuery.data?.data?.group_order ?? [],
+    [summaryQuery.data]
+  )
+  const userRole = useAuthStore((s) => s.auth.user?.role) ?? 0
+  const canReorder = userRole >= 100
+  const orderedGroups = useMemo(
+    () => orderPerformanceGroups(groups, draftOrder ?? savedOrder),
+    [groups, draftOrder, savedOrder]
+  )
   const visibleGroups = useMemo(
     () =>
       statusFilter === 'all'
-        ? groups
-        : groups.filter(
+        ? orderedGroups
+        : orderedGroups.filter(
             (group) =>
               getPerformanceStatus(
                 group.successRate,
                 group.modelNames.length > 0
               ) === statusFilter
           ),
-    [groups, statusFilter]
+    [orderedGroups, statusFilter]
   )
+
+  function moveGroup(name: string, direction: -1 | 1) {
+    const current = orderedGroups.map((group) => group.group)
+    const index = current.indexOf(name)
+    if (index < 0) return
+    const target = index + direction
+    if (target < 0 || target >= current.length) return
+    const next = [...current]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    setDraftOrder(next)
+  }
+
+  function dropGroup(from: string, to: string) {
+    if (from === to) return
+    const current = orderedGroups.map((group) => group.group)
+    const next = current.filter((name) => name !== from)
+    const toIndex = next.indexOf(to)
+    if (toIndex < 0) {
+      next.push(from)
+    } else {
+      next.splice(toIndex, 0, from)
+    }
+    setDraftOrder(next)
+  }
+
+  function cancelReorder() {
+    setDraftOrder(null)
+    setReorderMode(false)
+  }
+
+  const saveOrder = useMutation({
+    mutationFn: (order: string[]) => updatePerfGroupOrder(order),
+    onSuccess: (data) => {
+      if (!data.success) {
+        toast.error(data.message || t('Failed to save card order'))
+        return
+      }
+      toast.success(t('Card order saved'))
+      setDraftOrder(null)
+      setReorderMode(false)
+      void queryClient.invalidateQueries({ queryKey: ['perf-metrics-summary'] })
+    },
+    onError: () => toast.error(t('Failed to save card order')),
+  })
+
+  const resetOrder = () => saveOrder.mutate([])
 
   function refresh() {
     void summaryQuery.refetch()
@@ -891,15 +1026,46 @@ export function PerformancePage() {
       )
     } else {
       groupsContent = (
-        <div className='grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'>
-          {visibleGroups.map((group) => (
-            <PerformanceGroupCard
-              key={group.group}
-              group={group}
-              onOpen={() => setSelectedGroupName(group.group)}
-            />
-          ))}
-        </div>
+        <>
+          {reorderMode && (
+            <p className='text-muted-foreground text-xs'>
+              {t('Drag cards or use the arrows to reorder')}
+            </p>
+          )}
+          <div className='grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'>
+            {visibleGroups.map((group) => (
+              <PerformanceGroupCard
+                key={group.group}
+                group={group}
+                onOpen={() => setSelectedGroupName(group.group)}
+                reorder={
+                  reorderMode
+                    ? {
+                        onMoveUp:
+                          orderedGroups[0]?.group !== group.group
+                            ? () => moveGroup(group.group, -1)
+                            : undefined,
+                        onMoveDown:
+                          orderedGroups.at(-1)?.group !== group.group
+                            ? () => moveGroup(group.group, 1)
+                            : undefined,
+                        onDragStart: () => {
+                          draggingGroup.current = group.group
+                        },
+                        onDrop: () => {
+                          const from = draggingGroup.current
+                          draggingGroup.current = null
+                          if (from && from !== group.group) {
+                            dropGroup(from, group.group)
+                          }
+                        },
+                      }
+                    : undefined
+                }
+              />
+            ))}
+          </div>
+        </>
       )
     }
 
@@ -940,10 +1106,7 @@ export function PerformancePage() {
           <SummaryMetric
             icon={Database}
             label={t('Hit Rate')}
-            value={formatCacheHitRate(
-              cacheHitRate,
-              t('Not available')
-            )}
+            value={formatCacheHitRate(cacheHitRate, t('Not available'))}
           />
         </div>
 
@@ -1048,6 +1211,49 @@ export function PerformancePage() {
                 aria-hidden='true'
               />
             </Button>
+            {canReorder && !reorderMode && (
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                onClick={() => setReorderMode(true)}
+              >
+                <ArrowUpDown aria-hidden='true' />
+                {t('Arrange cards')}
+              </Button>
+            )}
+            {canReorder && reorderMode && (
+              <>
+                <Button
+                  type='button'
+                  size='sm'
+                  onClick={() =>
+                    saveOrder.mutate(orderedGroups.map((g) => g.group))
+                  }
+                  disabled={saveOrder.isPending || draftOrder === null}
+                >
+                  {t('Save order')}
+                </Button>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={resetOrder}
+                  disabled={saveOrder.isPending}
+                >
+                  {t('Reset to default order')}
+                </Button>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={cancelReorder}
+                  disabled={saveOrder.isPending}
+                >
+                  {t('Cancel')}
+                </Button>
+              </>
+            )}
           </div>
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>

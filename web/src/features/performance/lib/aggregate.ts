@@ -510,3 +510,26 @@ export function getModelGroupRows(
     a.summary.model_name.localeCompare(b.summary.model_name)
   )
 }
+
+export function orderPerformanceGroups(
+  groups: AggregatedPerformanceGroup[],
+  order: readonly string[] | null | undefined
+): AggregatedPerformanceGroup[] {
+  if (!order || order.length === 0) return groups
+  const rank = new Map<string, number>()
+  order.forEach((name, index) => {
+    const key = name?.trim()
+    if (key && !rank.has(key)) rank.set(key, index)
+  })
+  return groups
+    .map((group, index) => ({ group, index }))
+    .sort((a, b) => {
+      const ra = rank.get(a.group.group)
+      const rb = rank.get(b.group.group)
+      if (ra !== undefined && rb !== undefined) return ra - rb
+      if (ra !== undefined) return -1
+      if (rb !== undefined) return 1
+      return a.index - b.index
+    })
+    .map((entry) => entry.group)
+}

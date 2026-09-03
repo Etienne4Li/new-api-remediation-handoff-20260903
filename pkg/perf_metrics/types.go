@@ -96,7 +96,8 @@ type ModelSummary struct {
 }
 
 type SummaryAllResult struct {
-	Models []ModelSummary `json:"models"`
+	Models     []ModelSummary `json:"models"`
+	GroupOrder []string       `json:"group_order"`
 }
 
 type bucketKey struct {

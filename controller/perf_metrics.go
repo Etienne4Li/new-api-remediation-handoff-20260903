@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
+	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
@@ -28,6 +29,7 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		})
 		return
 	}
+	result.GroupOrder = perf_metrics_setting.GetGroupOrder()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

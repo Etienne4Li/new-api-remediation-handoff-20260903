@@ -47,3 +47,11 @@ export async function getPerfMetrics(
   })
   return res.data
 }
+
+export async function updatePerfGroupOrder(order: string[]) {
+  const res = await api.put<{ success: boolean; message?: string }>(
+    '/api/option/',
+    { key: 'perf_metrics_setting.group_order', value: JSON.stringify(order) }
+  )
+  return res.data
+}
