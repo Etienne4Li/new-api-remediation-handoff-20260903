@@ -272,12 +272,14 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	}
 }
 
-// TokenAuthReadOnly 宽松版本的令牌认证中间件，用于只读查询接口。
-// 只验证令牌 key 是否存在，不检查令牌状态、过期时间和额度。
-// 即使令牌已过期、已耗尽或已禁用，也允许访问。
-// 仍然检查用户是否被封禁。
+// TokenAuthReadOnly 只读令牌认证中间件，用于余额、用量、日志等查询接口。
+// 已耗尽的令牌仍可查询自己的用量；过期（按状态或按截止时间）、已停用或其他
+// 非启用状态的令牌、被封禁的用户、不在 IP 白名单内的来源一律拒绝，
+// 安全边界与 TokenAuth 保持一致。这些接口返回账户相关数据，禁止被缓存。
 func TokenAuthReadOnly() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store, private, max-age=0")
+		c.Header("Pragma", "no-cache")
 		key := c.Request.Header.Get("Authorization")
 		if key == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -293,8 +295,18 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		key = strings.TrimPrefix(key, "sk-")
 		parts := strings.Split(key, "-")
 		key = parts[0]
+		if key == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgTokenInvalid),
+			})
+			c.Abort()
+			return
+		}
 
-		token, err := model.GetTokenByKey(key, false)
+		// 读取权威的数据库行而不是 Redis 快照：刚被停用或刚过期的令牌
+		// 不能在缓存 TTL 内继续通过只读接口查询账户数据。
+		token, err := model.GetTokenByKey(key, true)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -312,15 +324,30 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
-		// TokenAuthReadOnly must keep allowing other token states to query read-only
-		// data, such as token usage logs; only explicitly disabled tokens are denied.
-		if token.Status == common.TokenStatusDisabled {
+		// 只放行"启用"和"已耗尽"两种状态（耗尽的令牌需要能查自己的用量），
+		// 其余状态一律拒绝。这里用白名单而不是黑名单：状态为 0 或未知值的
+		// 旧数据行不应被默认放行。过期时间独立判断，不依赖状态列是否已被刷新。
+		if (token.Status != common.TokenStatusEnabled && token.Status != common.TokenStatusExhausted) ||
+			(token.ExpiredTime != -1 && token.ExpiredTime < common.GetTimestamp()) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgTokenStatusUnavailable),
 			})
 			c.Abort()
 			return
+		}
+
+		// IP 白名单与 TokenAuth 同一规则。
+		if allowIps := token.GetIpLimits(); len(allowIps) > 0 {
+			ip := net.ParseIP(c.ClientIP())
+			if ip == nil || !common.IsIpInCIDRList(ip, allowIps) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": "您的 IP 不在令牌允许访问的列表中",
+				})
+				c.Abort()
+				return
+			}
 		}
 
 		userCache, err := model.GetUserCache(token.UserId)
