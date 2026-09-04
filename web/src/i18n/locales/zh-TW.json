@@ -3448,6 +3448,8 @@
     "Pick a date": "選擇日期",
     "Pick or create both a store and a product before saving.": "儲存前請同時選擇或建立店鋪和產品。",
     "Ping Interval (seconds)": "Ping 間隔（秒）",
+    "Hide Upstream Error Details": "隱藏上游錯誤詳情",
+    "Replace upstream 401/402/403/429/5xx error messages with generic text for API callers. Full details stay in error logs for root.": "對 API 呼叫方把上游 401/402/403/429/5xx 的錯誤原文替換為通用提示；完整資訊仍記錄在錯誤日誌中供 root 檢視。",
     "Plan": "套餐",
     "Plan Name": "套餐名稱",
     "Plan Price": "套餐價格",

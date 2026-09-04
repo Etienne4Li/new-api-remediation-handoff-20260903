@@ -3448,6 +3448,8 @@
     "Pick a date": "Pick a date",
     "Pick or create both a store and a product before saving.": "Pick or create both a store and a product before saving.",
     "Ping Interval (seconds)": "Ping Interval (seconds)",
+    "Hide Upstream Error Details": "Hide Upstream Error Details",
+    "Replace upstream 401/402/403/429/5xx error messages with generic text for API callers. Full details stay in error logs for root.": "Replace upstream 401/402/403/429/5xx error messages with generic text for API callers. Full details stay in error logs for root.",
     "Plan": "Plan",
     "Plan Name": "Plan Name",
     "Plan Price": "Plan Price",

@@ -96,6 +96,7 @@ const schema = z.object({
   general_setting: z.object({
     ping_interval_enabled: z.boolean(),
     ping_interval_seconds: z.coerce.number().min(1),
+    hide_upstream_error_details: z.boolean(),
   }),
 })
 
@@ -108,6 +109,7 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'general_setting.hide_upstream_error_details': boolean
 }
 
 const flattenGlobalValues = (
@@ -127,6 +129,8 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'general_setting.hide_upstream_error_details':
+    values.general_setting.hide_upstream_error_details,
 })
 
 function normalizeJsonText(value: string, fallback: string) {
@@ -371,6 +375,29 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                 </FormDescription>
                 <FormMessage />
               </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='general_setting.hide_upstream_error_details'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Hide Upstream Error Details')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Replace upstream 401/402/403/429/5xx error messages with generic text for API callers. Full details stay in error logs for root.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
             )}
           />
         </SettingsForm>
