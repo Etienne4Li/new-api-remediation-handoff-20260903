@@ -48,7 +48,10 @@ async function fetchLogs<T>(
     page_size: paramRecord.page_size || 20,
     ...params,
   })
-  const path = buildApiPath(endpoint, isAdmin)
+  // The admin list route is registered as the group root (`/api/log/`).
+  // Request it with the trailing slash so the backend does not answer with a
+  // 301 redirect that costs an extra round trip through the edge on every page.
+  const path = isAdmin ? `${endpoint}/` : buildApiPath(endpoint, isAdmin)
   const res = await api.get(`${path}?${queryParams}`)
   return res.data
 }
