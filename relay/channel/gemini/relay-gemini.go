@@ -149,6 +149,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var imageCount int
 	var hasBillableUsageMetadata bool
 	responseText := strings.Builder{}
+	toolCallCoalescer := newGeminiToolCallCoalescer()
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var geminiResponse dto.GeminiChatResponse
@@ -162,6 +163,18 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 
 		markGeminiGoogleSearchCall(c, &geminiResponse)
+
+		// Some upstreams split one functionCall across several parts (name first,
+		// then a nameless args fragment). Usage is still accounted below for every
+		// chunk; only the forwarded content is repaired here.
+		emitChunk, chunkChanged := toolCallCoalescer.process(&geminiResponse)
+		if chunkChanged && emitChunk {
+			if repaired, err := common.Marshal(&geminiResponse); err == nil {
+				data = string(repaired)
+			} else {
+				logger.LogError(c, "gemini tool-call coalescer marshal failed: "+err.Error())
+			}
+		}
 
 		// 统计图片数量
 		for _, candidate := range geminiResponse.Candidates {
@@ -182,10 +195,26 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			hasBillableUsageMetadata = true
 		}
 
+		if !emitChunk {
+			return
+		}
 		if !callback(data, &geminiResponse) {
 			sr.Stop(fmt.Errorf("gemini callback stopped"))
 		}
 	})
+
+	// Release a function call still withheld when upstream closed the stream
+	// without a finishReason.
+	if tail := toolCallCoalescer.flush(); tail != nil {
+		if tailData, err := common.Marshal(tail); err == nil {
+			callback(string(tailData), tail)
+		} else {
+			logger.LogError(c, "gemini tool-call coalescer flush marshal failed: "+err.Error())
+		}
+	}
+	if toolCallCoalescer.Repaired {
+		logger.LogInfo(c, "gemini upstream streamed fragmented functionCall parts; merged into complete tool calls")
+	}
 
 	if !hasBillableUsageMetadata {
 		if info.ReceivedResponseCount > 0 {
