@@ -218,6 +218,19 @@ var (
 	CriticalRateLimitNum            = 20
 	CriticalRateLimitDuration int64 = 20 * 60
 
+	// Session maintenance (/api/user/auth/refresh, /auth/logout): called by
+	// every signed-in browser on each page load, so it gets its own per-IP
+	// window instead of sharing the anonymous critical window with login.
+	AuthSessionRateLimitEnable   bool
+	AuthSessionRateLimitNum            = 120
+	AuthSessionRateLimitDuration int64 = 20 * 60
+
+	// Token-authenticated usage queries (/api/usage/*): polled by client tools
+	// that often share a NAT / proxy egress IP with browsers.
+	UsageQueryRateLimitEnable   bool
+	UsageQueryRateLimitNum            = 120
+	UsageQueryRateLimitDuration int64 = 20 * 60
+
 	UploadRateLimitNum            = 10
 	UploadRateLimitDuration int64 = 60
 

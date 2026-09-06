@@ -67,8 +67,10 @@ func SetApiRouter(router *gin.Engine) {
 
 		userRoute := apiRouter.Group("/user")
 		{
-			userRoute.POST("/auth/refresh", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.RefreshAuth)
-			userRoute.POST("/auth/logout", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.AuthLogout)
+			// Session maintenance runs on every page load of every signed-in browser;
+			// keep it out of the anonymous critical window shared with login.
+			userRoute.POST("/auth/refresh", middleware.SessionCookieOriginGuard(), middleware.AuthSessionRateLimit(), middleware.DisableCache(), controller.RefreshAuth)
+			userRoute.POST("/auth/logout", middleware.SessionCookieOriginGuard(), middleware.AuthSessionRateLimit(), middleware.DisableCache(), controller.AuthLogout)
 			userRoute.POST("/register", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Register)
 			userRoute.POST("/login", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, middleware.TurnstileCheck(), controller.Login)
 			userRoute.POST("/login/2fa", middleware.CriticalRateLimit(), middleware.DisableCache(), anonymousRequestBodyLimit, controller.Verify2FALogin)
@@ -249,7 +251,9 @@ func SetApiRouter(router *gin.Engine) {
 		}
 
 		usageRoute := apiRouter.Group("/usage")
-		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
+		// Polled by client tools (e.g. Codex every few minutes); own window so
+		// pollers behind a shared NAT/proxy IP never eat the login budget.
+		usageRoute.Use(middleware.CORS(), middleware.UsageQueryRateLimit())
 		{
 			balanceUsageRoute := usageRoute.Group("/balance")
 			balanceUsageRoute.Use(middleware.TokenAuthReadOnly())

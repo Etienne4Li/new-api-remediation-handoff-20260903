@@ -223,3 +223,63 @@ func TestRedisFailurePolicies(t *testing.T) {
 	assert.Empty(t, userResponse.Body.String())
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", "192.0.2.62:12345").Code)
 }
+
+func TestSessionAndUsageLimitersDoNotShareCriticalWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer, _ := useRateLimitMiniRedis(t)
+
+	previous := []struct {
+		enable *bool
+		num    *int
+		e      bool
+		n      int
+	}{
+		{&common.CriticalRateLimitEnable, &common.CriticalRateLimitNum, common.CriticalRateLimitEnable, common.CriticalRateLimitNum},
+		{&common.AuthSessionRateLimitEnable, &common.AuthSessionRateLimitNum, common.AuthSessionRateLimitEnable, common.AuthSessionRateLimitNum},
+		{&common.UsageQueryRateLimitEnable, &common.UsageQueryRateLimitNum, common.UsageQueryRateLimitEnable, common.UsageQueryRateLimitNum},
+	}
+	t.Cleanup(func() {
+		for _, p := range previous {
+			*p.enable = p.e
+			*p.num = p.n
+		}
+	})
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum = true, 1
+	common.AuthSessionRateLimitEnable, common.AuthSessionRateLimitNum = true, 2
+	common.UsageQueryRateLimitEnable, common.UsageQueryRateLimitNum = true, 2
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	ok := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	router.GET("/login", CriticalRateLimit(), ok)
+	router.GET("/refresh", AuthSessionRateLimit(), ok)
+	router.GET("/usage", UsageQueryRateLimit(), ok)
+
+	remoteAddr := "198.51.100.7:4242"
+	// Exhaust the anonymous critical window first (login).
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/login", remoteAddr).Code)
+	assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/login", remoteAddr).Code)
+
+	// Session refresh and usage polling keep their own budgets from the same IP.
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/refresh", remoteAddr).Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/refresh", remoteAddr).Code)
+	assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/refresh", remoteAddr).Code)
+
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/usage", remoteAddr).Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/usage", remoteAddr).Code)
+	assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/usage", remoteAddr).Code)
+
+	// Three separate counters: exhausting refresh/usage never touched login's.
+	criticalCount, err := redisServer.Get(redisIPRateLimitKey("CT", "198.51.100.7"))
+	require.NoError(t, err)
+	assert.Equal(t, "2", criticalCount)
+	assert.True(t, redisServer.Exists(redisIPRateLimitKey("AS", "198.51.100.7")))
+	assert.True(t, redisServer.Exists(redisIPRateLimitKey("UQ", "198.51.100.7")))
+
+	// Disabling a limiter turns it into a pass-through.
+	common.AuthSessionRateLimitEnable = false
+	router.GET("/refresh-off", AuthSessionRateLimit(), ok)
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/refresh-off", remoteAddr).Code)
+	}
+}

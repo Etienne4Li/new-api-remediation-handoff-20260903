@@ -178,6 +178,32 @@ func CriticalRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+// AuthSessionRateLimit guards session-maintenance endpoints (auth refresh /
+// logout). Every signed-in browser calls them on each page load, so they must
+// not share the anonymous critical window with login: one busy user, or a few
+// users behind one NAT / proxy egress IP, would otherwise lock that IP out of
+// signing in for the rest of the window. Keyed by client IP with its own
+// budget. Configurable via AUTH_SESSION_RATE_LIMIT_ENABLE /
+// AUTH_SESSION_RATE_LIMIT / AUTH_SESSION_RATE_LIMIT_DURATION.
+func AuthSessionRateLimit() func(c *gin.Context) {
+	if common.AuthSessionRateLimitEnable {
+		return rateLimitFactory(common.AuthSessionRateLimitNum, common.AuthSessionRateLimitDuration, "AS")
+	}
+	return defNext
+}
+
+// UsageQueryRateLimit guards the token-authenticated /api/usage/* queries that
+// client tools poll periodically. Keyed by client IP with its own window so
+// pollers never consume the login budget of browsers sharing the same egress
+// IP. Configurable via USAGE_QUERY_RATE_LIMIT_ENABLE / USAGE_QUERY_RATE_LIMIT /
+// USAGE_QUERY_RATE_LIMIT_DURATION.
+func UsageQueryRateLimit() func(c *gin.Context) {
+	if common.UsageQueryRateLimitEnable {
+		return rateLimitFactory(common.UsageQueryRateLimitNum, common.UsageQueryRateLimitDuration, "UQ")
+	}
+	return defNext
+}
+
 func UserCriticalRateLimit(scope string) func(c *gin.Context) {
 	if !common.CriticalRateLimitEnable {
 		return defNext
