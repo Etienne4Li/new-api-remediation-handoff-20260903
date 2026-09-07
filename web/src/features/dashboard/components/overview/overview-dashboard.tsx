@@ -37,10 +37,11 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { motion, useReducedMotion } from 'motion/react'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { SectionPageLayout } from '@/components/layout'
 import {
   CardStaggerContainer,
   CardStaggerItem,
@@ -365,6 +366,8 @@ function CompactQuickAction(props: { action: QuickAction }) {
 
 export function OverviewDashboard() {
   const { t } = useTranslation()
+  const setupGuideId = useId()
+  const setupGuideToggleRef = useRef<HTMLButtonElement>(null)
   const user = useAuthStore((state) => state.auth.user)
   const { items: apiInfoItems, loading: apiInfoLoading } = useApiInfo()
   const {
@@ -542,6 +545,9 @@ export function OverviewDashboard() {
     const nextExpanded = !setupGuideExpanded
     setManualSetupGuideExpanded(nextExpanded)
     saveSetupGuideExpanded(nextExpanded)
+    if (!nextExpanded && setupComplete) {
+      setupGuideToggleRef.current?.focus()
+    }
   }
 
   return (
@@ -673,9 +679,11 @@ export function OverviewDashboard() {
               showUptimePanel &&
               '@5xl/content:grid-cols-[minmax(0,1fr)_22rem]'
           )}
-        >
-          {showLeftContentPanels && (
-            <div
+
+          <SummaryCards />
+
+          {showContentPanels && (
+            <CardStaggerContainer
               className={cn(
                 'grid min-w-0 grid-cols-1 gap-3 sm:gap-4',
                 (showApiInfoPanel || showAnnouncementsPanel || showFAQPanel) &&
@@ -687,30 +695,15 @@ export function OverviewDashboard() {
                   <PerformanceHealthPanel />
                 </CardStaggerItem>
               )}
-              {showApiInfoPanel && (
+              {showUptimePanel && (
                 <CardStaggerItem>
-                  <ApiInfoPanel />
+                  <UptimePanel />
                 </CardStaggerItem>
               )}
-              {showAnnouncementsPanel && (
-                <CardStaggerItem>
-                  <AnnouncementsPanel />
-                </CardStaggerItem>
-              )}
-              {showFAQPanel && (
-                <CardStaggerItem>
-                  <FAQPanel />
-                </CardStaggerItem>
-              )}
-            </div>
+            </CardStaggerContainer>
           )}
-          {showUptimePanel && (
-            <CardStaggerItem>
-              <UptimePanel />
-            </CardStaggerItem>
-          )}
-        </CardStaggerContainer>
-      )}
-    </div>
+        </div>
+      </SectionPageLayout.Content>
+    </SectionPageLayout>
   )
 }

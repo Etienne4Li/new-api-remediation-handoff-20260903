@@ -42,17 +42,17 @@ import { Route as AuthenticatedErrorsErrorRouteImport } from './routes/_authenti
 import { Route as AuthenticatedKeysIndexRouteImport } from './routes/_authenticated/keys/index'
 import { Route as AuthenticatedModelsIndexRouteImport } from './routes/_authenticated/models/index'
 import { Route as AuthenticatedModelsSectionRouteImport } from './routes/_authenticated/models/$section'
-import { Route as AuthenticatedPerformanceIndexRouteImport } from './routes/_authenticated/performance/index'
 import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
 import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
-import { Route as AuthenticatedQuotaRechargeIndexRouteImport } from './routes/_authenticated/quota-recharge/index'
 import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
 import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
 import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
 import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
-import { Route as AuthenticatedTicketsIndexRouteImport } from './routes/_authenticated/tickets/index'
+import { Route as AuthenticatedTaskPluginsIndexRouteImport } from './routes/_authenticated/task-plugins/index'
 import { Route as AuthenticatedUsageLogsIndexRouteImport } from './routes/_authenticated/usage-logs/index'
 import { Route as AuthenticatedUsageLogsSectionRouteImport } from './routes/_authenticated/usage-logs/$section'
+import { Route as AuthenticatedUsageLogsAuditRouteImport } from './routes/_authenticated/usage-logs/audit'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedWalletIndexRouteImport } from './routes/_authenticated/wallet/index'
 import { Route as PricingModelIdIndexRouteImport } from './routes/pricing/$modelId/index'
@@ -241,12 +241,6 @@ const AuthenticatedModelsSectionRoute =
     path: '/models/$section',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedPerformanceIndexRoute =
-  AuthenticatedPerformanceIndexRouteImport.update({
-    id: '/performance/',
-    path: '/performance/',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
 const AuthenticatedPlaygroundIndexRoute =
   AuthenticatedPlaygroundIndexRouteImport.update({
     id: '/playground/',
@@ -259,16 +253,16 @@ const AuthenticatedProfileIndexRoute =
     path: '/profile/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedQuotaRechargeIndexRoute =
-  AuthenticatedQuotaRechargeIndexRouteImport.update({
-    id: '/quota-recharge/',
-    path: '/quota-recharge/',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
 const AuthenticatedRedemptionCodesIndexRoute =
   AuthenticatedRedemptionCodesIndexRouteImport.update({
     id: '/redemption-codes/',
     path: '/redemption-codes/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedSecurityIndexRoute =
+  AuthenticatedSecurityIndexRouteImport.update({
+    id: '/security/',
+    path: '/security/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedSubscriptionsIndexRoute =
@@ -289,10 +283,10 @@ const AuthenticatedSystemSettingsIndexRoute =
     path: '/',
     getParentRoute: () => AuthenticatedSystemSettingsRouteRoute,
   } as any)
-const AuthenticatedTicketsIndexRoute =
-  AuthenticatedTicketsIndexRouteImport.update({
-    id: '/tickets/',
-    path: '/tickets/',
+const AuthenticatedTaskPluginsIndexRoute =
+  AuthenticatedTaskPluginsIndexRouteImport.update({
+    id: '/task-plugins/',
+    path: '/task-plugins/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedUsageLogsIndexRoute =
@@ -305,6 +299,12 @@ const AuthenticatedUsageLogsSectionRoute =
   AuthenticatedUsageLogsSectionRouteImport.update({
     id: '/usage-logs/$section',
     path: '/usage-logs/$section',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedUsageLogsAuditRoute =
+  AuthenticatedUsageLogsAuditRouteImport.update({
+    id: '/usage-logs/audit',
+    path: '/usage-logs/audit',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
@@ -437,19 +437,19 @@ export interface FileRoutesByFullPath {
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+  '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/channels/': typeof AuthenticatedChannelsIndexRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/keys/': typeof AuthenticatedKeysIndexRoute
   '/models/': typeof AuthenticatedModelsIndexRoute
-  '/performance/': typeof AuthenticatedPerformanceIndexRoute
   '/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/profile/': typeof AuthenticatedProfileIndexRoute
-  '/quota-recharge/': typeof AuthenticatedQuotaRechargeIndexRoute
   '/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+  '/security/': typeof AuthenticatedSecurityIndexRoute
   '/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-info/': typeof AuthenticatedSystemInfoIndexRoute
   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
-  '/tickets/': typeof AuthenticatedTicketsIndexRoute
+  '/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
   '/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
   '/users/': typeof AuthenticatedUsersIndexRoute
   '/wallet/': typeof AuthenticatedWalletIndexRoute
@@ -497,19 +497,19 @@ export interface FileRoutesByTo {
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+  '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/channels': typeof AuthenticatedChannelsIndexRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
   '/keys': typeof AuthenticatedKeysIndexRoute
   '/models': typeof AuthenticatedModelsIndexRoute
-  '/performance': typeof AuthenticatedPerformanceIndexRoute
   '/playground': typeof AuthenticatedPlaygroundIndexRoute
   '/profile': typeof AuthenticatedProfileIndexRoute
-  '/quota-recharge': typeof AuthenticatedQuotaRechargeIndexRoute
   '/redemption-codes': typeof AuthenticatedRedemptionCodesIndexRoute
+  '/security': typeof AuthenticatedSecurityIndexRoute
   '/subscriptions': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-info': typeof AuthenticatedSystemInfoIndexRoute
   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
-  '/tickets': typeof AuthenticatedTicketsIndexRoute
+  '/task-plugins': typeof AuthenticatedTaskPluginsIndexRoute
   '/usage-logs': typeof AuthenticatedUsageLogsIndexRoute
   '/users': typeof AuthenticatedUsersIndexRoute
   '/wallet': typeof AuthenticatedWalletIndexRoute
@@ -561,19 +561,19 @@ export interface FileRoutesById {
   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/_authenticated/models/$section': typeof AuthenticatedModelsSectionRoute
   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+  '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
   '/_authenticated/models/': typeof AuthenticatedModelsIndexRoute
-  '/_authenticated/performance/': typeof AuthenticatedPerformanceIndexRoute
   '/_authenticated/playground/': typeof AuthenticatedPlaygroundIndexRoute
   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
-  '/_authenticated/quota-recharge/': typeof AuthenticatedQuotaRechargeIndexRoute
   '/_authenticated/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+  '/_authenticated/security/': typeof AuthenticatedSecurityIndexRoute
   '/_authenticated/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/_authenticated/system-info/': typeof AuthenticatedSystemInfoIndexRoute
   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
-  '/_authenticated/tickets/': typeof AuthenticatedTicketsIndexRoute
+  '/_authenticated/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
   '/_authenticated/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
   '/_authenticated/wallet/': typeof AuthenticatedWalletIndexRoute
@@ -624,19 +624,19 @@ export interface FileRouteTypes {
     | '/errors/$error'
     | '/models/$section'
     | '/usage-logs/$section'
+    | '/usage-logs/audit'
     | '/channels/'
     | '/dashboard/'
     | '/keys/'
     | '/models/'
-    | '/performance/'
     | '/playground/'
     | '/profile/'
-    | '/quota-recharge/'
     | '/redemption-codes/'
+    | '/security/'
     | '/subscriptions/'
     | '/system-info/'
     | '/system-settings/'
-    | '/tickets/'
+    | '/task-plugins/'
     | '/usage-logs/'
     | '/users/'
     | '/wallet/'
@@ -684,19 +684,19 @@ export interface FileRouteTypes {
     | '/errors/$error'
     | '/models/$section'
     | '/usage-logs/$section'
+    | '/usage-logs/audit'
     | '/channels'
     | '/dashboard'
     | '/keys'
     | '/models'
-    | '/performance'
     | '/playground'
     | '/profile'
-    | '/quota-recharge'
     | '/redemption-codes'
+    | '/security'
     | '/subscriptions'
     | '/system-info'
     | '/system-settings'
-    | '/tickets'
+    | '/task-plugins'
     | '/usage-logs'
     | '/users'
     | '/wallet'
@@ -747,19 +747,19 @@ export interface FileRouteTypes {
     | '/_authenticated/errors/$error'
     | '/_authenticated/models/$section'
     | '/_authenticated/usage-logs/$section'
+    | '/_authenticated/usage-logs/audit'
     | '/_authenticated/channels/'
     | '/_authenticated/dashboard/'
     | '/_authenticated/keys/'
     | '/_authenticated/models/'
-    | '/_authenticated/performance/'
     | '/_authenticated/playground/'
     | '/_authenticated/profile/'
-    | '/_authenticated/quota-recharge/'
     | '/_authenticated/redemption-codes/'
+    | '/_authenticated/security/'
     | '/_authenticated/subscriptions/'
     | '/_authenticated/system-info/'
     | '/_authenticated/system-settings/'
-    | '/_authenticated/tickets/'
+    | '/_authenticated/task-plugins/'
     | '/_authenticated/usage-logs/'
     | '/_authenticated/users/'
     | '/_authenticated/wallet/'
@@ -1032,13 +1032,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedModelsSectionRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/performance/': {
-      id: '/_authenticated/performance/'
-      path: '/performance'
-      fullPath: '/performance/'
-      preLoaderRoute: typeof AuthenticatedPerformanceIndexRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/playground/': {
       id: '/_authenticated/playground/'
       path: '/playground'
@@ -1053,18 +1046,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedProfileIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/quota-recharge/': {
-      id: '/_authenticated/quota-recharge/'
-      path: '/quota-recharge'
-      fullPath: '/quota-recharge/'
-      preLoaderRoute: typeof AuthenticatedQuotaRechargeIndexRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/redemption-codes/': {
       id: '/_authenticated/redemption-codes/'
       path: '/redemption-codes'
       fullPath: '/redemption-codes/'
       preLoaderRoute: typeof AuthenticatedRedemptionCodesIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/security/': {
+      id: '/_authenticated/security/'
+      path: '/security'
+      fullPath: '/security/'
+      preLoaderRoute: typeof AuthenticatedSecurityIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/subscriptions/': {
@@ -1088,11 +1081,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSystemSettingsIndexRouteImport
       parentRoute: typeof AuthenticatedSystemSettingsRouteRoute
     }
-    '/_authenticated/tickets/': {
-      id: '/_authenticated/tickets/'
-      path: '/tickets'
-      fullPath: '/tickets/'
-      preLoaderRoute: typeof AuthenticatedTicketsIndexRouteImport
+    '/_authenticated/task-plugins/': {
+      id: '/_authenticated/task-plugins/'
+      path: '/task-plugins'
+      fullPath: '/task-plugins/'
+      preLoaderRoute: typeof AuthenticatedTaskPluginsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/usage-logs/': {
@@ -1107,6 +1100,13 @@ declare module '@tanstack/react-router' {
       path: '/usage-logs/$section'
       fullPath: '/usage-logs/$section'
       preLoaderRoute: typeof AuthenticatedUsageLogsSectionRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/usage-logs/audit': {
+      id: '/_authenticated/usage-logs/audit'
+      path: '/usage-logs/audit'
+      fullPath: '/usage-logs/audit'
+      preLoaderRoute: typeof AuthenticatedUsageLogsAuditRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/users/': {
@@ -1322,18 +1322,18 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
   AuthenticatedModelsSectionRoute: typeof AuthenticatedModelsSectionRoute
   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+  AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
   AuthenticatedModelsIndexRoute: typeof AuthenticatedModelsIndexRoute
-  AuthenticatedPerformanceIndexRoute: typeof AuthenticatedPerformanceIndexRoute
   AuthenticatedPlaygroundIndexRoute: typeof AuthenticatedPlaygroundIndexRoute
   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
-  AuthenticatedQuotaRechargeIndexRoute: typeof AuthenticatedQuotaRechargeIndexRoute
   AuthenticatedRedemptionCodesIndexRoute: typeof AuthenticatedRedemptionCodesIndexRoute
+  AuthenticatedSecurityIndexRoute: typeof AuthenticatedSecurityIndexRoute
   AuthenticatedSubscriptionsIndexRoute: typeof AuthenticatedSubscriptionsIndexRoute
   AuthenticatedSystemInfoIndexRoute: typeof AuthenticatedSystemInfoIndexRoute
-  AuthenticatedTicketsIndexRoute: typeof AuthenticatedTicketsIndexRoute
+  AuthenticatedTaskPluginsIndexRoute: typeof AuthenticatedTaskPluginsIndexRoute
   AuthenticatedUsageLogsIndexRoute: typeof AuthenticatedUsageLogsIndexRoute
   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
   AuthenticatedWalletIndexRoute: typeof AuthenticatedWalletIndexRoute
@@ -1348,19 +1348,19 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
   AuthenticatedModelsSectionRoute: AuthenticatedModelsSectionRoute,
   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+  AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
   AuthenticatedModelsIndexRoute: AuthenticatedModelsIndexRoute,
-  AuthenticatedPerformanceIndexRoute: AuthenticatedPerformanceIndexRoute,
   AuthenticatedPlaygroundIndexRoute: AuthenticatedPlaygroundIndexRoute,
   AuthenticatedProfileIndexRoute: AuthenticatedProfileIndexRoute,
-  AuthenticatedQuotaRechargeIndexRoute: AuthenticatedQuotaRechargeIndexRoute,
   AuthenticatedRedemptionCodesIndexRoute:
     AuthenticatedRedemptionCodesIndexRoute,
+  AuthenticatedSecurityIndexRoute: AuthenticatedSecurityIndexRoute,
   AuthenticatedSubscriptionsIndexRoute: AuthenticatedSubscriptionsIndexRoute,
   AuthenticatedSystemInfoIndexRoute: AuthenticatedSystemInfoIndexRoute,
-  AuthenticatedTicketsIndexRoute: AuthenticatedTicketsIndexRoute,
+  AuthenticatedTaskPluginsIndexRoute: AuthenticatedTaskPluginsIndexRoute,
   AuthenticatedUsageLogsIndexRoute: AuthenticatedUsageLogsIndexRoute,
   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
   AuthenticatedWalletIndexRoute: AuthenticatedWalletIndexRoute,

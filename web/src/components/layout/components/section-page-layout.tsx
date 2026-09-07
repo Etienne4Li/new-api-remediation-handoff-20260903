@@ -66,6 +66,7 @@ export type SectionPageLayoutProps = {
   fixedContent?: boolean
   variant?: 'default' | 'editorial'
   density?: 'default' | 'compact'
+  stackActionsOnMobile?: boolean
 }
 
 export function SectionPageLayout(props: SectionPageLayoutProps) {
@@ -128,7 +129,12 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
               editorial ? 'items-end' : 'items-center'
             )}
           >
-            <div className='min-w-0 flex-1'>
+            <div
+              className={cn(
+                'min-w-0 flex-1',
+                props.stackActionsOnMobile && 'max-sm:basis-full'
+              )}
+            >
               <h2
                 className={cn(
                   'font-sans font-semibold',

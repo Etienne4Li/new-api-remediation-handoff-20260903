@@ -75,24 +75,30 @@ type QueryResult struct {
 	Groups       []GroupResult `json:"groups"`
 }
 
+type SuccessRatePoint struct {
+	Ts          int64   `json:"ts"`
+	SuccessRate float64 `json:"success_rate"`
+}
+
 type ModelSummary struct {
-	ModelName          string    `json:"model_name"`
-	TotalLatencyMs     int64     `json:"total_latency_ms"`
-	TtftSumMs          int64     `json:"ttft_sum_ms"`
-	TtftCount          int64     `json:"ttft_count"`
-	OutputTokens       int64     `json:"output_tokens"`
-	GenerationMs       int64     `json:"generation_ms"`
-	AvgTtftMs          int64     `json:"avg_ttft_ms"`
-	AvgLatencyMs       int64     `json:"avg_latency_ms"`
-	SuccessRate        float64   `json:"success_rate"`
-	AvgTps             float64   `json:"avg_tps"`
-	RecentSuccessRates []float64 `json:"recent_success_rates,omitempty"`
-	RequestCount       int64     `json:"request_count"`
-	InputTokens        int64     `json:"input_tokens,omitempty"`
-	CacheReadTokens    int64     `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens   int64     `json:"cache_write_tokens,omitempty"`
-	CacheRequests      int64     `json:"cache_observed_requests,omitempty"`
-	CacheHitRate       *float64  `json:"cache_hit_rate,omitempty"`
+	ModelName           string             `json:"model_name"`
+	TotalLatencyMs      int64              `json:"total_latency_ms"`
+	TtftSumMs           int64              `json:"ttft_sum_ms"`
+	TtftCount           int64              `json:"ttft_count"`
+	OutputTokens        int64              `json:"output_tokens"`
+	GenerationMs        int64              `json:"generation_ms"`
+	AvgTtftMs           int64              `json:"avg_ttft_ms"`
+	AvgLatencyMs        int64              `json:"avg_latency_ms"`
+	SuccessRate         float64            `json:"success_rate"`
+	AvgTps              float64            `json:"avg_tps"`
+	RecentSuccessRates  []float64          `json:"recent_success_rates,omitempty"`
+	RecentSuccessSeries []SuccessRatePoint `json:"recent_success_series,omitempty"`
+	RequestCount        int64              `json:"request_count"`
+	InputTokens         int64              `json:"input_tokens,omitempty"`
+	CacheReadTokens     int64              `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    int64              `json:"cache_write_tokens,omitempty"`
+	CacheRequests       int64              `json:"cache_observed_requests,omitempty"`
+	CacheHitRate        *float64           `json:"cache_hit_rate,omitempty"`
 }
 
 type SummaryAllResult struct {

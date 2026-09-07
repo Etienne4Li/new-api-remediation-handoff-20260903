@@ -244,25 +244,39 @@ func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName stri
 	modelBuckets[modelName][bucketTs] = current
 }
 
-func recentSuccessRates(buckets map[int64]counters, limit int) []float64 {
-	if len(buckets) == 0 || limit <= 0 {
+func recentSuccessSeries(buckets map[int64]counters) []SuccessRatePoint {
+	if len(buckets) == 0 {
 		return nil
 	}
-	timestamps := make([]int64, 0, len(buckets))
-	for ts := range buckets {
-		timestamps = append(timestamps, ts)
+	hourly := map[int64]counters{}
+	for ts, value := range buckets {
+		hourTs := ts - ts%3600
+		merged := hourly[hourTs]
+		merged.requestCount += value.requestCount
+		merged.successCount += value.successCount
+		hourly[hourTs] = merged
+	}
+	timestamps := make([]int64, 0, len(hourly))
+	for hourTs, value := range hourly {
+		if value.requestCount == 0 {
+			continue
+		}
+		timestamps = append(timestamps, hourTs)
+	}
+	if len(timestamps) == 0 {
+		return nil
 	}
 	sort.Slice(timestamps, func(i, j int) bool {
 		return timestamps[i] < timestamps[j]
 	})
-	if len(timestamps) > limit {
-		timestamps = timestamps[len(timestamps)-limit:]
+	points := make([]SuccessRatePoint, 0, len(timestamps))
+	for _, hourTs := range timestamps {
+		points = append(points, SuccessRatePoint{
+			Ts:          hourTs,
+			SuccessRate: math.Round(successRate(hourly[hourTs])*100) / 100,
+		})
 	}
-	rates := make([]float64, 0, len(timestamps))
-	for _, ts := range timestamps {
-		rates = append(rates, math.Round(successRate(buckets[ts])*100)/100)
-	}
-	return rates
+	return points
 }
 
 func allowedGroupSet(groups []string) map[string]struct{} {
@@ -450,7 +464,9 @@ func modelSummary(name string, total counters, buckets map[int64]counters) Model
 		SuccessRate:        math.Round(successRate(total)*100) / 100,
 		AvgTps:             math.Round(avgTps(total)*100) / 100,
 		RecentSuccessRates: recentSuccessRates(buckets, 3),
-		RequestCount:       total.requestCount,
+		// Upstream (rc.35) renders an hourly success-rate series on the dashboard.
+		RecentSuccessSeries: recentSuccessSeries(buckets),
+		RequestCount:        total.requestCount,
 		InputTokens:        total.inputTokens,
 		CacheReadTokens:    total.cacheReadTokens,
 		CacheWriteTokens:   total.cacheWriteTokens,

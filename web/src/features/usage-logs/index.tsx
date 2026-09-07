@@ -139,8 +139,8 @@ function UsageLogsContent() {
                 <TabsTrigger value='self'>{t('Only Mine')}</TabsTrigger>
               </TabsList>
             </Tabs>
-          </SectionPageLayout.Actions>
-        )}
+          )}
+        </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
           <div className='flex h-full min-h-0 flex-col gap-4'>
             {showTaskSwitcher && (
