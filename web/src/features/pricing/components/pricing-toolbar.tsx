@@ -16,11 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ArrowUpDown, Check, Filter } from 'lucide-react'
-import { useState } from 'react'
+import { ArrowUpDown, Check, Filter, Grid2X2, Table2 } from 'lucide-react'
+import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { DataTableViewModeToggle } from '@/components/data-table'
 import {
   sideDrawerContentClassName,
   sideDrawerFormClassName,
@@ -31,7 +30,6 @@ import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -42,13 +40,29 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-import { getSortLabels, type SortOption, type ViewMode } from '../constants'
+import {
+  VIEW_MODES,
+  getSortLabels,
+  type SortOption,
+  type ViewMode,
+} from '../constants'
 import type { PricingModel, PricingVendor, TokenUnit } from '../types'
 import { PricingSidebar } from './pricing-sidebar'
 import { SearchBar } from './search-bar'
+
+type SegmentOption = {
+  value: string
+  label?: string
+  icon?: React.ComponentType<{ className?: string }>
+  tooltip?: string
+}
 
 export interface PricingToolbarProps {
   filteredCount: number
@@ -139,6 +153,21 @@ export function PricingToolbar(props: PricingToolbarProps) {
   const { t } = useTranslation()
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
   const sortLabels = getSortLabels(t)
+
+  const handleTokenUnitChange = useCallback(
+    (value: string) => props.onTokenUnitChange(value as TokenUnit),
+    [props]
+  )
+
+  const handleViewModeChange = useCallback(
+    (value: string) => props.onViewModeChange(value as ViewMode),
+    [props]
+  )
+
+  const handleRechargePriceChange = useCallback(
+    (value: string) => props.onRechargePriceChange(value === 'recharge'),
+    [props]
+  )
 
   return (
     <section
@@ -232,36 +261,47 @@ export function PricingToolbar(props: PricingToolbarProps) {
               <span>{sortLabels[props.sortBy as SortOption] || t('Sort')}</span>
             </DropdownMenuTrigger>
             <DropdownMenuContent align='end' className='w-44'>
-              <DropdownMenuGroup>
-                {Object.entries(sortLabels).map(([value, label]) => (
-                  <DropdownMenuItem
-                    key={value}
-                    onClick={() => props.onSortChange(value)}
-                    className='gap-2'
-                  >
-                    <Check
-                      className={cn(
-                        'size-4 shrink-0',
-                        props.sortBy === value ? 'opacity-100' : 'opacity-0'
-                      )}
-                    />
-                    {label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuGroup>
+              {Object.entries(sortLabels).map(([value, label]) => (
+                <DropdownMenuItem
+                  key={value}
+                  onClick={() => props.onSortChange(value)}
+                  className='gap-2'
+                >
+                  <Check
+                    className={cn(
+                      'size-4 shrink-0',
+                      props.sortBy === value ? 'opacity-100' : 'opacity-0'
+                    )}
+                  />
+                  {label}
+                </DropdownMenuItem>
+              ))}
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <DataTableViewModeToggle
+          <SegmentedControl
+            options={[
+              {
+                value: VIEW_MODES.CARD,
+                icon: Grid2X2,
+                tooltip: t('Card view'),
+              },
+              {
+                value: VIEW_MODES.TABLE,
+                icon: Table2,
+                tooltip: t('Table view'),
+              },
+            ]}
             value={props.viewMode}
-            onChange={props.onViewModeChange}
+            onChange={handleViewModeChange}
+            ariaLabel={t('View mode')}
           />
         </div>
       </div>
 
       <Sheet open={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
         <SheetContent
-          side='left'
+          side='right'
           className={sideDrawerContentClassName('sm:max-w-md')}
         >
           <SheetHeader className={sideDrawerHeaderClassName()}>

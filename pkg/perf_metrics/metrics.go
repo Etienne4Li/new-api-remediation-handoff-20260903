@@ -244,6 +244,30 @@ func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName stri
 	modelBuckets[modelName][bucketTs] = current
 }
 
+// recentSuccessRates keeps the compact per-bucket success-rate list consumed by
+// the local pricing page badge. Upstream replaced it with recentSuccessSeries;
+// both shapes are emitted so either UI can read them.
+func recentSuccessRates(buckets map[int64]counters, limit int) []float64 {
+	if len(buckets) == 0 || limit <= 0 {
+		return nil
+	}
+	timestamps := make([]int64, 0, len(buckets))
+	for ts := range buckets {
+		timestamps = append(timestamps, ts)
+	}
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i] < timestamps[j]
+	})
+	if len(timestamps) > limit {
+		timestamps = timestamps[len(timestamps)-limit:]
+	}
+	rates := make([]float64, 0, len(timestamps))
+	for _, ts := range timestamps {
+		rates = append(rates, math.Round(successRate(buckets[ts])*100)/100)
+	}
+	return rates
+}
+
 func recentSuccessSeries(buckets map[int64]counters) []SuccessRatePoint {
 	if len(buckets) == 0 {
 		return nil

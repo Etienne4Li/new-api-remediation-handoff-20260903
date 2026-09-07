@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 
 import { VIEW_MODES, type ViewMode } from '../constants'
@@ -66,13 +65,13 @@ export interface LoadingSkeletonProps {
 }
 
 export function LoadingSkeleton(props: LoadingSkeletonProps) {
+  const viewMode = props.viewMode ?? VIEW_MODES.CARD
+
   return (
-    <div aria-busy='true'>
-      <div className='mx-auto mb-5 flex max-w-3xl flex-col items-center pt-5 sm:mb-10 sm:pt-10'>
-        <Skeleton className='h-[clamp(2.3rem,6.325vw,4.025rem)] w-48 max-w-full sm:w-64' />
-        <Skeleton className='mt-3 h-5 w-56 max-w-full sm:mt-4 sm:h-6' />
-        <Skeleton className='mt-2 h-5 w-full max-w-xl' />
-        <Skeleton className='mt-4 h-10 w-full max-w-2xl sm:mt-6' />
+    <div className='space-y-5'>
+      <div className='space-y-1.5'>
+        <Skeleton className='h-8 w-40' />
+        <Skeleton className='h-4 w-52' />
       </div>
       <Skeleton className='h-10 w-full rounded-lg' />
       <FilterBarSkeleton />
