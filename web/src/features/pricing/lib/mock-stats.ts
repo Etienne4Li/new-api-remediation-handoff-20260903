@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { PricingModel } from '../types'
+import { getTaskMatrixDisplayTiers } from './task-matrix-display'
 
 // ----------------------------------------------------------------------------
 // Backend metric shapes
@@ -405,6 +406,137 @@ const VIDEO_PARAMS: SupportedParameter[] = [
   },
 ]
 
+// Per-model request constraints for task-plugin video models that expose a
+// `resolution` usage fact (bblabu relay of Seedance / MiniMax). Resolutions are
+// read from the model's own billing tiers; only the limits the billing
+// expression cannot carry live here.
+type TaskVideoSpec = {
+  durationRange: string
+  ratios: string[]
+  maxImages: number
+  maxVideos: number
+  maxAudios: number
+}
+
+const TASK_VIDEO_SPECS: Record<string, TaskVideoSpec> = {
+  'seedance-2.0': {
+    durationRange: '4 ~ 15',
+    ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'Auto'],
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudios: 3,
+  },
+  'seedance-2.5': {
+    durationRange: '4 ~ 30',
+    ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'Auto'],
+    maxImages: 30,
+    maxVideos: 10,
+    maxAudios: 10,
+  },
+  'minimax-h3': {
+    durationRange: '4 ~ 15',
+    ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'],
+    maxImages: 9,
+    maxVideos: 3,
+    maxAudios: 3,
+  },
+}
+
+export function isTaskVideoModel(model: PricingModel): boolean {
+  return (
+    (model.supported_endpoint_types || []).includes('openai-video') &&
+    Boolean(model.billing_usage_schema?.resolution)
+  )
+}
+
+/** Resolution values priced by this model's own billing expression tiers. */
+export function taskVideoResolutions(model: PricingModel): string[] {
+  const values: string[] = []
+  const tiers = getTaskMatrixDisplayTiers(
+    model.billing_expr,
+    model.billing_usage_schema
+  )
+  for (const tier of tiers ?? []) {
+    for (const condition of tier.conditions) {
+      if (condition.field === 'resolution' && !values.includes(condition.value)) {
+        values.push(condition.value)
+      }
+    }
+  }
+  return values
+}
+
+function buildTaskVideoParameters(model: PricingModel): SupportedParameter[] {
+  const spec = TASK_VIDEO_SPECS[(model.model_name || '').toLowerCase()]
+  const resolutions = taskVideoResolutions(model)
+  const params: SupportedParameter[] = [
+    {
+      name: 'model',
+      type: 'string',
+      required: true,
+      defaultValue: model.model_name || '',
+      descriptionKey: 'Model name, case-sensitive',
+    },
+    {
+      name: 'prompt',
+      type: 'string',
+      required: true,
+      descriptionKey:
+        'Video description; reference assets can be cited in the prompt as @图1, @视频1, @音频1',
+    },
+    {
+      name: 'duration',
+      type: 'integer',
+      required: true,
+      range: spec?.durationRange,
+      descriptionKey: 'Output length in whole seconds; billed per second',
+    },
+    {
+      name: 'resolution',
+      type: 'enum',
+      required: true,
+      enumValues: resolutions.length > 0 ? resolutions : undefined,
+      descriptionKey: 'Output resolution; each value is a separate price tier',
+    },
+    {
+      name: 'ratio',
+      type: 'enum',
+      enumValues: spec?.ratios,
+      descriptionKey: 'Aspect ratio; pass Auto for first/last-frame mode',
+    },
+    {
+      name: 'first_image',
+      type: 'string',
+      descriptionKey: 'Public HTTPS URL of the first frame image',
+    },
+    {
+      name: 'last_image',
+      type: 'string',
+      descriptionKey: 'Public HTTPS URL of the last frame image; requires first_image',
+    },
+    {
+      name: 'referenceImages',
+      type: 'array',
+      range: spec ? `≤ ${spec.maxImages}` : undefined,
+      descriptionKey: 'Public HTTPS URLs of reference images',
+    },
+    {
+      name: 'referenceVideos',
+      type: 'array',
+      range: spec ? `≤ ${spec.maxVideos}` : undefined,
+      descriptionKey:
+        'Public HTTPS URLs of reference videos; each one adds the per-video surcharge shown in the price table',
+    },
+    {
+      name: 'referenceAudios',
+      type: 'array',
+      range: spec ? `≤ ${spec.maxAudios}` : undefined,
+      descriptionKey: 'Public HTTPS URLs of reference audio clips',
+    },
+  ]
+  return params
+}
+
 type ApiCategory = 'reasoning' | 'embedding' | 'image' | 'video' | 'chat'
 
 /**
@@ -414,6 +546,9 @@ type ApiCategory = 'reasoning' | 'embedding' | 'image' | 'video' | 'chat'
  * need to distinguish them so the request-parameter table is accurate.
  */
 function apiCategoryOf(model: PricingModel): ApiCategory {
+  if ((model.supported_endpoint_types || []).includes('openai-video')) {
+    return 'video'
+  }
   const profile = PROFILE_BY_NAME(model.model_name)
   if (profile === 'embedding' || profile === 'reasoning') return profile
   if (profile === 'image') {
@@ -436,6 +571,8 @@ export function buildSupportedParameters(
   if (cat === 'reasoning') return REASONING_PARAMS
   if (cat === 'embedding') return EMBEDDING_PARAMS
   if (cat === 'image') return IMAGE_PARAMS
-  if (cat === 'video') return VIDEO_PARAMS
+  if (cat === 'video') {
+    return isTaskVideoModel(model) ? buildTaskVideoParameters(model) : VIDEO_PARAMS
+  }
   return COMMON_CHAT_PARAMS
 }

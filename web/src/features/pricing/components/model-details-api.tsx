@@ -42,6 +42,7 @@ import { useStatus } from '@/hooks/use-status'
 
 import {
   buildSupportedParameters,
+  taskVideoResolutions,
   type SupportedParameter,
 } from '../lib/mock-stats'
 import { replaceModelInPath } from '../lib/model-helpers'
@@ -78,6 +79,93 @@ type SampleContext = {
   modelName: string
   endpointType: string
   endpointPath: string
+  /** First resolution tier priced for this model; used by video samples. */
+  videoResolution?: string
+}
+
+function buildVideoSample(lang: Lang, ctx: SampleContext): string {
+  const createUrl = `${ctx.baseUrl}${ctx.endpointPath}`
+  const body = {
+    model: ctx.modelName,
+    prompt: '电影感产品特写，镜头缓慢环绕，光线自然',
+    duration: 5,
+    resolution: ctx.videoResolution || '720p',
+    ratio: '16:9',
+  }
+  const bodyJson = JSON.stringify(body, null, 2)
+
+  if (lang === 'curl') {
+    return [
+      `# 1) Create the task (returns {"id": "task_xxx", "status": "queued"})`,
+      `curl ${createUrl} \\`,
+      `  -H "Authorization: Bearer <YOUR_API_KEY>" \\`,
+      `  -H "Content-Type: application/json" \\`,
+      `  -d '${bodyJson}'`,
+      ``,
+      `# 2) Poll every 3-5 s until "status" is "completed" (or "failed")`,
+      `curl ${createUrl}/task_xxx \\`,
+      `  -H "Authorization: Bearer <YOUR_API_KEY>"`,
+      ``,
+      `# 3) Download the MP4`,
+      `curl -L ${createUrl}/task_xxx/content \\`,
+      `  -H "Authorization: Bearer <YOUR_API_KEY>" \\`,
+      `  -o video.mp4`,
+    ].join('\n')
+  }
+
+  if (lang === 'python') {
+    return [
+      `import time`,
+      `import requests`,
+      ``,
+      `BASE = "${ctx.baseUrl}"`,
+      `HEADERS = {"Authorization": "Bearer <YOUR_API_KEY>"}`,
+      ``,
+      `# 1) Create the task`,
+      `task = requests.post(f"{BASE}${ctx.endpointPath}", headers=HEADERS, json=${bodyJson.replace(/\n/g, '\n')}).json()`,
+      `task_id = task["id"]`,
+      ``,
+      `# 2) Poll until the task finishes`,
+      `while True:`,
+      `    status = requests.get(f"{BASE}${ctx.endpointPath}/{task_id}", headers=HEADERS).json()`,
+      `    if status["status"] in ("completed", "failed"):`,
+      `        break`,
+      `    time.sleep(5)`,
+      ``,
+      `if status["status"] != "completed":`,
+      `    raise RuntimeError(status.get("error"))`,
+      ``,
+      `# 3) Download the MP4`,
+      `video = requests.get(f"{BASE}${ctx.endpointPath}/{task_id}/content", headers=HEADERS)`,
+      `open("video.mp4", "wb").write(video.content)`,
+    ].join('\n')
+  }
+
+  const isTs = lang === 'typescript'
+  return [
+    `const BASE = "${ctx.baseUrl}";`,
+    `const HEADERS = { Authorization: "Bearer <YOUR_API_KEY>" };`,
+    ``,
+    `// 1) Create the task`,
+    `const created = await fetch(\`\${BASE}${ctx.endpointPath}\`, {`,
+    `  method: "POST",`,
+    `  headers: { ...HEADERS, "Content-Type": "application/json" },`,
+    `  body: JSON.stringify(${bodyJson}),`,
+    `});`,
+    `const { id: taskId }${isTs ? ': { id: string }' : ''} = await created.json();`,
+    ``,
+    `// 2) Poll until the task finishes`,
+    `let status${isTs ? ': { status: string; error?: unknown }' : ''};`,
+    `do {`,
+    `  await new Promise((resolve) => setTimeout(resolve, 5000));`,
+    `  status = await (await fetch(\`\${BASE}${ctx.endpointPath}/\${taskId}\`, { headers: HEADERS })).json();`,
+    `} while (status.status !== "completed" && status.status !== "failed");`,
+    `if (status.status !== "completed") throw new Error(JSON.stringify(status.error));`,
+    ``,
+    `// 3) Download the MP4`,
+    `const video = await fetch(\`\${BASE}${ctx.endpointPath}/\${taskId}/content\`, { headers: HEADERS });`,
+    `const bytes = new Uint8Array(await video.arrayBuffer());`,
+  ].join('\n')
 }
 
 function buildChatSample(lang: Lang, ctx: SampleContext): string {
@@ -432,6 +520,7 @@ function buildSample(
     return buildEmbeddingSample(lang, ctx)
   }
   if (endpointType === 'image-generation') return buildImageSample(lang, ctx)
+  if (endpointType === 'openai-video') return buildVideoSample(lang, ctx)
   return buildChatSample(lang, ctx)
 }
 
@@ -492,6 +581,7 @@ function CodeSamplesSection(props: {
     modelName: props.model.model_name || '',
     endpointType: activeEndpoint.type,
     endpointPath: activeEndpoint.path,
+    videoResolution: taskVideoResolutions(props.model)[0],
   })
 
   return (

@@ -111,7 +111,37 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 	return make([]constant.EndpointType, 0)
 }
 
+// taskPluginEndpointTypes derives the public endpoint types for a model served
+// by a task plugin from the protocols that plugin claims. Task plugin channels
+// have no fixed wire format of their own, so falling through to the generic
+// channel-type mapping would label a video model as a chat endpoint.
+func taskPluginEndpointTypes(modelName string) []constant.EndpointType {
+	generation := jsplugin.DefaultRegistry.Generation()
+	if generation == nil {
+		return nil
+	}
+	plugin, ok := generation.GetByModel(modelName)
+	if !ok || plugin == nil {
+		return nil
+	}
+	endpointTypes := make([]constant.EndpointType, 0, 2)
+	for _, claim := range plugin.Meta.Protocols {
+		switch claim.Name {
+		case "openai_video":
+			endpointTypes = append(endpointTypes, constant.EndpointTypeOpenAIVideo)
+		case "openai_responses":
+			endpointTypes = append(endpointTypes, constant.EndpointTypeOpenAIResponse)
+		}
+	}
+	return endpointTypes
+}
+
 func getPricingEndpointTypesForAbility(ability AbilityWithChannel, advancedCustomConfigs map[int]*dto.AdvancedCustomConfig) []constant.EndpointType {
+	if ability.ChannelType == constant.ChannelTypeTaskPlugin {
+		if endpointTypes := taskPluginEndpointTypes(ability.Model); len(endpointTypes) > 0 {
+			return endpointTypes
+		}
+	}
 	if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
 		return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
 	}
