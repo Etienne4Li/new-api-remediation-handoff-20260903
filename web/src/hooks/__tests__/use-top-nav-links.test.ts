@@ -50,4 +50,39 @@ describe('buildTopNavLinks', () => {
     const links = buildTopNavLinks({ HeaderNavModules: '{"docs":true}' }, false)
     expect(links.some((link) => link.title === 'Docs')).toBe(false)
   })
+
+  test('appends configured custom links after the built-in modules', () => {
+    const status = {
+      HeaderNavModules: '{"home":true,"console":false,"pricing":false,"rankings":false,"docs":false,"about":false}',
+      HeaderNavCustomLinks: JSON.stringify([
+        { title: '生图', href: 'https://im.lietio.com' },
+        { title: 'Status', href: '/status', requireAuth: true },
+      ]),
+    }
+
+    expect(buildTopNavLinks(status, false)).toEqual([
+      { title: 'Home', href: '/' },
+      { title: '生图', href: 'https://im.lietio.com', external: true, requiresAuth: false },
+      { title: 'Status', href: '/status', external: false, requiresAuth: true },
+    ])
+  })
+
+  test('drops malformed or unsafe custom links without breaking the header', () => {
+    const status = {
+      HeaderNavCustomLinks: JSON.stringify([
+        { title: 'ok', href: 'https://example.com' },
+        { title: '', href: 'https://example.com' },
+        { title: 'js', href: 'javascript:alert(1)' },
+        { title: 'proto', href: '//evil.example' },
+        'not-an-object',
+        { title: 'x'.repeat(41), href: '/too-long' },
+      ]),
+    }
+
+    const custom = buildTopNavLinks(status, false).filter((link) => link.external || link.href === '/too-long')
+    expect(custom).toEqual([{ title: 'ok', href: 'https://example.com', external: true, requiresAuth: false }])
+    expect(buildTopNavLinks({ HeaderNavCustomLinks: '{not json' }, false).length).toBe(
+      buildTopNavLinks(null, false).length
+    )
+  })
 })

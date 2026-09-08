@@ -36,6 +36,8 @@ export const STATIC_I18N_KEYS = [
   'Catalog visibility',
 
   // Header navigation
+  'Header custom links',
+  'Save custom links',
   'Home',
   'Manage',
   'Models',

@@ -75,6 +75,68 @@ export function buildTopNavLinks(
     links.push({ title: 'About', href: '/about' })
   }
 
+  links.push(...parseHeaderNavCustomLinks(status?.HeaderNavCustomLinks))
+
+  return links
+}
+
+export type HeaderNavCustomLink = {
+  title: string
+  href: string
+  /** Open in a new tab (default: true for absolute http(s) URLs). */
+  external?: boolean
+  /** Hide the link behind the sign-in prompt until the visitor is signed in. */
+  requireAuth?: boolean
+}
+
+export const MAX_HEADER_NAV_CUSTOM_LINKS = 8
+
+function isSafeHref(href: string): boolean {
+  if (href.startsWith('/') && !href.startsWith('//')) return true
+  try {
+    const url = new URL(href)
+    return url.protocol === 'https:' || url.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Parse the `HeaderNavCustomLinks` option (stringified JSON array) from /api/status
+ * into extra top-nav links, e.g. `[{"title":"生图","href":"https://im.lietio.com"}]`.
+ * Invalid entries are dropped silently so a typo in the admin panel never breaks the header.
+ */
+export function parseHeaderNavCustomLinks(raw: unknown): TopNavLink[] {
+  if (raw === null || raw === undefined) return []
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    if (raw.trim() === '') return []
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(parsed)) return []
+
+  const links: TopNavLink[] = []
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue
+    const entry = item as Record<string, unknown>
+    const title = typeof entry.title === 'string' ? entry.title.trim() : ''
+    const href = typeof entry.href === 'string' ? entry.href.trim() : ''
+    if (!title || !href || title.length > 40 || !isSafeHref(href)) continue
+    const isAbsolute = /^https?:\/\//i.test(href)
+    const external =
+      typeof entry.external === 'boolean' ? entry.external : isAbsolute
+    links.push({
+      title,
+      href,
+      external,
+      requiresAuth: entry.requireAuth === true,
+    })
+    if (links.length >= MAX_HEADER_NAV_CUSTOM_LINKS) break
+  }
   return links
 }
 
