@@ -300,10 +300,6 @@ export function Dashboard() {
   const sectionActions = modelActions ?? flowActions
   const activePresentation = DASHBOARD_SECTION_PRESENTATION[activeSection]
 
-  if (activeSection === 'overview') {
-    return <OverviewDashboard />
-  }
-
   return (
     <SectionPageLayout density='compact'>
       <SectionPageLayout.Title>
@@ -324,26 +320,7 @@ export function Dashboard() {
       </SectionPageLayout.FeatureStrip>
       <SectionPageLayout.Content>
         <div className='space-y-3 sm:space-y-4'>
-          <div className='flex flex-wrap items-center justify-between gap-1.5 sm:gap-2'>
-            {showSectionTabs ? (
-              <Tabs value={activeSection} onValueChange={handleSectionChange}>
-                <TabsList className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'>
-                  {visibleSections.map((section) => (
-                    <TabsTrigger key={section} value={section}>
-                      {t(SECTION_META[section].titleKey)}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-              </Tabs>
-            ) : (
-              <div />
-            )}
-            {sectionActions != null && (
-              <div className='flex shrink-0 flex-wrap items-center gap-1.5 sm:gap-2'>
-                {sectionActions}
-              </div>
-            )}
-          </div>
+          {activeSection === 'overview' && <OverviewDashboard />}
           {activeSection === 'models' && (
             <>
               <FadeIn>
