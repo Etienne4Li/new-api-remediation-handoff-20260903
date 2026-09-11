@@ -22,9 +22,19 @@ interface BrandRevealProps {
   name: string
 }
 
+// Fallbacks only; the real typography (family / weight) is read from the
+// `.home-brand-reveal-word` computed style so CSS stays the single source of
+// truth for both the static layer and the canvas.
+const BRAND_FALLBACK_FONT_FAMILY =
+  '"Lora Variable", Lora, Georgia, "Times New Roman", serif'
+const BRAND_FALLBACK_FONT_WEIGHT = '600'
+// Uppercase tracking, in em. Mirrors `letter-spacing` on the static word.
+const BRAND_TRACKING_EM = 0.08
+
 export function BrandReveal(props: BrandRevealProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const staticRef = useRef<HTMLDivElement>(null)
+  const wordRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -35,6 +45,14 @@ export function BrandReveal(props: BrandRevealProps) {
     const source = document.createElement('canvas')
     const sourceContext = source.getContext('2d')
     if (!sourceContext) return
+
+    const wordStyles = wordRef.current
+      ? getComputedStyle(wordRef.current)
+      : null
+    const fontFamily = wordStyles?.fontFamily || BRAND_FALLBACK_FONT_FAMILY
+    const fontWeight = wordStyles?.fontWeight || BRAND_FALLBACK_FONT_WEIGHT
+    const text = props.name.toUpperCase()
+    let disposed = false
 
     let width = 1
     let height = 1
@@ -59,20 +77,45 @@ export function BrandReveal(props: BrandRevealProps) {
           ? bodyStyles.backgroundColor
           : fixedStyles.backgroundColor
       const foreground = fixedStyles.color || bodyStyles.color
-      const fontSize = Math.min(272, Math.max(80, width * 0.145))
+      let fontSize = Math.min(272, Math.max(80, width * 0.145))
+
+      const applyFont = () => {
+        sourceContext.font = `${fontWeight} ${fontSize}px ${fontFamily}`
+        if ('letterSpacing' in sourceContext) {
+          sourceContext.letterSpacing = `${BRAND_TRACKING_EM * fontSize}px`
+        }
+      }
+
+      applyFont()
+      let metrics = sourceContext.measureText(text)
+      // Long system names (or narrow phones) must not spill past the edges:
+      // shrink until the ink fits inside 92% of the layer width.
+      const maxInkWidth = width * 0.92
+      const inkWidth =
+        metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight
+      if (inkWidth > maxInkWidth) {
+        fontSize = Math.max(32, fontSize * (maxInkWidth / inkWidth))
+        applyFont()
+        metrics = sourceContext.measureText(text)
+      }
 
       sourceContext.clearRect(0, 0, width, height)
       sourceContext.fillStyle = background
       sourceContext.fillRect(0, 0, width, height)
       sourceContext.fillStyle = foreground
-      sourceContext.font = `900 ${fontSize}px "Public Sans", sans-serif`
-      sourceContext.textAlign = 'center'
+      sourceContext.textAlign = 'left'
       sourceContext.textBaseline = 'alphabetic'
-      sourceContext.fillText(
-        props.name.toUpperCase(),
-        width / 2,
-        height + fontSize * 0.02
-      )
+      // Centre the ink box rather than the em box, so the capitals sit
+      // optically in the middle of the layer on both axes (trailing
+      // letter-spacing and font ascent/descent would otherwise bias it).
+      const x =
+        width / 2 -
+        (metrics.actualBoundingBoxRight - metrics.actualBoundingBoxLeft) / 2
+      const y =
+        height / 2 +
+        (metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) /
+          2
+      sourceContext.fillText(text, x, y)
     }
 
     const render = () => {
@@ -196,6 +239,17 @@ export function BrandReveal(props: BrandRevealProps) {
     }
 
     resize()
+    // The serif web font is usually still downloading on first paint; the
+    // canvas would otherwise keep the fallback face forever because the
+    // source is only redrawn on resize. Repaint once the face is available.
+    if (typeof document !== 'undefined' && 'fonts' in document) {
+      document.fonts
+        .load(`${fontWeight} 96px ${fontFamily}`, text)
+        .then(() => {
+          if (!disposed) resize()
+        })
+        .catch(() => {})
+    }
     const resizeObserver = new ResizeObserver(resize)
     resizeObserver.observe(canvas)
     const visibilityObserver = new IntersectionObserver(([entry]) => {
@@ -206,6 +260,7 @@ export function BrandReveal(props: BrandRevealProps) {
     window.addEventListener('pointermove', handlePointerMove, { passive: true })
 
     return () => {
+      disposed = true
       running = false
       window.cancelAnimationFrame(frame)
       resizeObserver.disconnect()
@@ -226,7 +281,7 @@ export function BrandReveal(props: BrandRevealProps) {
           className='home-brand-reveal-static'
           aria-hidden='true'
         >
-          <span className='home-brand-reveal-word'>
+          <span ref={wordRef} className='home-brand-reveal-word'>
             {props.name.toUpperCase()}
           </span>
         </div>

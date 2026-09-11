@@ -674,17 +674,24 @@ html.home-reference-scroll::-webkit-scrollbar {
   height: 100%;
 }
 
+/* Static wordmark shown until the canvas takes over. Centred on both axes
+ * inside the fixed layer; the canvas mirrors this typography (family and
+ * weight are read from this rule's computed style, tracking is duplicated
+ * as BRAND_TRACKING_EM in brand-reveal.tsx — keep the two in sync). */
 .home-brand-reveal-word {
   position: absolute;
-  bottom: -0.1em;
+  top: 50%;
   left: 50%;
   color: var(--home-brand-ink);
+  font-family: var(--font-serif);
   font-size: 5rem;
-  font-weight: 900;
-  line-height: 0.78;
-  letter-spacing: 0;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  /* Balances the trailing letter-spacing so the ink, not the box, is centred. */
+  text-indent: 0.08em;
   white-space: nowrap;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
 }
 
 @media (min-width: 40rem) {
