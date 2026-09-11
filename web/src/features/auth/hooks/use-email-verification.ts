@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import { useCountdown } from '@/hooks/use-countdown'
@@ -28,6 +28,13 @@ import { EMAIL_VERIFICATION_COUNTDOWN } from '../constants'
 interface UseEmailVerificationOptions {
   turnstileToken?: string
   validateTurnstile?: () => boolean
+  /**
+   * Called after local validation passes and immediately before the request
+   * is dispatched, with the token being consumed. The caller should clear
+   * the token (and remount the widget) here so a single token can never be
+   * reused across send-code / register actions.
+   */
+  onTokenConsumed?: (token: string | undefined) => void
 }
 
 /**
@@ -35,6 +42,7 @@ interface UseEmailVerificationOptions {
  */
 export function useEmailVerification(options?: UseEmailVerificationOptions) {
   const [isSending, setIsSending] = useState(false)
+  const isSendingRef = useRef(false)
   const {
     secondsLeft,
     isActive,
@@ -55,9 +63,24 @@ export function useEmailVerification(options?: UseEmailVerificationOptions) {
       return false
     }
 
+    // Ref lock: guard against double-send within the same round even before
+    // the disabled state propagates through a re-render.
+    if (isSendingRef.current) {
+      return false
+    }
+    isSendingRef.current = true
+
     setIsSending(true)
     try {
-      const res = await sendEmailVerification(email, options?.turnstileToken)
+      // Capture the token before letting the caller reset the widget, then
+      // consume it (reset) locally before the request so the same token can
+      // never be reused by a later action (e.g. register). The callback is
+      // invoked inside the try so the finally block always releases the ref
+      // lock even if it throws.
+      const capturedToken = options?.turnstileToken
+      options?.onTokenConsumed?.(capturedToken)
+
+      const res = await sendEmailVerification(email, capturedToken)
       if (res?.success) {
         startCountdown()
         toast.success(i18next.t('Verification email sent'))
@@ -67,11 +90,12 @@ export function useEmailVerification(options?: UseEmailVerificationOptions) {
         res?.message || i18next.t('Failed to send verification email')
       )
       return false
-    } catch (_error) {
+    } catch {
       // Errors are handled by global interceptor
       return false
     } finally {
       setIsSending(false)
+      isSendingRef.current = false
     }
   }
 

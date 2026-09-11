@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2 } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -65,6 +65,12 @@ export function SignUpForm({
   const [isWeChatDialogOpen, setIsWeChatDialogOpen] = useState(false)
   const [isWeChatSubmitting, setIsWeChatSubmitting] = useState(false)
   const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
+  // Ref locks: prevent double-submit for register, and make send-code and
+  // register mutually exclusive so the same Turnstile token is never shared
+  // across both actions. These guard against races before disabled-state
+  // re-renders propagate.
+  const registeringRef = useRef(false)
+  const actionInFlightRef = useRef(false)
   const legalConsentErrorMessage = t('Please agree to the legal terms first')
 
   const { status } = useStatus()
@@ -84,6 +90,14 @@ export function SignUpForm({
   } = useEmailVerification({
     turnstileToken,
     validateTurnstile,
+    // Consume the token before the request is dispatched: clear it and remount
+    // the widget so the captured token is spent once and a fresh one is issued
+    // for the next action. Fires on every local-validation-passed send whether
+    // or not the API eventually succeeds.
+    onTokenConsumed: () => {
+      setTurnstileToken('')
+      setTurnstileWidgetKey((current) => current + 1)
+    },
   })
 
   const form = useForm<z.infer<typeof registerFormSchema>>({
@@ -159,6 +173,19 @@ export function SignUpForm({
 
     if (!validateTurnstile()) return
 
+    // Mutually exclusive with send-code, and ignore double-clicks before the
+    // disabled state re-renders.
+    if (actionInFlightRef.current || registeringRef.current) return
+    registeringRef.current = true
+    actionInFlightRef.current = true
+
+    // Capture the token, then clear + remount the widget BEFORE dispatching
+    // so the captured token is spent exactly once. A new widget then issues a
+    // fresh token for the next attempt (retry after a failed registration).
+    const capturedTurnstileToken = turnstileToken
+    setTurnstileToken('')
+    setTurnstileWidgetKey((current) => current + 1)
+
     setIsLoading(true)
     try {
       const res = await register({
@@ -167,7 +194,7 @@ export function SignUpForm({
         email: data.email || undefined,
         verification_code: verificationCode || undefined,
         aff_code: getAffiliateCode(),
-        turnstile: turnstileToken,
+        turnstile: capturedTurnstileToken,
       })
 
       if (res?.success) {
@@ -180,13 +207,19 @@ export function SignUpForm({
       // Errors are handled by global interceptor
     } finally {
       setIsLoading(false)
+      registeringRef.current = false
+      actionInFlightRef.current = false
     }
   }
 
   async function handleSendVerificationCode() {
-    if (await sendCode(emailValue || '')) {
-      setTurnstileToken('')
-      setTurnstileWidgetKey((current) => current + 1)
+    // Mutually exclusive with register; the hook's own ref guards double-send.
+    if (actionInFlightRef.current || registeringRef.current) return
+    actionInFlightRef.current = true
+    try {
+      await sendCode(emailValue || '')
+    } finally {
+      actionInFlightRef.current = false
     }
   }
 
@@ -369,6 +402,7 @@ export function SignUpForm({
             key={turnstileWidgetKey}
             siteKey={turnstileSiteKey}
             onVerify={setTurnstileToken}
+            onExpire={() => setTurnstileToken('')}
             className='mt-2'
           />
         )}
