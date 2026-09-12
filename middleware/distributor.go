@@ -20,7 +20,6 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -79,23 +78,19 @@ func Distribute() func(c *gin.Context) {
 		} else {
 			// Select a channel for the user
 			// check token model mapping
-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-				if !ok {
-					// token model limit is empty, all models are not allowed
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
-					return
-				}
-				var tokenModelLimit map[string]bool
-				tokenModelLimit, ok = s.(map[string]bool)
-				if !ok {
-					tokenModelLimit = map[string]bool{}
-				}
-				if !tokenModelLimitAllows(tokenModelLimit, modelRequest.Model) {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
-					return
-				}
+			//
+			// The rule itself lives in service.AuthorizeTokenModelAccess, which is
+			// read-only and shared with the task-plugin pre-upload gate. Branching
+			// here keeps the responses byte-for-byte identical to the previous
+			// inline implementation.
+			switch service.AuthorizeTokenModelAccess(c, modelRequest.Model) {
+			case service.TokenModelAccessLimitEmpty:
+				// token model limit is empty, all models are not allowed
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+				return
+			case service.TokenModelAccessModelForbidden:
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+				return
 			}
 
 			if shouldSelectChannel {
@@ -570,16 +565,11 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 }
 
 // tokenModelLimitAllows reports whether a token model-limit map authorizes
-// model. Exact name, wildcard-normalized name, and routing-normalized name
-// (modifiers and legacy aliases stripped) are all accepted.
+// model. It delegates to the shared read-only implementation in the service
+// package so the distributor and the task-plugin pre-upload gate cannot drift
+// apart.
 func tokenModelLimitAllows(limit map[string]bool, model string) bool {
-	if limit[model] {
-		return true
-	}
-	if formatted := ratio_setting.FormatMatchingModelName(model); limit[formatted] {
-		return true
-	}
-	return limit[ratio_setting.RoutingMatchModelName(model)]
+	return service.TokenModelLimitAllows(limit, model)
 }
 
 // 修复 #4834: GET /v1/video/generations/:task_id && /v1/video/:task_id 此前不解析 model，

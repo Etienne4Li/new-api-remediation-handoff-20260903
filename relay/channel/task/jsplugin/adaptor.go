@@ -91,6 +91,38 @@ func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{
 func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo)   { a.info = info }
 
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	// Token model authorization is re-checked before the bridge below, because
+	// this call site can also upload reference images. Distribution has already
+	// enforced the same rule for every route that reaches the adaptor, so on the
+	// normal path this is a no-op; it exists so no entry point can upload ahead
+	// of the token's model access. The rule is read-only and shared with the
+	// distributor via service.AuthorizeTokenModelAccess.
+	if pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
+		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok {
+			switch service.AuthorizeTokenModelAccess(c, pinned.Model) {
+			case service.TokenModelAccessLimitEmpty, service.TokenModelAccessModelForbidden:
+				return service.TaskErrorWrapperLocal(
+					fmt.Errorf("token has no access to model %q", pinned.Model),
+					"refimage_model_forbidden",
+					http.StatusForbidden,
+				)
+			}
+		}
+	}
+	// Reference-image upload bridge. It is a no-op for plugins other than
+	// lietio-video, for requests without multipart files, and for requests the
+	// endpoint middleware already bridged. The exchange is validation-first:
+	// the decoder must accept a placeholder copy of the request before any byte
+	// reaches the image host. It runs before price calculation and before
+	// pre-consumption, so a failed upload never pre-charges the caller and never
+	// reaches the upstream.
+	if err := service.BridgeReferenceImageUpload(
+		c,
+		a.plugin.Meta.Key,
+		service.NewTaskPluginPlaceholderVerifierForPlugin(c, a.plugin),
+	); err != nil {
+		return service.TaskErrorWrapperLocal(err, "refimage_upload_failed", http.StatusBadRequest)
+	}
 	if pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
 		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Plugin == a.plugin {
 			if protocolValue, present := c.Get(pluginruntime.ContextKeyProtocolRequest); present {
@@ -251,6 +283,12 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 				continue
 			}
 			field := strings.TrimPrefix(part.FileRef, "request_file:")
+			if service.RefImageUploadBridged(c) {
+				// The bridge replaced the reference images with hosted URLs and
+				// dropped the binary parts; a file reference here would push raw
+				// bytes upstream behind a contract that no longer carries them.
+				return nil, fmt.Errorf("file reference %q is not available after reference images were bridged", part.FileRef)
+			}
 			files := form.File[field]
 			if len(files) == 0 {
 				return nil, fmt.Errorf("unknown file reference %q", part.FileRef)
@@ -312,9 +350,14 @@ func maxInlineFileBytes() int64 {
 }
 
 func inlineJSONFilePlaceholders(c *gin.Context, body any) (any, error) {
+	// A bridged request already carries hosted URLs; inlining the raw file bytes
+	// here would contradict that and push the original binary upstream.
+	if service.RefImageUploadBridged(c) {
+		return nil, fmt.Errorf("file placeholders are not available after reference images were bridged")
+	}
 	cloned := jsonValue(body)
 	var form *multipart.Form
-	if c != nil && c.Request != nil && strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") {
+	if c != nil && c.Request != nil && strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") && !service.RefImageUploadBridged(c) {
 		parsed, parseErr := common.ParseMultipartFormReusable(c)
 		if parseErr != nil {
 			return nil, parseErr

@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -442,6 +443,7 @@ func PinTaskPluginEndpoint() gin.HandlerFunc {
 	}
 }
 
+// jsonBodyBoolFlags reads the stream/background flags from a JSON body.
 func jsonBodyBoolFlags(c *gin.Context) (stream, background bool) {
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
@@ -605,6 +607,70 @@ func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 			Stream:              stream,
 		}
 		c.Set(pluginruntime.ContextKeyProtocolRequest, protocolContext)
+		// Token model authorization settles before the bridge. The distributor
+		// enforces the token's model allowlist, but it runs after this handler,
+		// so without this gate a request whose token has no access to the
+		// resolved model would still upload its reference images to the image
+		// host before being refused. The check is read-only, reuses the
+		// distributor's rule (service.AuthorizeTokenModelAccess), and emits the
+		// same response the distributor would have produced.
+		//
+		// pinned.Model is exactly the name the distributor will resolve for this
+		// request: PinTaskPluginEndpoint writes the pinned model onto the request,
+		// the decode below republishes it as resolved_task_model, and
+		// getModelRequest then reads that back. Authorizing any other name here
+		// could disagree with the distributor in one direction or the other.
+		//
+		// Example: a token restricted to models other than the pinned endpoint's
+		// model is refused here with zero uploads, instead of spending image-host
+		// work on a request that can never be served.
+		switch service.AuthorizeTokenModelAccess(c, pinned.Model) {
+		case service.TokenModelAccessLimitEmpty:
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+			return
+		case service.TokenModelAccessModelForbidden:
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": pinned.Model}))
+			return
+		}
+		// Reference-image upload bridge: the pinned protocol decoder of the
+		// lietio-video plugin rejects raw file parts, so multipart reference
+		// images must be exchanged for hosted HTTPS URLs before decodeRequest
+		// runs. The exchange is validation-first: the decoder judges a copy of
+		// the request whose file fields carry non-leaking placeholder URLs, and
+		// only a request it accepts is allowed to reach the image host. This is
+		// still ahead of distribution selection, price calculation, and
+		// pre-consumption, so a failed upload never charges the caller and never
+		// reaches the upstream. The bridge is a no-op for every other plugin
+		// key.
+		if bridgeErr := service.BridgeReferenceImageUpload(
+			c,
+			pinned.Plugin.Meta.Key,
+			service.NewTaskPluginPlaceholderVerifier(c, pinned),
+		); bridgeErr != nil {
+			logger.LogWarn(
+				c,
+				"task_plugin subsystem=endpoint event=prepare_rejected generation=%d plugin=%q stage=refimage_upload",
+				pinned.Generation.Number,
+				pinned.Plugin.Meta.Key,
+			)
+			abortWithOpenAiMessage(c, http.StatusBadRequest, bridgeErr.Error())
+			return
+		}
+		// The bridge rewrites the stored protocol request (raw file parts out,
+		// hosted URLs in) and clears its file list, so the decoder below must run
+		// against the current context value rather than the pre-bridge copy.
+		// The route request is only published after decode, so its local copy has
+		// to be cleared here as well: nothing downstream may still observe raw
+		// reference-image attachments for a bridged request.
+		if service.RefImageUploadBridged(c) {
+			requestContext.Files = nil
+		}
+		if bridgedValue, exists := c.Get(pluginruntime.ContextKeyProtocolRequest); exists {
+			if bridged, ok := bridgedValue.(pluginruntime.ProtocolRequestContext); ok {
+				bridged.Files = nil
+				protocolContext = bridged
+			}
+		}
 		hookStarted := time.Now()
 		// Parsing belongs to the durable task submission path. A client
 		// disconnect only stops the later Responses observation.
