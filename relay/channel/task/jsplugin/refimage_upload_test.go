@@ -5,12 +5,15 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -153,6 +156,66 @@ func TestTaskAdaptorBridgesRefImageUploadBeforeValidate(t *testing.T) {
 	request, exists := c.Get("task_request")
 	require.True(t, exists)
 	assert.Equal(t, "https://z.lietio.com/bridged.png", request.(map[string]any)["first_image"])
+}
+
+// TestTaskAdaptorBuildsJSONSubmitBodyAfterBridge covers the submit stage of a
+// bridged request: the plugin body is plain JSON carrying the hosted URL and no
+// file placeholder, so it must reach the upstream unchanged. Before 2026-09-12
+// the JSON path refused every bridged request outright ("file placeholders are
+// not available after reference images were bridged"), which failed all real
+// lietio-video submissions after a successful upload.
+func TestTaskAdaptorBuildsJSONSubmitBodyAfterBridge(t *testing.T) {
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"files":[{"url":"https://z.lietio.com/bridged.png"}]}`))
+	}))
+	defer host.Close()
+	enableAdaptorRefImageUpload(t, host.URL+"/api/upload")
+
+	plugin, err := pluginruntime.NewRegistry().Register(adaptorUploadPluginSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	c, info := adaptorUploadContext(t, plugin)
+	adaptor.Init(info)
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+	require.True(t, service.RefImageUploadBridged(c))
+
+	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, common.Unmarshal(raw, &decoded))
+	assert.Equal(t, "p", decoded["prompt"])
+	assert.Equal(t, "https://z.lietio.com/bridged.png", decoded["first_image"])
+}
+
+// TestTaskAdaptorRefusesFilePlaceholderAfterBridge keeps the guard for the one
+// case it is meant for: a plugin body that still asks for the raw file bytes
+// after the bridge replaced them with a hosted URL.
+func TestTaskAdaptorRefusesFilePlaceholderAfterBridge(t *testing.T) {
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"files":[{"url":"https://z.lietio.com/bridged.png"}]}`))
+	}))
+	defer host.Close()
+	enableAdaptorRefImageUpload(t, host.URL+"/api/upload")
+
+	source := strings.Replace(
+		adaptorUploadPluginSource,
+		`export function buildSubmitRequest(ctx){ return {url:ctx.baseUrl+"/submit",method:"POST",body:ctx.requestBody}; }`,
+		`export function buildSubmitRequest(ctx){ return {url:ctx.baseUrl+"/submit",method:"POST",body:{prompt:"p",image:{__fileRef:"request_file:first_image",encoding:"base64"}}}; }`,
+		1,
+	)
+	require.NotEqual(t, adaptorUploadPluginSource, source)
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	c, info := adaptorUploadContext(t, plugin)
+	adaptor.Init(info)
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+
+	_, err = adaptor.BuildRequestBody(c, info)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available after reference images were bridged")
 }
 
 // TestTaskAdaptorDoesNotUploadForRejectedRequest proves the adaptor also obeys

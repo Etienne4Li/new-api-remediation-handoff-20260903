@@ -350,14 +350,15 @@ func maxInlineFileBytes() int64 {
 }
 
 func inlineJSONFilePlaceholders(c *gin.Context, body any) (any, error) {
-	// A bridged request already carries hosted URLs; inlining the raw file bytes
-	// here would contradict that and push the original binary upstream.
-	if service.RefImageUploadBridged(c) {
-		return nil, fmt.Errorf("file placeholders are not available after reference images were bridged")
-	}
 	cloned := jsonValue(body)
 	var form *multipart.Form
-	if c != nil && c.Request != nil && strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") && !service.RefImageUploadBridged(c) {
+	// A bridged request already carries hosted URLs, so its multipart form is
+	// never reopened: a body without placeholders (the normal case for a
+	// URL-only upstream such as lietio-video) passes through untouched, and a
+	// body that still names a file placeholder fails below instead of pushing
+	// the original binary upstream behind a contract that no longer carries it.
+	bridged := service.RefImageUploadBridged(c)
+	if c != nil && c.Request != nil && strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") && !bridged {
 		parsed, parseErr := common.ParseMultipartFormReusable(c)
 		if parseErr != nil {
 			return nil, parseErr
@@ -367,7 +368,11 @@ func inlineJSONFilePlaceholders(c *gin.Context, body any) (any, error) {
 	}
 	limit := maxInlineFileBytes()
 	var total int64
-	return replaceJSONFilePlaceholders(cloned, form, limit, &total)
+	inlined, err := replaceJSONFilePlaceholders(cloned, form, limit, &total)
+	if err != nil && bridged {
+		return nil, fmt.Errorf("file placeholders are not available after reference images were bridged: %w", err)
+	}
+	return inlined, err
 }
 
 func replaceJSONFilePlaceholders(value any, form *multipart.Form, limit int64, total *int64) (any, error) {
