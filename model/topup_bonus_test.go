@@ -534,13 +534,15 @@ func TestSumTopUpBonusQuotaIgnoresOtherTopUpLogs(t *testing.T) {
 	db := setupTopUpBonusTestDB(t)
 	seedBonusUser(t, db, 0)
 
+	// Every other writer of a LogTypeTopup row, exercised for real.
 	RecordTopupLog(bonusUserId, "使用在线充值成功，充值金额: 500，支付金额：500", "127.0.0.1", "alipay", PaymentProviderEpay)
 	RecordLog(bonusUserId, LogTypeTopup, "通过兑换码充值 500，兑换码ID 1")
+	RecordLogWithAdminInfo(bonusUserId, LogTypeTopup, "管理员调整额度 500", nil, nil)
 	RecordLog(bonusUserId, LogTypeSystem, "邀请充值返利 25")
 
 	var topUpRows []Log
 	require.NoError(t, db.Where("type = ?", LogTypeTopup).Find(&topUpRows).Error)
-	require.Len(t, topUpRows, 2)
+	require.Len(t, topUpRows, 3)
 	for _, row := range topUpRows {
 		require.Zero(t, row.Quota, "no other LogTypeTopup writer may fill Quota: %q", row.Content)
 		require.False(t, strings.HasPrefix(row.Content, topUpBonusLogPrefix))
