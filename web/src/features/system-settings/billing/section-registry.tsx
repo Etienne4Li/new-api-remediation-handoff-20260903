@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { parseCurrencyDisplayType } from '@/lib/currency'
 
+import { AffRebateSettingsSection } from '../general/aff-rebate-settings-section'
 import { CheckinSettingsSection } from '../general/checkin-settings-section'
 import { PricingSection } from '../general/pricing-section'
 import { QuotaSettingsSection } from '../general/quota-settings-section'
@@ -184,6 +185,19 @@ const BILLING_SECTIONS = [
             settings['payment_setting.compliance_terms_version'] ?? '',
           confirmedAt: settings['payment_setting.compliance_confirmed_at'] ?? 0,
           confirmedBy: settings['payment_setting.compliance_confirmed_by'] ?? 0,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'aff-rebate',
+    titleKey: 'Referral Rebate',
+    build: (settings: BillingSettings) => (
+      <AffRebateSettingsSection
+        defaultValues={{
+          AffRebateEnabled: settings.AffRebateEnabled,
+          AffRebatePercent: settings.AffRebatePercent,
+          AffRebateMaxTimes: settings.AffRebateMaxTimes,
         }}
       />
     ),

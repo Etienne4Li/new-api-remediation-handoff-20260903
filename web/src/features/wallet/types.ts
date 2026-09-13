@@ -282,6 +282,37 @@ export interface BillingHistoryResponse {
 }
 
 /**
+ * One granted invitation rebate. The invitee is always a masked label produced
+ * by the backend — the full email or username never reaches the client.
+ */
+export interface AffRebateRecord {
+  id: number
+  /** Masked invitee label, e.g. "u***@ex***.com" or "用户 #123" */
+  invitee: string
+  /** Amount the invitee actually paid */
+  topup_money: number
+  /** Quota credited to the inviter */
+  rebate_quota: number
+  /** Which of the invitee's rebate-eligible top-ups this was (1-based) */
+  sequence: number
+  created_time: number
+}
+
+/**
+ * Rebate history plus the live rebate configuration, so the wallet card can
+ * render the rule text without reading the admin settings API.
+ */
+export interface AffRebateListResponse {
+  enabled: boolean
+  percent: number
+  max_times: number
+  page: number
+  page_size: number
+  total: number
+  items: AffRebateRecord[]
+}
+
+/**
  * Complete order request (admin only)
  */
 export interface CompleteOrderRequest {

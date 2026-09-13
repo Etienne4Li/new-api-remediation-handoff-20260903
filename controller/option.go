@@ -162,6 +162,14 @@ func UpdateOption(c *gin.Context) {
 			common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)
 			return
 		}
+	case "AffRebateEnabled":
+		// Same gate as the other referral rewards: paying out a share of a
+		// top-up is a referral incentive, so it stays off until the operator has
+		// confirmed the payment compliance terms.
+		if option.Value.(string) == "true" && !operation_setting.IsPaymentComplianceConfirmed() {
+			common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)
+			return
+		}
 	default:
 		if isPaymentComplianceOptionKey(option.Key) {
 			common.ApiErrorMsg(c, "合规确认字段不允许通过通用设置接口修改")

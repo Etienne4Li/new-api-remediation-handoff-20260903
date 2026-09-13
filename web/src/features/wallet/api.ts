@@ -23,6 +23,7 @@ import type {
   PaymentRequest,
   AmountRequest,
   AffiliateTransferRequest,
+  AffRebateListResponse,
   ApiResponse,
   TopupInfoResponse,
   RedemptionResponse,
@@ -196,6 +197,21 @@ export async function transferAffiliateQuota(
   request: AffiliateTransferRequest
 ): Promise<AffiliateTransferResponse> {
   const res = await api.post('/api/user/aff_transfer', request)
+  return res.data
+}
+
+/**
+ * Get the current user's invitation rebate history and rebate configuration
+ */
+export async function getAffRebates(
+  page: number,
+  pageSize: number
+): Promise<ApiResponse<AffRebateListResponse>> {
+  const params = new URLSearchParams({
+    p: page.toString(),
+    page_size: pageSize.toString(),
+  })
+  const res = await api.get(`/api/user/aff_rebates?${params.toString()}`)
   return res.data
 }
 

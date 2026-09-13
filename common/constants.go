@@ -125,6 +125,13 @@ var TelegramBotName = ""
 var QuotaForNewUser = 0
 var QuotaForInviter = 0
 var QuotaForInvitee = 0
+
+// 邀请充值返利：被邀请人的前 AffRebateMaxTimes 笔在线充值成功后，按实付金额的
+// AffRebatePercent% 给邀请人发放邀请额度（aff_quota）。默认关闭，由管理员在
+// 后台显式开启。
+var AffRebateEnabled = false
+var AffRebatePercent = 5
+var AffRebateMaxTimes = 3
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
