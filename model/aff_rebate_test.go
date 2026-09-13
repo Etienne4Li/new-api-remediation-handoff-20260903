@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -17,13 +19,44 @@ const (
 	affRebateInviteeId = 9002
 )
 
+// affRebateTestMySQLDSNEnv points the rebate tests at a real MySQL server.
+//
+// Idempotency here rests entirely on the UNIQUE index on aff_rebates.top_up_id
+// and on isDuplicateKeyError recognising the server's error message. Both are
+// engine-specific, and production runs MySQL, so the same assertions must be
+// runnable there and not only against the in-memory SQLite default:
+//
+//	AFF_REBATE_TEST_MYSQL_DSN='user:pw@tcp(host:3306)/db?parseTime=true' \
+//	    go test ./model/ -run AffRebate
+//
+// The target schema is dropped and recreated per test, so point it at a
+// throwaway database, never at production.
+const affRebateTestMySQLDSNEnv = "AFF_REBATE_TEST_MYSQL_DSN"
+
 func setupAffRebateTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	originalDB := DB
 	originalLogDB := LOG_DB
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
+
+	var db *gorm.DB
+	var err error
+	if dsn := os.Getenv(affRebateTestMySQLDSNEnv); dsn != "" {
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+		require.NoError(t, err)
+		// A shared server keeps state between tests, and the SQLite default gets
+		// a fresh in-memory database each time; drop so both start identical.
+		require.NoError(t, db.Migrator().DropTable(&AffRebate{}, &TopUp{}, &Log{}, &User{}))
+		// Exercise the real SELECT ... FOR UPDATE the production paths rely on;
+		// lockForUpdate() is a no-op while the database type says SQLite.
+		originalDatabaseType := common.DatabaseTypeSQLite
+		common.SetMainDatabaseType(common.DatabaseTypeMySQL)
+		t.Cleanup(func() { common.SetMainDatabaseType(originalDatabaseType) })
+	} else {
+		dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+		db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+		require.NoError(t, err)
+	}
+
 	require.NoError(t, db.AutoMigrate(&User{}, &TopUp{}, &Log{}, &AffRebate{}))
 	DB = db
 	LOG_DB = db
@@ -300,32 +333,160 @@ func TestRechargeSucceedsWhenRebateWriteFails(t *testing.T) {
 	require.Equal(t, 0, affHistory)
 }
 
+// currencyTopUp builds an order priced in currency, the convention every
+// provider but Creem uses.
+func currencyTopUp(money float64) *TopUp {
+	return &TopUp{PaymentProvider: PaymentProviderEpay, Money: money, Amount: int64(money)}
+}
+
 func TestAffRebateQuotaConversion(t *testing.T) {
 	unit := int(common.QuotaPerUnit)
 
 	// 10 at 5% is half a unit.
-	quota, err := affRebateQuota(10, 5)
+	quota, err := affRebateQuota(currencyTopUp(10), 5)
 	require.NoError(t, err)
 	require.Equal(t, unit/2, quota)
 
 	// 2 at 5% is a tenth of a unit.
-	quota, err = affRebateQuota(2, 5)
+	quota, err = affRebateQuota(currencyTopUp(2), 5)
 	require.NoError(t, err)
 	require.Equal(t, unit/10, quota)
 
 	// 0.01 at 5% is 1/2000 of a unit: still a whole quota amount rather than
 	// something float arithmetic truncates to zero.
-	quota, err = affRebateQuota(0.01, 5)
+	quota, err = affRebateQuota(currencyTopUp(0.01), 5)
 	require.NoError(t, err)
 	require.Equal(t, unit/2000, quota)
 
-	quota, err = affRebateQuota(0, 5)
+	quota, err = affRebateQuota(currencyTopUp(0), 5)
 	require.NoError(t, err)
 	require.Equal(t, 0, quota)
 
-	quota, err = affRebateQuota(10, 100)
+	quota, err = affRebateQuota(currencyTopUp(10), 100)
 	require.NoError(t, err)
 	require.Equal(t, unit*10, quota, "100% must equal the top-up itself, never more")
+}
+
+// Creem credits TopUp.Amount straight into the wallet, so its rebate base is
+// Amount and not Money * QuotaPerUnit. Getting this wrong multiplies the rebate
+// by QuotaPerUnit and pays the inviter thousands of times the payment.
+func TestAffRebateQuotaUsesCreemAmountAsAlreadyQuota(t *testing.T) {
+	creem := &TopUp{
+		PaymentProvider: PaymentProviderCreem,
+		Amount:          1_000_000,
+		Money:           10,
+	}
+
+	quota, err := affRebateQuota(creem, 5)
+	require.NoError(t, err)
+	require.Equal(t, 50_000, quota, "5% of the 1000000 quota Creem actually credits")
+
+	// The currency convention applied to the same order would be wildly larger;
+	// pin the gap so a future refactor cannot silently fall back to it.
+	currencyQuota, err := affRebateQuota(currencyTopUp(10), 5)
+	require.NoError(t, err)
+	require.NotEqual(t, currencyQuota, quota)
+	require.Equal(t, int(common.QuotaPerUnit)/2, currencyQuota)
+}
+
+// SPEC 1.3 end to end on the Creem callback: the inviter must receive 5% of the
+// quota the invitee was actually credited, not 5% of Money * QuotaPerUnit.
+func TestGrantAffRebateMatchesCreemCreditedQuota(t *testing.T) {
+	db := setupAffRebateTestDB(t)
+	setAffRebateConfig(t, true, 5, 3)
+	seedAffRebateUsers(t, db, affRebateInviterId)
+
+	topUp := &TopUp{
+		UserId:          affRebateInviteeId,
+		Amount:          1_000_000,
+		Money:           10,
+		TradeNo:         "REBATE-creem",
+		PaymentMethod:   PaymentMethodCreem,
+		PaymentProvider: PaymentProviderCreem,
+		CreateTime:      common.GetTimestamp(),
+		Status:          common.TopUpStatusPending,
+	}
+	require.NoError(t, db.Create(topUp).Error)
+
+	require.NoError(t, RechargeCreem("REBATE-creem", "", "", "127.0.0.1"))
+
+	var invitee User
+	require.NoError(t, db.First(&invitee, affRebateInviteeId).Error)
+	require.Equal(t, 1_000_000, invitee.Quota, "Creem credits Amount directly")
+
+	var rebate AffRebate
+	require.NoError(t, db.First(&rebate).Error)
+	require.Equal(t, 50_000, rebate.RebateQuota)
+	require.Equal(t, invitee.Quota, rebate.RebateQuota*20, "exactly 5% of what was credited")
+
+	affQuota, affHistory := affQuotaOf(t, db, affRebateInviterId)
+	require.Equal(t, 50_000, affQuota)
+	require.Equal(t, 50_000, affHistory)
+}
+
+// An admin back-fill settles a real payment whose callback never arrived, and
+// the order counts towards the invitee's sequence either way, so it must rebate.
+func TestManualCompleteTopUpGrantsRebate(t *testing.T) {
+	db := setupAffRebateTestDB(t)
+	setAffRebateConfig(t, true, 5, 3)
+	seedAffRebateUsers(t, db, affRebateInviterId)
+	seedPendingTopUpFor(t, db, affRebateInviteeId, "REBATE-manual", 10, 10)
+
+	require.NoError(t, ManualCompleteTopUp("REBATE-manual", "127.0.0.1"))
+
+	var settled TopUp
+	require.NoError(t, db.Where("trade_no = ?", "REBATE-manual").First(&settled).Error)
+	require.Equal(t, common.TopUpStatusSuccess, settled.Status)
+
+	expected := int(10 * common.QuotaPerUnit * 5 / 100)
+	affQuota, affHistory := affQuotaOf(t, db, affRebateInviterId)
+	require.Equal(t, expected, affQuota)
+	require.Equal(t, expected, affHistory)
+
+	var rebate AffRebate
+	require.NoError(t, db.First(&rebate).Error)
+	require.Equal(t, 1, rebate.Sequence)
+	require.Equal(t, settled.Id, rebate.TopUpId)
+
+	// Re-running the back-fill on the now-settled order must not pay again.
+	require.NoError(t, ManualCompleteTopUp("REBATE-manual", "127.0.0.1"))
+	require.Equal(t, int64(1), countAffRebates(t, db))
+	affQuota, affHistory = affQuotaOf(t, db, affRebateInviterId)
+	require.Equal(t, expected, affQuota)
+	require.Equal(t, expected, affHistory)
+}
+
+// The back-filled order and the callback-settled orders share one sequence, so
+// a mix of the two still stops at AffRebateMaxTimes.
+func TestManualCompleteTopUpSharesRebateSequence(t *testing.T) {
+	db := setupAffRebateTestDB(t)
+	setAffRebateConfig(t, true, 5, 3)
+	seedAffRebateUsers(t, db, affRebateInviterId)
+	perTopUp := int(10 * common.QuotaPerUnit * 5 / 100)
+
+	seedPendingTopUpFor(t, db, affRebateInviteeId, "REBATE-mix-1", 10, 10)
+	_, err := RechargeEpay("REBATE-mix-1", "alipay", "10.00", "127.0.0.1")
+	require.NoError(t, err)
+
+	seedPendingTopUpFor(t, db, affRebateInviteeId, "REBATE-mix-2", 10, 10)
+	require.NoError(t, ManualCompleteTopUp("REBATE-mix-2", "127.0.0.1"))
+
+	seedPendingTopUpFor(t, db, affRebateInviteeId, "REBATE-mix-3", 10, 10)
+	require.NoError(t, ManualCompleteTopUp("REBATE-mix-3", "127.0.0.1"))
+
+	seedPendingTopUpFor(t, db, affRebateInviteeId, "REBATE-mix-4", 10, 10)
+	require.NoError(t, ManualCompleteTopUp("REBATE-mix-4", "127.0.0.1"))
+
+	require.Equal(t, int64(3), countAffRebates(t, db), "the fourth top-up earns nothing")
+	affQuota, _ := affQuotaOf(t, db, affRebateInviterId)
+	require.Equal(t, perTopUp*3, affQuota)
+
+	var rebates []AffRebate
+	require.NoError(t, db.Order("id asc").Find(&rebates).Error)
+	require.Len(t, rebates, 3)
+	for i, rebate := range rebates {
+		require.Equal(t, i+1, rebate.Sequence)
+	}
 }
 
 // The three options are only useful if the admin settings API actually reaches
@@ -370,6 +531,9 @@ func TestIsDuplicateKeyError(t *testing.T) {
 	duplicate := &AffRebate{InviterId: 1, InviteeId: 2, TopUpId: 77, RebateQuota: 1, Sequence: 1}
 	err := db.Create(duplicate).Error
 	require.Error(t, err, "top_up_id must be unique at the database level")
+	// Logged because the match is on the message, not a typed assertion, and the
+	// wording differs per engine; run with -v to see what the target produced.
+	t.Logf("duplicate key error from this engine: %v", err)
 	require.True(t, isDuplicateKeyError(err), "unexpected error text: %v", err)
 
 	require.False(t, isDuplicateKeyError(nil))

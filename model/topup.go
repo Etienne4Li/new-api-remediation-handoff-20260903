@@ -496,9 +496,12 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	var quotaToAdd int
 	var payMoney float64
 	var paymentMethod string
+	// settled is true only when this call moved a pending order to success, so a
+	// repeated back-fill of an already-settled order stays a no-op.
+	var settled bool
+	topUp := &TopUp{}
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		topUp := &TopUp{}
 		// 行级锁，避免并发补单
 		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
 			return errors.New("充值订单不存在")
@@ -545,6 +548,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		userId = topUp.UserId
 		payMoney = topUp.Money
 		paymentMethod = topUp.PaymentMethod
+		settled = true
 		return nil
 	})
 
@@ -554,6 +558,13 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 
 	// 事务外记录日志，避免阻塞
 	syncCreditUserQuotaCache(userId, quotaToAdd, "manual topup")
+	if settled {
+		// A back-filled order is a real payment the callback never delivered, so
+		// it earns a rebate like any other settled top-up. Skipping it would be a
+		// double loss for the inviter: the order already counts towards the
+		// invitee's rebate-eligible sequence either way.
+		GrantAffRebate(topUp)
+	}
 	RecordTopupLog(userId, fmt.Sprintf("管理员补单成功，充值金额: %v，支付金额：%f", logger.FormatQuota(quotaToAdd), payMoney), callerIp, paymentMethod, "admin")
 	return nil
 }

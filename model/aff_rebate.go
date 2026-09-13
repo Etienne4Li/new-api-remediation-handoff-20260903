@@ -53,13 +53,34 @@ func isDuplicateKeyError(err error) bool {
 		strings.Contains(msg, "23505")
 }
 
-// affRebateQuota converts a paid amount into the rebate quota using the same
-// money -> quota path the top-up itself uses (money * QuotaPerUnit), with the
-// percentage applied in decimal so no float rounding reaches the integer quota.
-func affRebateQuota(money float64, percent int) (int, error) {
+// affRebateBase returns the quota-denominated value the rebate percentage
+// applies to, expressed in the same unit as the wallet.
+//
+// Every provider but Creem prices an order in currency: TopUp.Money is what the
+// invitee actually paid, and money -> quota goes through QuotaPerUnit exactly as
+// the top-up itself does.
+//
+// Creem is the one exception. RechargeCreem credits TopUp.Amount straight into
+// the wallet ("Creem 直接使用 Amount 作为充值额度"), so a Creem order is already
+// denominated in quota. Running it through QuotaPerUnit as well would inflate
+// the rebate by the size of QuotaPerUnit — five orders of magnitude at the
+// current 500000 — and hand the inviter thousands of times the payment. Keep
+// this branch keyed on PaymentProvider: it is the only field that distinguishes
+// the two pricing conventions, and every call site passes the stored order.
+func affRebateBase(topUp *TopUp) decimal.Decimal {
+	if topUp.PaymentProvider == PaymentProviderCreem {
+		return decimal.NewFromInt(topUp.Amount)
+	}
+	return decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+}
+
+// affRebateQuota applies the rebate percentage to the order's base value. The
+// percentage is applied in decimal so no float rounding reaches the integer
+// quota, and the result goes through the same strict wallet conversion the
+// top-up paths use.
+func affRebateQuota(topUp *TopUp, percent int) (int, error) {
 	return common.WalletQuotaFromDecimalStrict(
-		decimal.NewFromFloat(money).
-			Mul(decimal.NewFromFloat(common.QuotaPerUnit)).
+		affRebateBase(topUp).
 			Mul(decimal.NewFromInt(int64(percent))).
 			Div(decimal.NewFromInt(100)),
 	)
@@ -93,9 +114,6 @@ func GrantAffRebate(topUp *TopUp) {
 	if topUp.Status != common.TopUpStatusSuccess {
 		return
 	}
-	if topUp.Money <= 0 {
-		return
-	}
 
 	percent := common.AffRebatePercent
 	maxTimes := common.AffRebateMaxTimes
@@ -104,6 +122,18 @@ func GrantAffRebate(topUp *TopUp) {
 	}
 	if percent > 100 {
 		common.SysError(fmt.Sprintf("aff rebate percent %d is out of range, skipping rebate for top_up_id=%d", percent, topUp.Id))
+		return
+	}
+
+	// Compute before touching the database: a zero-value order (and the rebate
+	// rounding down to nothing) costs no queries this way.
+	rebateQuota, err := affRebateQuota(topUp, percent)
+	if err != nil {
+		common.SysError(fmt.Sprintf("aff rebate quota conversion failed for top_up_id=%d provider=%s money=%f amount=%d: %s",
+			topUp.Id, topUp.PaymentProvider, topUp.Money, topUp.Amount, err.Error()))
+		return
+	}
+	if rebateQuota <= 0 {
 		return
 	}
 
@@ -133,14 +163,6 @@ func GrantAffRebate(topUp *TopUp) {
 		return
 	}
 	if sequence <= 0 || sequence > int64(maxTimes) {
-		return
-	}
-
-	rebateQuota, err := affRebateQuota(topUp.Money, percent)
-	if err != nil || rebateQuota <= 0 {
-		if err != nil {
-			common.SysError(fmt.Sprintf("aff rebate quota conversion failed for top_up_id=%d money=%f: %s", topUp.Id, topUp.Money, err.Error()))
-		}
 		return
 	}
 
