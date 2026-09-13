@@ -16,32 +16,29 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import type { AnchorHTMLAttributes, ReactNode } from 'react'
+import { describe, expect, test, vi } from 'vitest'
 
 import en from '@/i18n/locales/en.json'
 import zh from '@/i18n/locales/zh.json'
 
-import type {
-  AffRebateListResponse,
-  ApiResponse,
-  UserWalletData,
-} from '../../types'
+import type { UserWalletData } from '../../types'
 import { AffiliateRewardsCard } from '../affiliate-rewards-card'
 
-const getAffRebates =
-  vi.fn<
-    (
-      page: number,
-      pageSize: number
-    ) => Promise<ApiResponse<AffRebateListResponse>>
-  >()
-
-vi.mock('../../api', () => ({
-  getAffRebates: (page: number, pageSize: number) =>
-    getAffRebates(page, pageSize),
-  isApiSuccess: (response: ApiResponse) =>
-    response.success === true || response.message === 'success',
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    to,
+    children,
+    ...props
+  }: AnchorHTMLAttributes<HTMLAnchorElement> & {
+    to: string
+    children?: ReactNode
+  }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
 }))
 
 const user: UserWalletData = {
@@ -56,186 +53,71 @@ const user: UserWalletData = {
   group: 'default',
 }
 
-function respond(
-  data: Partial<AffRebateListResponse>
-): ApiResponse<AffRebateListResponse> {
-  return {
-    success: true,
-    data: {
-      enabled: false,
-      percent: 0,
-      max_times: 0,
-      page: 1,
-      page_size: 5,
-      total: 0,
-      items: [],
-      ...data,
-    },
-  }
-}
-
-function renderCard() {
-  return render(
-    <AffiliateRewardsCard
-      user={user}
-      affiliateLink='https://example.com/register?aff=abcd'
-      onTransfer={() => undefined}
-    />
-  )
-}
-
 describe('AffiliateRewardsCard', () => {
-  beforeEach(() => {
-    getAffRebates.mockResolvedValue(respond({}))
+  // The shared Button renders its anchor with an explicit role="button", so
+  // the entry is reached by that role rather than by "link".
+  test('points at the referral page', () => {
+    render(<AffiliateRewardsCard user={user} />)
+
+    const entry = screen.getByRole('button', { name: /View referral rewards/ })
+    expect(entry).toHaveAttribute('href', '/affiliate')
   })
 
-  // Rebates are credited immediately, so "Pending" would tell users their money
-  // is stuck somewhere. The translated label is asserted separately below.
-  test('labels the affiliate balance as available, never as pending', async () => {
-    renderCard()
+  test('shows the transferable balance next to the title', () => {
+    render(<AffiliateRewardsCard user={user} />)
 
-    await waitFor(() => expect(getAffRebates).toHaveBeenCalled())
-    expect(screen.getByText('Available to transfer')).toBeInTheDocument()
-    expect(screen.queryByText('Pending')).not.toBeInTheDocument()
-    expect(screen.getByText('Total Earned')).toBeInTheDocument()
-    expect(screen.getByText('Invites')).toBeInTheDocument()
+    expect(screen.getByText('Referral Program')).toBeInTheDocument()
+    expect(screen.getByText(/Available to transfer/)).toBeInTheDocument()
+    // 250_000 quota at the default 500_000-per-unit rate.
+    expect(screen.getByText('$0.5')).toBeInTheDocument()
+  })
+
+  // Everything below now lives on /affiliate. Leaving any of it here would
+  // mean two places to keep in sync — and a referral link the wallet page can
+  // no longer refresh, because it stopped fetching the affiliate code.
+  test('no longer carries the link input, the ledger or the transfer action', () => {
+    render(<AffiliateRewardsCard user={user} />)
+
     expect(
-      screen.getByRole('button', { name: 'Transfer to Balance' })
-    ).toBeInTheDocument()
-  })
-
-  test('hides the rebate rule and details while the feature is disabled', async () => {
-    renderCard()
-
-    await waitFor(() => expect(getAffRebates).toHaveBeenCalled())
+      screen.queryByLabelText('Copy referral link')
+    ).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Rebate Details')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Next page')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Transfer to Balance' })
+    ).not.toBeInTheDocument()
     expect(screen.queryByText(/rebate on each of their first/)).toBeNull()
-    // The original generic description stays in place when disabled.
+  })
+
+  test('holds the number back until the user data has arrived', () => {
+    render(<AffiliateRewardsCard user={null} loading />)
+
+    expect(screen.getByText('—')).toBeInTheDocument()
     expect(
-      screen.getByText(
-        'Earn rewards when users join through your referral link. Transfer accumulated rewards to your balance anytime.'
-      )
-    ).toBeInTheDocument()
+      screen.queryByRole('button', { name: /View referral rewards/ })
+    ).not.toBeInTheDocument()
   })
 
-  test('states the rule using the percentage and count the backend reports', async () => {
-    getAffRebates.mockResolvedValue(
-      respond({ enabled: true, percent: 7, max_times: 2 })
-    )
-    renderCard()
+  test('falls back to zero when the user has never earned a rebate', () => {
+    render(<AffiliateRewardsCard user={{ ...user, aff_quota: 0 }} />)
 
+    expect(screen.getByText('$0')).toBeInTheDocument()
     expect(
-      await screen.findByText(
-        'Friends who sign up with your link earn you a 7% rebate on each of their first 2 top-ups, transferable to your balance anytime.'
-      )
+      screen.getByRole('button', { name: /View referral rewards/ })
     ).toBeInTheDocument()
-  })
-
-  test('lists each rebate with the masked invitee, sequence and amounts', async () => {
-    getAffRebates.mockResolvedValue(
-      respond({
-        enabled: true,
-        percent: 5,
-        max_times: 3,
-        total: 2,
-        items: [
-          {
-            id: 2,
-            invitee: 'u***@ex***.com',
-            topup_money: 20,
-            rebate_quota: 500_000,
-            sequence: 2,
-            created_time: 1_757_000_000,
-          },
-          {
-            id: 1,
-            invitee: '用户 #123',
-            topup_money: 10,
-            rebate_quota: 250_000,
-            sequence: 1,
-            created_time: 1_756_900_000,
-          },
-        ],
-      })
-    )
-    renderCard()
-
-    expect(await screen.findByLabelText('Rebate Details')).toBeInTheDocument()
-    expect(screen.getByText('u***@ex***.com')).toBeInTheDocument()
-    expect(screen.getByText('用户 #123')).toBeInTheDocument()
-    expect(screen.getByText(/Top-up 2\/3/)).toBeInTheDocument()
-    expect(screen.getByText(/Top-up 1\/3/)).toBeInTheDocument()
-    expect(screen.getByText(/Paid 20/)).toBeInTheDocument()
-    expect(screen.getByText(/Paid 10/)).toBeInTheDocument()
-    // Two rows, two rebate amounts, nothing collapsed away.
-    expect(screen.getAllByText(/^\+/)).toHaveLength(2)
-  })
-
-  test('shows an empty state once the feature is on but nothing is earned', async () => {
-    getAffRebates.mockResolvedValue(
-      respond({ enabled: true, percent: 5, max_times: 3, total: 0, items: [] })
-    )
-    renderCard()
-
-    expect(
-      await screen.findByText(
-        'No rebates yet. Share your referral link to start earning.'
-      )
-    ).toBeInTheDocument()
-  })
-
-  test('paginates only when there is more than one page of rebates', async () => {
-    getAffRebates.mockResolvedValue(
-      respond({
-        enabled: true,
-        percent: 5,
-        max_times: 3,
-        total: 12,
-        page_size: 5,
-        items: [
-          {
-            id: 1,
-            invitee: 'u***@ex***.com',
-            topup_money: 10,
-            rebate_quota: 250_000,
-            sequence: 1,
-            created_time: 1_756_900_000,
-          },
-        ],
-      })
-    )
-    renderCard()
-
-    expect(await screen.findByLabelText('Next page')).toBeEnabled()
-    expect(screen.getByLabelText('Previous page')).toBeDisabled()
   })
 })
 
-// The component renders i18n keys; these assertions pin the text users actually
-// read, including the renamed balance label required by the rebate rules.
 describe('AffiliateRewardsCard translations', () => {
-  const rule =
-    'Friends who sign up with your link earn you a {{percent}}% rebate on each of their first {{maxTimes}} top-ups, transferable to your balance anytime.'
-
-  test('renames the balance label in both shipped languages', () => {
-    expect(en.translation['Available to transfer']).toBe('Available')
-    expect(zh.translation['Available to transfer']).toBe('可转移')
+  test('the entry-bar action is translated in both hand-written locales', () => {
+    expect(en.translation['View referral rewards']).toBe(
+      'View referral rewards'
+    )
+    expect(zh.translation['View referral rewards']).toBe('查看邀请返利')
   })
 
-  test('carries the rebate rule and detail labels', () => {
-    expect(en.translation[rule]).toBe(rule)
-    expect(zh.translation[rule]).toBe(
-      '好友通过你的链接注册后，前 {{maxTimes}} 次充值你各得 {{percent}}% 返利，可随时转入余额使用。'
-    )
-    const detailKeys = [
-      'Rebate Details',
-      'Paid',
-      'Top-up {{sequence}}/{{maxTimes}}',
-      'No rebates yet. Share your referral link to start earning.',
-    ] as const
-    for (const key of detailKeys) {
-      expect(en.translation[key]).toBeTruthy()
-      expect(zh.translation[key]).toBeTruthy()
-    }
+  test('keeps the balance label the rebate rules introduced', () => {
+    expect(en.translation['Available to transfer']).toBe('Available')
+    expect(zh.translation['Available to transfer']).toBe('可转移')
   })
 })

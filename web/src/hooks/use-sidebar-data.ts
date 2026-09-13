@@ -24,6 +24,7 @@ import {
   FileText,
   FlaskConical,
   Gauge,
+  Gift,
   Key,
   LayoutDashboard,
   LifeBuoy,
@@ -123,6 +124,15 @@ export function useSidebarData(): SidebarData {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,
+          },
+          {
+            // Deliberately not gated on `AffRebateEnabled`: the invite link,
+            // `aff_quota` and the transfer-to-balance action all predate the
+            // rebate feature, so the entry stays put and only the rebate
+            // blocks inside the page follow that switch.
+            title: t('Referral Program'),
+            url: '/affiliate',
+            icon: Gift,
           },
           {
             title: t('Quota Recharge'),
