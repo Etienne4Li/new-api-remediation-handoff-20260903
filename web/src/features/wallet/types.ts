@@ -134,6 +134,14 @@ export interface TopupInfo {
   amount_options: number[]
   /** Discount rates by amount */
   discount: Record<number, number>
+  /** Whether the top-up bonus promotion is switched on */
+  topup_bonus_enabled?: boolean
+  /**
+   * Bonus threshold -> ratio of the top-up granted as extra balance. Already
+   * filtered by the backend, so every entry here is one the settlement path
+   * would actually grant. Null/absent while the promotion is off.
+   */
+  topup_bonus?: Record<number, number>
   /** Optional topup link for purchasing codes */
   topup_link?: string
   /** Whether Creem topup is enabled */
@@ -156,6 +164,15 @@ export interface TopupInfo {
   payment_compliance_confirmed?: boolean
   /** Current compliance terms version */
   payment_compliance_terms_version?: string
+}
+
+/**
+ * One rung of the top-up bonus ladder: top up at least `threshold` display
+ * units and `ratio` of that amount is credited on top.
+ */
+export interface TopupBonusTier {
+  threshold: number
+  ratio: number
 }
 
 /**

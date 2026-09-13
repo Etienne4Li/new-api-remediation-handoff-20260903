@@ -119,7 +119,12 @@ func GetTopUpInfo(c *gin.Context) {
 		"waffo_pancake_min_topup": setting.WaffoPancakeMinTopUp,
 		"amount_options":          operation_setting.GetPaymentSetting().AmountOptions,
 		"discount":                operation_setting.GetPaymentSetting().AmountDiscount,
-		"topup_link":              common.TopUpLink,
+		// The bonus tiers are sent already filtered, so the wallet advertises
+		// exactly the tiers the settlement path would grant. `topup_bonus` is
+		// null whenever the promotion is off or nothing usable is configured.
+		"topup_bonus_enabled": operation_setting.GetPaymentSetting().TopupBonusEnabled,
+		"topup_bonus":         operation_setting.TopupBonusTiers(),
+		"topup_link":          common.TopUpLink,
 	}
 	common.ApiSuccess(c, data)
 }

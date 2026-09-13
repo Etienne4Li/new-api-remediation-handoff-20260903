@@ -175,7 +175,10 @@ func Redeem(key string, userId int) (quota int, err error) {
 		if result.RowsAffected == 0 {
 			return errors.New("该兑换码已被使用")
 		}
-		return creditTopUpQuota(tx, userId, redemption.Quota, nil)
+		// A redemption code is not a top-up: nothing was paid, so it earns no
+		// top-up bonus even though it shares the atomic credit primitive.
+		_, creditErr := creditTopUpQuota(tx, userId, redemption.Quota, bonusIneligible, nil)
+		return creditErr
 	})
 	if err != nil {
 		common.SysError("redemption failed: " + err.Error())

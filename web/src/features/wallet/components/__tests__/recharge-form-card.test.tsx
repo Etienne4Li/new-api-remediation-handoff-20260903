@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -94,5 +94,111 @@ describe('RechargeFormCard', () => {
 
     await user.click(screen.getByRole('button', { name: 'Order History' }))
     expect(props.onOpenBilling).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('RechargeFormCard top-up bonus', () => {
+  const bonusInfo: TopupInfo = {
+    ...topupInfo,
+    amount_options: [50, 100, 500],
+    topup_bonus_enabled: true,
+    topup_bonus: { 100: 0.01, 200: 0.015, 500: 0.02 },
+  }
+  const bonusPresets = [{ value: 50 }, { value: 100 }, { value: 500 }]
+
+  test('marks the qualifying presets and leaves the rest untouched', () => {
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      selectedPreset: 100,
+      topupAmount: 100,
+    })
+
+    // 100 at 1% and 500 at 2%; 50 clears no threshold.
+    expect(screen.getByText('Extra 1 balance')).toBeInTheDocument()
+    expect(screen.getByText('Extra 10 balance')).toBeInTheDocument()
+    expect(screen.queryByText('Extra 0 balance')).not.toBeInTheDocument()
+    expect(screen.queryByText('Extra 0.5 balance')).not.toBeInTheDocument()
+  })
+
+  test('renders the ladder panel with every configured tier', () => {
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      topupAmount: 100,
+    })
+
+    expect(screen.getByText('Recharge Bonus')).toBeInTheDocument()
+    expect(
+      screen.getByText('Automatically credited when your top-up qualifies')
+    ).toBeInTheDocument()
+    expect(screen.getByText('100+ gets 1% extra')).toBeInTheDocument()
+    expect(screen.getByText('200+ gets 1.5% extra')).toBeInTheDocument()
+    expect(screen.getByText('500+ gets 2% extra')).toBeInTheDocument()
+    expect(
+      screen.getByText('Credited straight to your balance, never expires')
+    ).toBeInTheDocument()
+  })
+
+  test('estimates the bonus for a custom amount and says so when it misses', () => {
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      topupAmount: 300,
+    })
+    // 300 sits in the 200 tier: 1.5% of 300.
+    expect(screen.getByText('Estimated extra balance: 4.5')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Not eligible for a bonus')
+    ).not.toBeInTheDocument()
+
+    cleanup()
+
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      topupAmount: 50,
+    })
+    expect(screen.getByText('Not eligible for a bonus')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/Estimated extra balance/)
+    ).not.toBeInTheDocument()
+  })
+
+  test('renders none of the promotion while the switch is off', () => {
+    renderCard({
+      topupInfo: { ...bonusInfo, topup_bonus_enabled: false },
+      presetAmounts: bonusPresets,
+      topupAmount: 500,
+    })
+
+    expect(screen.queryByText('Recharge Bonus')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Extra .* balance/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Estimated extra balance/)
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('Not eligible for a bonus')
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('Credited straight to your balance, never expires')
+    ).not.toBeInTheDocument()
+    // The rest of the card is untouched.
+    expect(screen.getByText('Add Funds')).toBeInTheDocument()
+  })
+
+  test('renders none of the promotion when no tier is configured', () => {
+    renderCard({
+      topupInfo: { ...bonusInfo, topup_bonus: {} },
+      presetAmounts: bonusPresets,
+      topupAmount: 500,
+    })
+
+    expect(screen.queryByText('Recharge Bonus')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Extra .* balance/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Estimated extra balance/)
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('Add Funds')).toBeInTheDocument()
   })
 })

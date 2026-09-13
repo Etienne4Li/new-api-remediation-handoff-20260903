@@ -26,6 +26,7 @@ import { PaymentSettingsSection } from '../integrations/payment-settings-section
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { TopupBonusSettingsSection } from './topup-bonus-settings-section'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -185,6 +186,19 @@ const BILLING_SECTIONS = [
             settings['payment_setting.compliance_terms_version'] ?? '',
           confirmedAt: settings['payment_setting.compliance_confirmed_at'] ?? 0,
           confirmedBy: settings['payment_setting.compliance_confirmed_by'] ?? 0,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'topup-bonus',
+    titleKey: 'Top-up Bonus',
+    build: (settings: BillingSettings) => (
+      <TopupBonusSettingsSection
+        defaultValues={{
+          TopupBonusEnabled:
+            settings['payment_setting.topup_bonus_enabled'] ?? false,
+          TopupBonus: settings['payment_setting.topup_bonus'] ?? '',
         }}
       />
     ),

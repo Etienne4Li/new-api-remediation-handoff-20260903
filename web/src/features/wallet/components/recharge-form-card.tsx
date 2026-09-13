@@ -22,6 +22,7 @@ import {
   ExternalLink,
   Loader2,
   Receipt,
+  Sparkles,
   WalletCards,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
@@ -46,9 +47,12 @@ import { cn } from '@/lib/utils'
 
 import {
   formatCurrency,
+  formatTopupBonusPercent,
   getDiscountLabel,
   getPaymentIcon,
   getMinTopupAmount,
+  getTopupBonusAmount,
+  getTopupBonusTiers,
   calculatePresetPricing,
 } from '../lib'
 import type {
@@ -150,6 +154,16 @@ export function RechargeFormCard({
     Array.isArray(waffoPayMethods) && waffoPayMethods.length > 0
   const minTopup = getMinTopupAmount(topupInfo)
   const redemptionEnabled = topupInfo?.enable_redemption !== false
+
+  // An empty ladder means the promotion is off or unconfigured, and every part
+  // of it disappears — the card then renders exactly as it did before.
+  const bonusTiers = getTopupBonusTiers(topupInfo)
+  const hasTopupBonus = bonusTiers.length > 0
+  // Ratios apply to the raw top-up amount, which is what the thresholds are
+  // denominated in; multiplying by the exchange rate afterwards puts the result
+  // on the same scale as the amounts shown next to it.
+  const customBonus =
+    getTopupBonusAmount(bonusTiers, topupAmount) * usdExchangeRate
 
   if (loading) {
     return (
@@ -288,6 +302,9 @@ export function RechargeFormCard({
                         discount,
                         usdExchangeRate
                       )
+                      const presetBonus =
+                        getTopupBonusAmount(bonusTiers, preset.value) *
+                        usdExchangeRate
                       return (
                         <Button
                           key={preset.value}
@@ -321,6 +338,13 @@ export function RechargeFormCard({
                               </span>
                             )}
                           </div>
+                          {presetBonus > 0 && (
+                            <div className='mt-0.5 w-full text-xs font-medium text-emerald-600 dark:text-emerald-400'>
+                              {t('Extra {{bonus}} balance', {
+                                bonus: formatCurrency(presetBonus),
+                              })}
+                            </div>
+                          )}
                         </Button>
                       )
                     })}
@@ -377,7 +401,60 @@ export function RechargeFormCard({
                 >
                   {t('Minimum topup amount: {{amount}}', { amount: minTopup })}
                 </p>
+                {hasTopupBonus && (
+                  <output aria-live='polite' className='block text-xs'>
+                    {customBonus > 0 ? (
+                      <span className='font-medium text-emerald-600 dark:text-emerald-400'>
+                        {t('Estimated extra balance: {{bonus}}', {
+                          bonus: formatCurrency(customBonus),
+                        })}
+                      </span>
+                    ) : (
+                      <span className='text-muted-foreground'>
+                        {t('Not eligible for a bonus')}
+                      </span>
+                    )}
+                  </output>
+                )}
               </div>
+
+              {hasTopupBonus && (
+                <div className='space-y-2.5 sm:space-y-3'>
+                  <div className='flex items-center gap-2'>
+                    <IconBadge tone='success' size='xs'>
+                      <Sparkles />
+                    </IconBadge>
+                    <Label className='text-muted-foreground text-xs font-medium uppercase'>
+                      {t('Recharge Bonus')}
+                    </Label>
+                  </div>
+                  <div className='bg-muted/20 space-y-2.5 rounded-lg border p-3'>
+                    <p className='text-muted-foreground text-xs'>
+                      {t('Automatically credited when your top-up qualifies')}
+                    </p>
+                    {/* Wraps instead of scrolling, so the ladder stays usable
+                        on a narrow screen however many tiers are configured. */}
+                    <ul className='flex flex-wrap gap-1.5'>
+                      {bonusTiers.map((tier) => (
+                        <li
+                          key={tier.threshold}
+                          className='bg-background rounded-md border px-2 py-1 text-xs font-medium'
+                        >
+                          {t('{{threshold}}+ gets {{percent}}% extra', {
+                            threshold: formatCurrency(
+                              tier.threshold * usdExchangeRate
+                            ),
+                            percent: formatTopupBonusPercent(tier.ratio),
+                          })}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className='text-muted-foreground text-xs'>
+                      {t('Credited straight to your balance, never expires')}
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div className='space-y-2.5 sm:space-y-3'>
                 <Label className='text-muted-foreground text-xs font-medium uppercase'>

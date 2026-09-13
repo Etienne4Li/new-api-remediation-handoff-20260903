@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -83,11 +84,88 @@ func topUpQuotaMaxCurrent(creditedQuota int) (int, error) {
 	return common.MaxWalletQuota - creditedQuota, nil
 }
 
+// topUpBonusEligibility states whether a credit may earn the configured top-up
+// bonus.
+//
+// It is a required argument rather than a property of creditTopUpQuota because
+// the function is not exclusive to top-ups: Redeem() credits redemption codes
+// through it too, and those must never earn a bonus. Making every call site
+// spell out its intent means a new one cannot inherit the wrong answer by
+// omission.
+type topUpBonusEligibility bool
+
+const (
+	bonusEligible   topUpBonusEligibility = true
+	bonusIneligible topUpBonusEligibility = false
+)
+
+// topUpBonusAmount converts a credited quota back into the amount unit the
+// bonus thresholds are configured in — the same unit the recharge form asks the
+// user for.
+//
+// Deriving the tier from the credited quota rather than from TopUp.Amount or
+// TopUp.Money is what keeps the six settlement paths on one scale: Creem stores
+// an order's quota straight in TopUp.Amount while every other provider
+// multiplies a currency amount by QuotaPerUnit, so the order fields are not
+// comparable across providers but the credited quota always is.
+func topUpBonusAmount(creditedQuota int) decimal.Decimal {
+	quota := decimal.NewFromInt(int64(creditedQuota))
+	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
+		// In tokens mode the recharge form's amount is itself a quota, so the
+		// thresholds are already denominated in it and no conversion applies.
+		return quota
+	}
+	if common.QuotaPerUnit <= 0 {
+		return decimal.Zero
+	}
+	return quota.Div(decimal.NewFromFloat(common.QuotaPerUnit))
+}
+
+// topUpBonusQuota returns the extra quota a credit of creditedQuota earns.
+//
+// The ratio is applied to the quota directly: quota and display amount differ
+// only by a constant factor, so scaling either side yields the same bonus and
+// the conversion never has to be undone. The result is floored because a
+// fractional quota is not representable in the wallet.
+func topUpBonusQuota(creditedQuota int) int {
+	if creditedQuota <= 0 {
+		return 0
+	}
+	ratio := operation_setting.TopupBonusRatio(topUpBonusAmount(creditedQuota))
+	if ratio.LessThanOrEqual(decimal.Zero) {
+		return 0
+	}
+	bonus, err := common.WalletQuotaFromDecimalStrict(
+		decimal.NewFromInt(int64(creditedQuota)).Mul(ratio).Floor(),
+	)
+	if err != nil || bonus <= 0 {
+		return 0
+	}
+	return bonus
+}
+
+// topUpCreditWithBonus resolves what a credit actually adds to the wallet: the
+// credited quota plus its bonus.
+//
+// Both the pre-payment capacity check and the settlement update go through it,
+// so they cannot disagree about how much the wallet is about to grow. Letting
+// them disagree is a real money path: the order would pass checkout and then
+// fail to settle after the user had already paid.
+func topUpCreditWithBonus(creditedQuota int, eligibility topUpBonusEligibility) (total int, bonus int) {
+	if eligibility == bonusEligible {
+		bonus = topUpBonusQuota(creditedQuota)
+	}
+	return creditedQuota + bonus, bonus
+}
+
 // ValidateTopUpQuotaCapacity performs the user-facing pre-payment check. The
 // settlement path repeats the same invariant with an atomic conditional
 // update, because the wallet balance can change after checkout creation.
+//
+// Only top-up checkout reaches this function, so the bonus always counts.
 func ValidateTopUpQuotaCapacity(userId int, creditedQuota int) error {
-	maxCurrentQuota, err := topUpQuotaMaxCurrent(creditedQuota)
+	totalQuota, _ := topUpCreditWithBonus(creditedQuota, bonusEligible)
+	maxCurrentQuota, err := topUpQuotaMaxCurrent(totalQuota)
 	if err != nil {
 		return err
 	}
@@ -105,36 +183,63 @@ func ValidateTopUpQuotaCapacity(userId int, creditedQuota int) error {
 // creditTopUpQuota atomically enforces the wallet ceiling while adding quota.
 // Keeping the predicate and increment in one UPDATE prevents two
 // concurrent callbacks from both passing a separate read/check.
-func creditTopUpQuota(tx *gorm.DB, userId int, creditedQuota int, updates map[string]interface{}) error {
-	maxCurrentQuota, err := topUpQuotaMaxCurrent(creditedQuota)
+//
+// The top-up bonus rides along inside that same UPDATE and is included in the
+// ceiling predicate. It deliberately does not get its own hook or its own
+// table: settling it with the main credit means it inherits the caller's
+// pending -> success transition, which is what makes a replayed payment
+// callback grant it exactly once.
+//
+// It returns the bonus that was granted so the caller can sync the quota cache
+// and write the audit trail after the transaction commits.
+func creditTopUpQuota(tx *gorm.DB, userId int, creditedQuota int, eligibility topUpBonusEligibility, updates map[string]interface{}) (int, error) {
+	totalQuota, bonusQuota := topUpCreditWithBonus(creditedQuota, eligibility)
+	maxCurrentQuota, err := topUpQuotaMaxCurrent(totalQuota)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	updateFields := make(map[string]interface{}, len(updates)+1)
 	for key, value := range updates {
 		updateFields[key] = value
 	}
-	updateFields["quota"] = gorm.Expr("quota + ?", creditedQuota)
+	updateFields["quota"] = gorm.Expr("quota + ?", totalQuota)
 
 	result := tx.Model(&User{}).
 		Where("id = ? AND quota <= ?", userId, maxCurrentQuota).
 		Updates(updateFields)
 	if result.Error != nil {
-		return result.Error
+		return 0, result.Error
 	}
 	if result.RowsAffected == 1 {
-		return nil
+		return bonusQuota, nil
 	}
 
 	var count int64
 	if err := tx.Model(&User{}).Where("id = ?", userId).Count(&count).Error; err != nil {
-		return err
+		return 0, err
 	}
 	if count == 0 {
-		return gorm.ErrRecordNotFound
+		return 0, gorm.ErrRecordNotFound
 	}
-	return ErrTopUpQuotaLimitExceeded
+	return 0, ErrTopUpQuotaLimitExceeded
+}
+
+// settleTopUpBonus performs the post-commit half of a granted bonus: it pushes
+// the bonus into the quota cache the caller already synced for the main credit,
+// and records the audit row an operator needs to reconcile how much has been
+// given away.
+//
+// Like the credit-cache sync it must run only after the transaction commits,
+// and like GrantAffRebate it never reports failure: by the time it runs the
+// quota is already in the wallet, so a logging problem must not turn a
+// successful top-up into a failed one.
+func settleTopUpBonus(topUp *TopUp, creditedQuota int, bonusQuota int, callerIp string) {
+	if topUp == nil || bonusQuota <= 0 {
+		return
+	}
+	syncCreditUserQuotaCache(topUp.UserId, bonusQuota, "topup bonus")
+	RecordTopUpBonusLog(topUp.UserId, creditedQuota, bonusQuota, callerIp, topUp.PaymentMethod, topUp.PaymentProvider)
 }
 
 func (topUp *TopUp) Update() error {
@@ -209,6 +314,7 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, paidMoney string, 
 	}
 
 	var quotaToAdd int
+	var bonusQuota int
 	topUp := &TopUp{}
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
@@ -246,7 +352,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, paidMoney string, 
 		if err := tx.Save(topUp).Error; err != nil {
 			return err
 		}
-		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quotaToAdd, bonusEligible, nil)
+		return creditErr
 	})
 	if err != nil {
 		if errors.Is(err, ErrEpayAmountMismatch) {
@@ -260,9 +368,10 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, paidMoney string, 
 		return true, nil
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "epay topup")
+	settleTopUpBonus(topUp, quotaToAdd, bonusQuota, callerIp)
 	GrantAffRebate(topUp)
 
-	common.SysLog(fmt.Sprintf("易支付充值成功 trade_no=%s user_id=%d quota_to_add=%d money=%.2f", topUp.TradeNo, topUp.UserId, quotaToAdd, topUp.Money))
+	common.SysLog(fmt.Sprintf("易支付充值成功 trade_no=%s user_id=%d quota_to_add=%d bonus_quota=%d money=%.2f", topUp.TradeNo, topUp.UserId, quotaToAdd, bonusQuota, topUp.Money))
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), callerIp, topUp.PaymentMethod, PaymentProviderEpay)
 	return false, nil
 }
@@ -273,6 +382,7 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 	}
 
 	var quota int
+	var bonusQuota int
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -307,9 +417,11 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota
 		}
-		return creditTopUpQuota(tx, topUp.UserId, quota, map[string]interface{}{
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quota, bonusEligible, map[string]interface{}{
 			"stripe_customer": customerId,
 		})
+		return creditErr
 	})
 
 	if err != nil {
@@ -317,6 +429,7 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		return errors.New("充值失败，请稍后重试")
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quota, "stripe topup")
+	settleTopUpBonus(topUp, quota, bonusQuota, callerIp)
 	GrantAffRebate(topUp)
 
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%d", logger.FormatQuota(quota), topUp.Amount), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
@@ -494,6 +607,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 
 	var userId int
 	var quotaToAdd int
+	var bonusQuota int
 	var payMoney float64
 	var paymentMethod string
 	// settled is true only when this call moved a pending order to success, so a
@@ -541,8 +655,10 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		}
 
 		// 增加用户额度（立即写库，保持一致性）
-		if err := creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil); err != nil {
-			return err
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quotaToAdd, bonusEligible, nil)
+		if creditErr != nil {
+			return creditErr
 		}
 
 		userId = topUp.UserId
@@ -559,6 +675,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 	// 事务外记录日志，避免阻塞
 	syncCreditUserQuotaCache(userId, quotaToAdd, "manual topup")
 	if settled {
+		settleTopUpBonus(topUp, quotaToAdd, bonusQuota, callerIp)
 		// A back-filled order is a real payment the callback never delivered, so
 		// it earns a rebate like any other settled top-up. Skipping it would be a
 		// double loss for the inviter: the order already counts towards the
@@ -574,6 +691,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 	}
 
 	var quota int
+	var bonusQuota int
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -626,7 +744,9 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			}
 		}
 
-		return creditTopUpQuota(tx, topUp.UserId, quota, updateFields)
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quota, bonusEligible, updateFields)
+		return creditErr
 	})
 
 	if err != nil {
@@ -634,6 +754,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		return errors.New("充值失败，请稍后重试")
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quota, "creem topup")
+	settleTopUpBonus(topUp, quota, bonusQuota, callerIp)
 	GrantAffRebate(topUp)
 
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
@@ -647,6 +768,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 	}
 
 	var quotaToAdd int
+	var bonusQuota int
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -685,7 +807,9 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 			return err
 		}
 
-		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quotaToAdd, bonusEligible, nil)
+		return creditErr
 	})
 
 	if err != nil {
@@ -693,6 +817,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 		return errors.New("充值失败，请稍后重试")
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "waffo topup")
+	settleTopUpBonus(topUp, quotaToAdd, bonusQuota, callerIp)
 	GrantAffRebate(topUp)
 
 	if quotaToAdd > 0 {
@@ -708,6 +833,7 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 	}
 
 	var quotaToAdd int
+	var bonusQuota int
 	topUp := &TopUp{}
 
 	refCol := "`trade_no`"
@@ -746,7 +872,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return err
 		}
 
-		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
+		var creditErr error
+		bonusQuota, creditErr = creditTopUpQuota(tx, topUp.UserId, quotaToAdd, bonusEligible, nil)
+		return creditErr
 	})
 
 	if err != nil {
@@ -754,6 +882,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 		return errors.New("充值失败，请稍后重试")
 	}
 	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, "waffo pancake topup")
+	// This provider's callback carries no client IP; the audit row records the
+	// order's payment method either way.
+	settleTopUpBonus(topUp, quotaToAdd, bonusQuota, "")
 	GrantAffRebate(topUp)
 
 	if quotaToAdd > 0 {

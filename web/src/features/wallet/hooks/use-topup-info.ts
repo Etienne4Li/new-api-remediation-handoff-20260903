@@ -125,7 +125,12 @@ function parseAmountOptions(data: unknown): number[] {
     .filter((item) => Number.isFinite(item) && item > 0)
 }
 
-function parseDiscountMap(data: unknown): Record<number, number> {
+/**
+ * Parse an amount -> rate map. Shared by the discount table and the top-up
+ * bonus ladder: both arrive as a numeric-keyed object (or its JSON string) and
+ * both are dropped wholesale when the payload is not one.
+ */
+function parseRateMap(data: unknown): Record<number, number> {
   if (!data) {
     return {}
   }
@@ -190,7 +195,8 @@ export function useTopupInfo() {
           response.data.stripe_min_topup
         ),
         amount_options: parseAmountOptions(response.data.amount_options),
-        discount: parseDiscountMap(response.data.discount),
+        discount: parseRateMap(response.data.discount),
+        topup_bonus: parseRateMap(response.data.topup_bonus),
         creem_products: parseCreemProducts(response.data.creem_products),
         waffo_pay_methods: parseWaffoPayMethods(
           response.data.waffo_pay_methods

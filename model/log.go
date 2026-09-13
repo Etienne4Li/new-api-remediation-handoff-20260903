@@ -328,6 +328,80 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 	}
 }
 
+// topUpBonusLogPrefix opens the content of every top-up bonus log row.
+//
+// Together with a non-zero Quota it is what identifies a bonus grant, which is
+// how the promotion stays auditable without a new table or a new column: no
+// other writer of LogTypeTopup fills Quota, and none of them starts its content
+// with this marker. TestSumTopUpBonusQuotaIgnoresOtherTopUpLogs pins both
+// halves of that invariant.
+const topUpBonusLogPrefix = "充值赠送"
+
+// RecordTopUpBonusLog writes the audit row for one granted top-up bonus. The
+// bonus lands in Quota so a time range can be summed, and the content spells
+// out both sides of the grant for a human reading the log list.
+func RecordTopUpBonusLog(userId int, creditedQuota int, bonusQuota int, callerIp string, paymentMethod string, paymentProvider string) {
+	if bonusQuota <= 0 {
+		return
+	}
+	username, _ := GetUsernameById(userId, false)
+	other := NewLogOther()
+	other.MergeAdmin(map[string]interface{}{
+		"server_ip":        common.GetIp(),
+		"node_name":        common.NodeName,
+		"caller_ip":        callerIp,
+		"payment_method":   paymentMethod,
+		"payment_provider": paymentProvider,
+		"credited_quota":   creditedQuota,
+		"bonus_quota":      bonusQuota,
+		"version":          common.Version,
+	})
+	log := &Log{
+		UserId:    userId,
+		Username:  username,
+		CreatedAt: common.GetTimestamp(),
+		Type:      LogTypeTopup,
+		Content: fmt.Sprintf("%s %s（充值 %s，赠送 %s）", topUpBonusLogPrefix,
+			logger.LogQuota(bonusQuota), logger.FormatQuota(creditedQuota), logger.FormatQuota(bonusQuota)),
+		Quota: bonusQuota,
+		Ip:    callerIp,
+		Other: other.JSONString(),
+	}
+	if err := createLog(log); err != nil {
+		common.SysLog("failed to record topup bonus log: " + err.Error())
+	}
+}
+
+// SumTopUpBonusQuota totals the top-up bonus granted between the two inclusive
+// unix timestamps; a non-positive bound is treated as unbounded on that side.
+//
+// This is the "how much have we given away" query SPEC 3.6 asks for. It is a
+// function rather than a documented snippet so the marker/Quota invariant it
+// depends on has somewhere to be tested.
+func SumTopUpBonusQuota(startTimestamp int64, endTimestamp int64) (int64, error) {
+	query := LOG_DB.Model(&Log{}).
+		Where("type = ? AND quota > 0", LogTypeTopup).
+		// The marker has no LIKE metacharacters, so the pattern needs no escaping.
+		Where("content LIKE ?", topUpBonusLogPrefix+"%")
+	if startTimestamp > 0 {
+		query = query.Where("created_at >= ?", startTimestamp)
+	}
+	if endTimestamp > 0 {
+		query = query.Where("created_at <= ?", endTimestamp)
+	}
+
+	// SUM over no rows is NULL, which will not scan into int64.
+	var total *int64
+	if err := query.Select("SUM(quota)").Scan(&total).Error; err != nil {
+		common.SysError("failed to sum topup bonus quota: " + err.Error())
+		return 0, errors.New("统计充值赠送额度失败")
+	}
+	if total == nil {
+		return 0, nil
+	}
+	return *total, nil
+}
+
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other *LogOther) {
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
