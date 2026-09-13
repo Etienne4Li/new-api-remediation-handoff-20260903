@@ -186,7 +186,10 @@ export function RechargeFormCard({
               <div className='grid grid-cols-2 gap-3 sm:grid-cols-4'>
                 {Array.from({ length: 8 }, (_, index) => `preset-${index}`).map(
                   (key) => (
-                    <Skeleton key={key} className='h-[72px] rounded-lg' />
+                    // Same floor as the real card below, so the placeholder
+                    // does not shrink on load. A hard `[72px]` was taller than
+                    // the mobile card and stopped tracking `--spacing`.
+                    <Skeleton key={key} className='h-16 rounded-lg sm:h-18' />
                   )
                 )}
               </div>
@@ -312,15 +315,24 @@ export function RechargeFormCard({
                           variant='outline'
                           aria-pressed={selectedPreset === preset.value}
                           className={cn(
-                            'flex min-h-16 flex-col items-start rounded-lg px-3 py-2.5 text-left whitespace-normal sm:min-h-[72px] sm:p-4',
+                            // `h-auto` is load-bearing: the button size variant
+                            // ships a fixed `h-8`, which `min-h-*` cannot undo
+                            // (different property). Without it the card is
+                            // pinned at its floor and any extra row — a
+                            // discount, a bonus, a longer translation — spills
+                            // past the border instead of growing the card.
+                            // The `min-h-*` pair is only a floor, and both
+                            // halves scale with `--spacing` so the card keeps
+                            // step with `data-theme-scale`.
+                            'flex h-auto min-h-16 min-w-0 flex-col items-start justify-start rounded-lg px-3 py-2.5 text-left break-words whitespace-normal sm:min-h-18 sm:p-4',
                             selectedPreset === preset.value
                               ? 'border-primary bg-primary/5 text-primary ring-primary/20 ring-1'
                               : 'border-border hover:border-primary/40 hover:bg-muted/30'
                           )}
                           onClick={() => onSelectPreset(preset)}
                         >
-                          <div className='flex w-full items-center justify-between'>
-                            <div className='text-base font-semibold sm:text-lg'>
+                          <div className='flex w-full min-w-0 items-center justify-between gap-2'>
+                            <div className='min-w-0 text-base font-semibold sm:text-lg'>
                               {formatNumber(displayValue)}
                             </div>
                             {hasDiscount && (
@@ -490,7 +502,10 @@ export function RechargeFormCard({
                               ? `${method.name}. ${disabledReason}`
                               : method.name
                           }
-                          className='min-h-14 min-w-0 justify-start gap-2 rounded-lg px-3 py-2 text-left'
+                          // Same trap as the preset cards: the label stacks
+                          // over a "Minimum: N" line, so the fixed `h-8` from
+                          // the size variant has to be released.
+                          className='h-auto min-h-14 min-w-0 justify-start gap-2 rounded-lg px-3 py-2 text-left'
                         >
                           {paymentLoading === method.type ? (
                             <Loader2 className='h-4 w-4 animate-spin' />
@@ -589,7 +604,9 @@ export function RechargeFormCard({
                                 ? `${method.name}. ${disabledReason}`
                                 : method.name
                             }
-                            className='min-h-14 min-w-0 justify-start gap-2 rounded-lg px-3 py-2 text-left'
+                            // Same two-line label as the standard methods
+                            // above, so it needs the same `h-auto`.
+                            className='h-auto min-h-14 min-w-0 justify-start gap-2 rounded-lg px-3 py-2 text-left'
                           >
                             {methodIcon}
                             <span className='flex min-w-0 flex-col items-start gap-0.5'>

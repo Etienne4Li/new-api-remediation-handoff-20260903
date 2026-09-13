@@ -18,7 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, test, vi } from 'vitest'
+import i18next from 'i18next'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+
+import ja from '@/i18n/locales/ja.json'
+import zh from '@/i18n/locales/zh.json'
+import { describeHeightLock } from '@/test-utils/height-contract'
 
 import type { TopupInfo } from '../../types'
 import { RechargeFormCard } from '../recharge-form-card'
@@ -201,4 +206,122 @@ describe('RechargeFormCard top-up bonus', () => {
     ).not.toBeInTheDocument()
     expect(screen.getByText('Add Funds')).toBeInTheDocument()
   })
+})
+
+/**
+ * The bonus row made every qualifying preset card a three-line card, and the
+ * card is a `<Button>` — whose size variant ships a fixed `h-8` that a
+ * `min-h-*` cannot override. The rows were centred in a box that could not
+ * grow, so the amount pushed out through the top border and the bonus line
+ * through the bottom.
+ *
+ * jsdom does not lay out, so these assert the class contract on the *rendered*
+ * element: the class attribute below is tailwind-merge's output, so a passing
+ * assertion is proof that no fixed height survived the merge.
+ */
+describe('RechargeFormCard card-shaped buttons grow with their content', () => {
+  const bonusInfo: TopupInfo = {
+    ...topupInfo,
+    amount_options: [50, 100, 500],
+    topup_bonus_enabled: true,
+    topup_bonus: { 100: 0.01, 200: 0.015, 500: 0.02 },
+  }
+  const bonusPresets = [{ value: 50 }, { value: 100 }, { value: 500 }]
+
+  function presetCards() {
+    return screen
+      .getAllByRole('button')
+      .filter((button) => button.hasAttribute('aria-pressed'))
+  }
+
+  function classOf(element: Element) {
+    return element.getAttribute('class') ?? ''
+  }
+
+  afterEach(async () => {
+    await i18next.changeLanguage('en')
+  })
+
+  test('a preset card with a bonus row pins no height', () => {
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      selectedPreset: 500,
+      topupAmount: 500,
+    })
+
+    const cards = presetCards()
+    expect(cards).toHaveLength(3)
+    // The card really is three rows here, not two.
+    expect(screen.getByText('Extra 10 balance')).toBeInTheDocument()
+
+    for (const card of cards) {
+      expect(describeHeightLock(classOf(card)), classOf(card)).toBeNull()
+      // The floor may stay — it is only a floor.
+      expect(classOf(card)).toContain('min-h-16')
+    }
+  })
+
+  test('a preset card without a bonus row pins no height either', () => {
+    renderCard()
+
+    for (const card of presetCards()) {
+      expect(describeHeightLock(classOf(card)), classOf(card)).toBeNull()
+    }
+  })
+
+  test('the payment method button pins no height', () => {
+    renderCard()
+
+    // This one stacks too: the name sits above a minimum-top-up line.
+    const payment = screen.getByRole('button', { name: /Card Pay/ })
+    expect(payment.querySelector('span.flex-col')?.children).toHaveLength(2)
+    expect(describeHeightLock(classOf(payment)), classOf(payment)).toBeNull()
+  })
+
+  test('the preset card lets its text wrap rather than run past the border', () => {
+    // The Button base is `whitespace-nowrap` and grid items default to
+    // `min-width: auto`, so without these a long locale overflows sideways at
+    // 375px instead of wrapping into the (now growable) card.
+    renderCard({
+      topupInfo: bonusInfo,
+      presetAmounts: bonusPresets,
+      topupAmount: 500,
+    })
+
+    const card = presetCards()[0]
+    expect(classOf(card)).toContain('whitespace-normal')
+    expect(classOf(card)).not.toContain('whitespace-nowrap')
+    expect(classOf(card)).toContain('break-words')
+    expect(classOf(card)).toContain('min-w-0')
+  })
+
+  test.each([
+    ['ja', ja.translation, 'Extra 10 balance'],
+    ['zh', zh.translation, '额外 10 余额'],
+  ])(
+    'holds with the real %s bonus copy, which is the widest row',
+    async (language, translation, bonusRow) => {
+      i18next.addResourceBundle(
+        language,
+        'translation',
+        translation,
+        true,
+        true
+      )
+      await i18next.changeLanguage(language)
+
+      renderCard({
+        topupInfo: bonusInfo,
+        presetAmounts: bonusPresets,
+        selectedPreset: 500,
+        topupAmount: 500,
+      })
+
+      expect(screen.getByText(bonusRow)).toBeInTheDocument()
+      for (const card of presetCards()) {
+        expect(describeHeightLock(classOf(card)), classOf(card)).toBeNull()
+      }
+    }
+  )
 })
